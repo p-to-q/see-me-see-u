@@ -187,7 +187,9 @@ if (mode === 'swap') {
   await sleep(6000);   // replay settles
   step(`raf count ${await evalJs('window.__probe.raf.length')}`);
 } else {
-  await send('Page.navigate', { url: `${base}/?theme=porcelain&debug=1` });
+  // deeplink 也必须吃 QUERY：Q3 的历史 A/M/R 场原以为钉了 seed=7，实际这里曾把 QUERY 丢掉，
+  // “同一种子 A/B”因此不成立（docs/48 §10.4）。两条入口必须共用同一组实验变量。
+  await send('Page.navigate', { url: `${base}/?theme=porcelain&debug=1${QUERY}` });
   const pageReady = await waitFor(`location.search.includes('theme=porcelain') && document.readyState === 'complete'`, 30000);
   if (!pageReady) { clearInterval(reloadGuard); kill(); process.exit(1); }
   guardedNavigationCount = topLevelNavigations;

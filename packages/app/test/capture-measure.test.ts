@@ -32,6 +32,11 @@ test('平滑度探针显式接收并检查假摄像头文件，结果记录运�
   assert.match(probe, /measuredRafFps/);
 });
 
+test('swap 与 deeplink 两条入口都带上 QUERY，固定种子的 A/B 才是真的同一场', () => {
+  assert.match(probe, /url: `\$\{base\}\/\?debug=1\$\{QUERY\}`/);
+  assert.match(probe, /url: `\$\{base\}\/\?theme=porcelain&debug=1\$\{QUERY\}`/);
+});
+
 test('冷缓存探针使用系统临时目录，并在退出时清掉 Chrome profile', () => {
   assert.match(probe, /mkdtempSync\(join\(tmpdir\(\), 'smu-capture-'\)\)/);
   assert.match(probe, /process\.once\('exit',/);
