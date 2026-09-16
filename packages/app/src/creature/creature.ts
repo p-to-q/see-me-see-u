@@ -25,7 +25,7 @@ import { harmonize } from '../../../core/src/palette.ts';
 import { ALL_SLOT_KEYS } from '../../../core/src/slots.ts';
 import { BUDGET, MATERIAL, MORPH, TIME } from '../../../core/src/tuning.ts';
 import type {
-  Genome, MaterialDef, MaterialRole, PartMeta, Presence, Skeleton, Slot, SlotKey, SlotPick,
+  Genome, MaterialDef, MaterialRole, PartMeta, Presence, Skeleton, Slot, SlotKey, SlotPick, Tier,
 } from '../../../core/src/types.ts';
 import type { PartLibrary } from '../assets/library.ts';
 import { assemble, partIdsOf, type PartInstance, type SlotRender } from './assemble.ts';
@@ -95,11 +95,27 @@ export interface Creature {
   /** 伴随身体在场时主身体留不留描边（`creature/people-budget.ts` 的结论） */
   setOutlineWithCompanions(on: boolean): void;
 
+  /**
+   * 为尚未出现的 genome 建立**将来真正会采用的同一批桶**。调用方一次只让 `next()`
+   * 暴露一个桶，走过一帧真实渲染后立刻 `park()`；失败或来不及就什么也不暖，正式成型照旧现建。
+   */
+  prepareBuckets(g: Genome, sk: Skeleton): CreatureBucketWarmPlan;
+  /** 取消尚未上场的桶保留；桶本身走原来的空闲 TTL，不在取消当帧集中 dispose */
+  clearPreparedBuckets(): void;
+
   /** 挂到 scene 上的根节点 */
   readonly object: THREE.Group;
   readonly genome: Genome | null;
   readonly stats: CreatureStats;
   dispose(): void;
+}
+
+export interface CreatureBucketWarmPlan {
+  /** 暴露下一个桶；false = 全部走完或准备失败 */
+  next(): boolean;
+  /** 收起此刻暴露的桶；幂等，取消 / render 抛错时也必须调用 */
+  park(): void;
+  readonly done: boolean;
 }
 
 export interface CreatureOptions {
@@ -159,6 +175,8 @@ interface MeshEntry {
   trisPerInstance: number;
   /** 连续多少帧没被用到 —— 换材质/换部件后回收空 mesh，免得 draw call 慢慢长胖 */
   idleFrames: number;
+  /** 预备桶在目标档位出现前不能被普通空桶回收；真正走到这档后恢复原来的 TTL */
+  preparedUntilTier: Tier | null;
   /**
    * 描边外壳（只在 `toon` 下存在）。**和填充共用同一个 `instanceMatrix`**：
    * 矩阵每帧只写一遍，外壳白拿 —— 这是这条路径几乎不吃 CPU 的原因。
@@ -249,9 +267,9 @@ export function createCreature(opt: CreatureOptions): Creature {
    * 的结果（`core/palette.ts`）。同一个 `matte.ash` 挂在瓷身上和挂在异形身上不是同一块材质，
    * 键不带主色就会拿错缓存 —— 换个物种，旧材质还挂在那儿。
    */
-  function materialIdFor(role: MaterialRole): string {
-    const id = genome?.materials?.[role] ?? 'proto.clay';
-    return `${id}@${genome?.materials?.primary ?? id}@${role}`;
+  function materialIdFor(role: MaterialRole, source: Genome | null = genome): string {
+    const id = source?.materials?.[role] ?? 'proto.clay';
+    return `${id}@${source?.materials?.primary ?? id}@${role}`;
   }
 
   function materialFor(materialKey: string): THREE.Material {
@@ -396,7 +414,7 @@ export function createCreature(opt: CreatureOptions): Creature {
       const pos = geo.getAttribute('position');
       stats.buckets++;
       e = {
-        mesh, partId, materialId, capacity, idleFrames: 0, outline,
+        mesh, partId, materialId, capacity, idleFrames: 0, preparedUntilTier: null, outline,
         trisPerInstance: Math.floor((idx ? idx.count : pos ? pos.count : 0) / 3),
       };
       meshes.set(key, e);
@@ -552,6 +570,9 @@ export function createCreature(opt: CreatureOptions): Creature {
         // 有伴随身体的时候按"每具一份"预留容量：第二个人进画不重建桶
         const need = companionsMax > 0 ? Math.max(n, (primaryCounts.get(key) ?? 1) * (1 + companionsMax)) : n;
         const e = entryFor(key, spec.partId, materialIdFor(spec.materialRole), spec.mirrored, need, spec.slot);
+        if (e.preparedUntilTier !== null && genome && genome.tier >= e.preparedUntilTier) {
+          e.preparedUntilTier = null;
+        }
         e.mesh.count = n;
         e.mesh.visible = true;
         e.idleFrames = 0;
@@ -576,6 +597,12 @@ export function createCreature(opt: CreatureOptions): Creature {
         e.mesh.count = 0;
         e.mesh.visible = false;
         if (e.outline) { e.outline.count = 0; e.outline.visible = false; }
+        // 保留一直持续到**这个桶真的被 pose 采用**。只看 `genome.tier` 不够：remorph
+        // 先换 genome，再把十几个槽位分批交叉淡入；排在队尾的桶可能等超过普通 TTL。
+        if (e.preparedUntilTier !== null) {
+          e.idleFrames = 0;
+          continue;
+        }
         if (++e.idleFrames > IDLE_FRAMES_BEFORE_DISPOSE) disposeEntry(key);
       }
 
@@ -679,6 +706,73 @@ export function createCreature(opt: CreatureOptions): Creature {
       companions = companionsMax > 0 && Array.isArray(list) ? list.slice(0, companionsMax) : [];
     },
     setOutlineWithCompanions(on) { outlineWithCompanions = !!on; },
+
+    prepareBuckets(g, sk) {
+      let instances: PartInstance[];
+      try {
+        instances = assemble(g, sk, library, { maxInstances });
+      } catch {
+        return { next: () => false, park: () => undefined, done: true };
+      }
+      const planned = new Map<string, { count: number; spec: PartInstance; materialId: string }>();
+      for (const inst of instances) {
+        const materialId = materialIdFor(inst.materialRole, g);
+        const key = bucketKey(inst.partId, inst.mirrored, materialId);
+        const row = planned.get(key);
+        if (row) row.count++;
+        else planned.set(key, { count: 1, spec: inst, materialId });
+      }
+      const primed: MeshEntry[] = [];
+      for (const [key, row] of planned) {
+        const need = row.count * (1 + companionsMax);
+        const e = entryFor(key, row.spec.partId, row.materialId, row.spec.mirrored, need, row.spec.slot);
+        // 相邻档位经常沿用同一个部件；同一个 live Mesh 真渲染一次就够，后面的计划
+        // 只把保留期限延长，不再白占一帧重复提交。
+        const alreadyPrepared = e.preparedUntilTier !== null;
+        e.preparedUntilTier = e.preparedUntilTier === null
+          ? g.tier
+          : Math.max(e.preparedUntilTier, g.tier) as Tier;
+        // 调用方只在资源队列清空后准备。这里已经用当前几何重建好这一桶，之前同 part 的
+        // “到货待重建”信号因此已经兑现；不删会在正式 pose 的第一行把刚暖好的同一 Mesh 丢掉。
+        dirtyParts.delete(row.spec.partId);
+        e.mesh.count = 0;
+        e.mesh.visible = false;
+        if (e.outline) { e.outline.count = 0; e.outline.visible = false; }
+        if (!alreadyPrepared) primed.push(e);
+      }
+      let cursor = 0;
+      let active: MeshEntry | null = null;
+      const park = () => {
+        if (active) {
+          const e = active;
+          e.mesh.count = 0;
+          e.mesh.visible = false;
+          if (e.outline) { e.outline.count = 0; e.outline.visible = false; }
+          active = null;
+        }
+      };
+      return {
+        next() {
+          park();
+          const e = primed[cursor++];
+          if (!e) return false;
+          tmp.identity();
+          e.mesh.setMatrixAt(0, tmp);
+          e.mesh.instanceMatrix.needsUpdate = true;
+          e.mesh.count = 1;
+          e.mesh.visible = true;
+          if (e.outline) { e.outline.count = 1; e.outline.visible = true; }
+          active = e;
+          return true;
+        },
+        park,
+        get done() { return cursor >= primed.length && active === null; },
+      };
+    },
+
+    clearPreparedBuckets() {
+      for (const e of meshes.values()) e.preparedUntilTier = null;
+    },
 
     get object() { return object; },
     get genome() { return genome; },

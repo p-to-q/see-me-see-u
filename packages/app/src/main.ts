@@ -27,7 +27,7 @@ import { blendSkeletons, remapSkeleton, type BodyPlan } from '../../core/src/bod
 import { mulberry32 } from '../../core/src/rng.ts';
 import { createPeopleTracker, shiftSkeleton, type PeopleFrame } from '../../core/src/people.ts';
 import { createProbeState, stepProbe } from '../../core/src/people-probe.ts';
-import { AUTOFRAME, BUDGET, CAPTURE, GOVERNOR, NASCENT, PEOPLE, REFINE, STAGE } from '../../core/src/tuning.ts';
+import { AUTOFRAME, BUDGET, CAPTURE, GOVERNOR, NASCENT, PEOPLE, REFINE, STAGE, WARM } from '../../core/src/tuning.ts';
 import type { Genome, MotionFeatures, PartMeta, Presence, Skeleton, SlotKey, SlotPick, Tier } from '../../core/src/types.ts';
 
 import { createCapture, type Capture } from './capture/capture.ts';
@@ -42,7 +42,7 @@ import { createNascent } from './creature/nascent.ts';
 import { createSwarmBody } from './creature/swarm.ts';
 import type { BodyInstance } from './creature/body.ts';
 import { createStage } from './stage/stage.ts';
-import { contactPoints } from './stage/framing.ts';
+import { contactPoints, REFERENCE_POSE } from './stage/framing.ts';
 import { chooseTheme, themeFromUrl } from './choose/choose.ts';
 import { createFrameLoop } from './shell/safe-frame.ts';
 import { wireDegrade } from './shell/degrade-wire.ts';
@@ -702,6 +702,15 @@ async function boot(): Promise<void> {
     return { ...g, slots };
   };
 
+  /** 正式升档与画外准备共用这一条入口；两边各算一份会暖错 seed / 降级状态。 */
+  const genomeAt = (target: Tier): Genome => {
+    const g = withSwapped(makeGenome(seed, target, library.index, {
+      theme: theme ?? undefined,
+      rejected: library.rejected,
+    }));
+    return getDegradeState().placeholder ? toPlaceholderGenome(g) : g;
+  };
+
   const morph = (t?: Tier) => {
     if (t !== undefined) tier = t;
     // 团块没有槽位件可换 —— 它的"演化"由 tier 驱动的表面参数表达，不是换装。
@@ -710,13 +719,63 @@ async function boot(): Promise<void> {
     // tier 0 一件部件都没有（parts.json 里 tier 0 的件数是 0），有开场形态接着的时候
     // remorph 只会白建 30 个占位实例然后被团块盖住 —— 那 30 个实例正是这次要拿掉的东西。
     if (!nascent || tier >= 1) {
-      const g = withSwapped(makeGenome(seed, tier, library.index, { theme: theme ?? undefined, rejected: library.rejected }));
       // 已经降到第 2 级之后，升档不许把真几何再装回来 —— 那会让降级**自己撤销自己**，
       // 而画面上看不出发生过什么（docs/36 D4）。降级是单向的，只有重载能回头。
-      creature.remorph(getDegradeState().placeholder ? toPlaceholderGenome(g) : g);
+      creature.remorph(genomeAt(tier));
     }
   };
   morph(tier);
+
+  // ── 未来档位：用正式 Mesh 在真实后期路径里、每帧一个桶地走过画外 ────────────
+  // `compileAsync` 不能等价编译 PassNode/MRT（docs/48 §10.8）；真正能复用的是同一个
+  // RenderObject。tier 0 的团块把刚体藏着，正好让 1–3 档的桶在画外逐个走一次真实 render。
+  const bucketWarmPlans: ReturnType<typeof creature.prepareBuckets>[] = [];
+  let bucketWarmIndex = 0;
+  let bucketWarmStarted = false;
+  let bucketWarmActive = false;
+
+  const activateNextBucket = (): boolean => {
+    while (bucketWarmIndex < bucketWarmPlans.length) {
+      if (bucketWarmPlans[bucketWarmIndex]!.next()) return true;
+      bucketWarmIndex++;
+    }
+    return false;
+  };
+
+  const resetBucketWarm = (): void => {
+    bucketWarmPlans[bucketWarmIndex]?.park();
+    creature.clearPreparedBuckets();
+    bucketWarmPlans.length = 0;
+    bucketWarmIndex = 0;
+    bucketWarmStarted = false;
+    bucketWarmActive = false;
+  };
+
+  const abandonBucketWarm = (): void => {
+    bucketWarmPlans[bucketWarmIndex]?.park();
+    creature.clearPreparedBuckets();
+    bucketWarmPlans.length = 0;
+    bucketWarmIndex = 0;
+    bucketWarmStarted = true; // 这一位观众不重试；正式升档沿用原来的现编译兜底
+    bucketWarmActive = false;
+  };
+
+  const maybeStartBucketWarm = (): void => {
+    if (
+      bucketWarmStarted || flags.tier !== null || !nascent || isMass || isSwarm || tier !== 0
+      || library.stats.pending !== 0 || library.stats.queued !== 0
+    ) return;
+    bucketWarmStarted = true;
+    try {
+      for (const next of [1, 2, 3] as const) {
+        bucketWarmPlans.push(creature.prepareBuckets(genomeAt(next), REFERENCE_POSE));
+      }
+      bucketWarmActive = activateNextBucket();
+    } catch (e) {
+      abandonBucketWarm();
+      console.warn('[creature] 档位画外准备失败 → 升档时照旧现编译', e);
+    }
+  };
 
   /**
    * ── 多人入镜（`core/src/people.ts` / `creature/companions.ts`，docs/50）─────────────
@@ -1084,6 +1143,8 @@ async function boot(): Promise<void> {
       if (want !== tier) {
         // 给操作员（`?debug=1`）：升档落在弧线的第几秒 —— 现场验"它不在乐章边界上"靠这一行
         if (hud) console.info(`[tier] @${(tMs / 1000).toFixed(2)}s ${tier} → ${want} @ arc ${arcState.elapsed.toFixed(2)}s（乐章 ${arcState.movement + 1}）`);
+        // 极慢网下准备可能还没跑完；不要让画外桶和正式身体抢同一个 object。
+        if (bucketWarmActive) abandonBucketWarm();
         morph(want);
         stage.pulse(want);      // docs/23 §S5：升档必须可感知，否则演化等于没发生
         // 这一声也跟着挂点搬走了。**乐章序号就是档位下限**，所以在四个交接点上
@@ -1123,6 +1184,8 @@ async function boot(): Promise<void> {
     // 物种身体的到场不用在这里写一行 —— `speciesArrived()` 读的就是
     // `arcState.movement`，弧线一归零它自己就退回人形。派生状态不该被复制两份。
     if (arcState.justReset) {
+      // 画外准备持有的是上一位观众 seed 下的正式 Mesh；先收起并解除保留，不能跨场沿用。
+      resetBucketWarm();
       seed = (Math.random() * 0xffffffff) >>> 0;
       motion.reset();
       boneEnergy.reset();
@@ -1195,7 +1258,30 @@ async function boot(): Promise<void> {
       hold: loop.stats.degraded !== null || loop.stats.throttled || governor.sheds('post'),
     });
     stage.update(p, lastFeatures, dt);
-    stage.render(renderer);   // 后期链在舞台里；?nopost=1 时它退化成直出
+    maybeStartBucketWarm();
+    if (!bucketWarmActive) {
+      stage.render(renderer);   // 后期链在舞台里；?nopost=1 时它退化成直出
+    } else {
+      // `compileAsync` 不会走与 PassNode/MRT 相同的管线；必须让**将来会上场的同一个
+      // InstancedMesh** 真正走一帧后期。根节点搬到画外，避免准备中的单位矩阵闪进画面。
+      // 一帧只放一个桶；无论 render 成败都恢复舞台状态并收起桶，帧循环绝不留下半态。
+      const plan = bucketWarmPlans[bucketWarmIndex]!;
+      const previousY = creature.object.position.y;
+      const previousVisible = creature.object.visible;
+      let rendered = false;
+      try {
+        creature.object.position.y = WARM.tierOffscreenY;
+        creature.object.visible = true;
+        stage.render(renderer);
+        rendered = true;
+      } finally {
+        plan.park();
+        creature.object.position.y = previousY;
+        creature.object.visible = previousVisible;
+        bucketWarmActive = rendered ? activateNextBucket() : false;
+        if (!rendered) abandonBucketWarm();
+      }
+    }
 
     // 空闲里预编译直出那条路（docs/48 §10）：桶集合稳定、画面不忙、后期开着时才编，编的时候让出主线程。
     // 物种身体到场（第 III 乐章）是另一批网格第一次可见，也算内容变了
@@ -1318,7 +1404,13 @@ async function boot(): Promise<void> {
           case 'scene': stage.setScene(v as string); break;
           // 团块 / 点场上表里不给这一项（`available`），不会走到这里
           // 描边一换，多人的预算要重算：伴随身体在场时描边留不留，取决于它是几遍（docs/50 §5.2）
-          case 'outline': shading = v ? 'toon' : 'physical'; creature.setShading(shading); replanPeople(); break;
+          case 'outline':
+            // 着色语言会整体重建桶；先撤掉旧材质上的保留，下一帧按新语言重新准备。
+            resetBucketWarm();
+            shading = v ? 'toon' : 'physical';
+            creature.setShading(shading);
+            replanPeople();
+            break;
           case 'vitality': vitalityOn = v as boolean; if (!vitalityOn) vitality.reset(); break;
           case 'refine': refineOn = v as boolean; if (!refineOn) refiner?.reset(); break;
           // 观众说了算的是"想不想要"；调速器此刻放着「后期」那一级时，要回来的那一刻才真的开
