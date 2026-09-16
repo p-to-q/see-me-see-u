@@ -51,9 +51,10 @@
 走观众的那条路：展签「开始」→ 选择页回车 → 舞台上用回放跑 6 秒 → 点「摄像头」。
 页内探针只观察不改应用：rAF 时间戳、`longtask`、`long-animation-frame`（带脚本归因）、
 `getUserMedia` 返回时刻、小屏幕 `<video>` 出现与第一帧、读数第一次 `is-present`。
-无头 Chrome 默认把 rAF 卡在 30Hz，所以**解开帧率**（`--disable-frame-rate-limit`）：
-帧间隔因此量的是"这一帧的活有多重"，不是显示器节拍 —— p50 2–3ms 是这台机器上一帧的底，
-p95/p99 和 >25ms 的计数才是卡顿。
+无头 Chrome 默认把 rAF 卡在 30Hz；本页下表当时为了量“这一帧的活有多重”，用
+`--disable-gpu-vsync --disable-frame-rate-limit` 解开过帧率。p50 2–3ms 因此是这台机器上一帧的底，
+p95/p99 和 >25ms 的计数才是卡顿。**这不是观众环境**：§10.6 后来证明无限帧率会在 Chrome/Metal 上制造
+正常 60/120Hz 路径没有的停摆。`measure.ts` 现在默认跟显示器节拍；只有做本节这类帧成本归因时才显式写 `UNBOUNDED=1`。
 
 ### 2.1 启动（从按下「摄像头」算起，毫秒）
 
@@ -320,15 +321,17 @@ worker（155KB）、`vision_bundle`（153KB）、两份 11.7MB 的 wasm 都不�
 ```bash
 python3 scripts/capture-smoothness/figure.py assets/demo/pose-jumpingjacks.json /tmp/figure.y4m   # 合成人形，不是真人录像
 npm run build && (cd packages/app && npx vite preview --port 4391)
-node scripts/capture-smoothness/measure.ts http://localhost:4391 /tmp/run swap 45 1 1   # 最后两个数：CPU 降速倍数、是否复用缓存
-DPR=3 node …      # 高 DPI
-QUERY=worker=off node …   # 降级路径
-BYTES=1 BYTES_ONLY=1 node … swap 10 1 0   # 首屏字节
-TRACE=1 node …    # 带 trace（会拖慢页面，数字不进结论）
+VIDEO_FIXTURE=/tmp/figure.y4m node scripts/capture-smoothness/measure.ts http://localhost:4391 /tmp/run swap 45 1 1   # 真实显示节拍；最后两个数是 CPU 降速倍数、是否复用缓存
+UNBOUNDED=1 VIDEO_FIXTURE=/tmp/figure.y4m node scripts/capture-smoothness/measure.ts http://localhost:4391 /tmp/cost swap 45 1 1   # 只用于帧成本归因
+DPR=3 VIDEO_FIXTURE=/tmp/figure.y4m node …      # 高 DPI
+QUERY=worker=off VIDEO_FIXTURE=/tmp/figure.y4m node …   # 降级路径
+BYTES=1 BYTES_ONLY=1 VIDEO_FIXTURE=/tmp/figure.y4m node … swap 10 1 0   # 首屏字节
+TRACE=1 UNBOUNDED=1 VIDEO_FIXTURE=/tmp/figure.y4m node …    # 带 trace（会拖慢页面，数字不进结论）
 node scripts/capture-smoothness/summarize.ts /tmp/run
 ```
 
-`measure.ts` 读的 y4m 路径是脚本同目录下的 `figure.y4m`，先把生成的文件放过去。
+`VIDEO_FIXTURE` 不传时仍读脚本同目录下的 `figure.y4m`；文件不存在会在启动 Chrome 前直接报出缺的路径，
+不再让一场没有假摄像头的运行悄悄走到 `NotFoundError`。
 
 ---
 
@@ -457,9 +460,28 @@ STEPS=1 QUERY=seed=7 node scripts/capture-smoothness/measure.ts http://localhost
 `NATIVE_SAMPLE=1` 时再加渲染 / GPU 进程各 3 秒的原生栈（`stall.txt`、`sample-*.txt`）。**它是探针的断言，不是产品里的保护** ——
 产品里帧循环停了，调速器也跟着停（它长在帧循环上），这种卡法它看不见。
 
+**第四轮复核（2026-09-17）：这不是已经证实的观众路径 P0，而是探针压力模式的限制。**
+
+前三轮连 `HEADED=1` 都无条件带着 `--disable-gpu-vsync --disable-frame-rate-limit`；所谓“真窗口”仍在 128–205fps 把 GPU 持续打满，
+并不等于一台正常 60/120Hz 浏览器。干净 HEAD、同一个 `seed=7 / autonomous / fake camera` 改回显示器节拍后：
+
+| 口径 | 场次 | 实际 rAF | 最大帧间隔 | 结果 |
+|---|---:|---:|---:|---|
+| 本地无头 Chrome | 3/3 | 58.5–58.7fps | 150.0–183.3ms | 全部跑完；最终 HUD 60fps、pose live |
+| 本地真窗口 Chrome（ProMotion） | 3/3 | 106.6–112.3fps | 125.1–266.5ms | 全部跑完；最终 HUD 112–120fps、pose live |
+| 线上当前构建，无头 Chrome | 1/1 | 约 60fps | 200ms | 跑完（主题不是 autonomous，只作旁证） |
+
+同一天用无限帧率重跑仍会停，并且有一场在点摄像头**之前**就触发产品的帧停顿重载；关同文档 View Transition、延后 chooser dispose、
+共享 device、保留 renderer 等候选都没有形成“只改这一项就稳定消失”的结果。今天失败时 `Debugger.pause` 多数完全不回答，
+也和上表第三轮“定时器活着、停在 poll”不是同一份原生状态。因此不能拿这些场次授权删除过渡或改 GPU 生命周期。
+
+探针现在做三件事防止再次误判：默认显示器节拍，帧成本压力测试才显式 `UNBOUNDED=1`；`run.json` 写实际 fps / 最大间隔 / Chrome 版本；
+入口出现后的任何顶层重载直接写 `reload.txt` 并以 exit 4 失败，不能把产品自愈后的第二次启动算成第一次成功。产品的 4 秒重载兜底继续保留，
+但 Q1 不再作为观众必撞的 P0。这里仍然**没有真摄像头**；将来若在正常节拍 + 真窗口下再次稳定复现，再从那份新证据重开。
+
 ### 10.7 这一轮没做的
 
-- **§10.6 的卡死没修**：原因没定位到代码行，见上面的复现和下一步。
+- §10.6 在 2026-09-17 被复核为无限帧率压力模式的限制；生产代码没有为这条实验改生命周期，探针口径与重载判定已修。
 - **拿回后期那一帧的顿**（95–848ms，每个构建都有，§10.4 表）：没拆、没修。候选修法是空闲里预先重建后期链、或预先按当前像素比建好它的渲染目标。
 - §10.3 第 1 条说明过：那条 revert 提交（`dispose the post chain on drop again; keeping it cost 410-417ms on restore`）的理由写错了，
   拿回后期的顿在没改过的 main 上一样有，**以 §10.3 为准**；历史不改写。

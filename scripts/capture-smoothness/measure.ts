@@ -1,29 +1,47 @@
 // Capture smoothness probe. Raw CDP, no deps.
 // node measure.ts <baseUrl> <outDir> <mode: swap|deeplink> [recordSec=45] [cpuThrottle=1] [warmCache=0]
 import { spawn } from 'node:child_process';
-import { createWriteStream, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { createWriteStream, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const [base, out, mode = 'swap', recS = '45', throttle = '1', warm = '0'] = process.argv.slice(2);
 // fileURLToPath 而不是 `.pathname`：路径里有非 ASCII（`今天`）时 pathname 是百分号编码的，
 // Chrome 拿它找不到假摄像头的 y4m，摄像头那一路静静地 NotFoundError
 const HERE = fileURLToPath(new URL('.', import.meta.url));
+const videoFixture = process.env.VIDEO_FIXTURE ?? `${HERE}/figure.y4m`;
+if (!existsSync(videoFixture)) {
+  console.error(`missing fake-camera fixture: ${videoFixture}\nGenerate one with docs/48 §9, then pass VIDEO_FIXTURE=/absolute/path/file.y4m.`);
+  process.exit(1);
+}
 mkdirSync(`${out}/shots`, { recursive: true });
-const profile = `${HERE}/profile-${warm === '1' ? 'warm' : Date.now()}`;
-if (warm !== '1') rmSync(profile, { recursive: true, force: true });
+const transientProfile = warm !== '1';
+// 冷缓存运行不该在仓库里留下几十 MB 的 Chrome 状态。热缓存才用固定目录；需要并行或隔离时可显式改路径。
+const profile = transientProfile
+  ? mkdtempSync(join(tmpdir(), 'smu-capture-'))
+  : (process.env.CAPTURE_PROFILE ?? `${HERE}/profile-warm`);
 const port = 9350 + Math.floor(Math.random() * 100);
+// 观众环境默认跟显示器节拍。解锁帧率是测“一帧的活有多重”的压力模式，不是现场复现口径：
+// Chrome/Metal 在 128–205fps 下会出现正常 60/120Hz 路径没有的 compositor / rAF 停摆（docs/48 §10.6）。
+const unbounded = process.env.UNBOUNDED === '1';
 // HEADED=1 → 真窗口（不带 --headless）：分清"真卡死"还是"只在无头 Chrome 里卡"
 const chrome = spawn('/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', [
   ...(process.env.HEADED === '1' ? [] : ['--headless=new']), `--remote-debugging-port=${port}`, `--user-data-dir=${profile}`,
   '--enable-unsafe-webgpu', '--enable-features=WebGPU', '--use-angle=metal', '--ignore-gpu-blocklist',
   '--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream',
-  `--use-file-for-fake-video-capture=${HERE}/figure.y4m`,
-  // headless 默认把 rAF 卡在 30Hz（基线实测 33.3ms 恒定）—— 解开它，才量得出每帧预算被吃掉多少
-  '--disable-gpu-vsync', '--disable-frame-rate-limit',
+  `--use-file-for-fake-video-capture=${videoFixture}`,
+  ...(unbounded ? ['--disable-gpu-vsync', '--disable-frame-rate-limit'] : []),
   '--window-size=1280,800', '--autoplay-policy=no-user-gesture-required', '--no-first-run', 'about:blank',
 ], { stdio: 'ignore' });
 const kill = () => { try { chrome.kill('SIGKILL'); } catch { /* */ } };
-process.on('exit', kill);
+const cleanupProfile = () => {
+  if (transientProfile) rmSync(profile, { recursive: true, force: true });
+};
+process.once('exit', () => {
+  kill();
+  cleanupProfile();
+});
 // 被 kill 的时候也要带走 Chrome：否则那个孤儿 Chrome 占着 profile-warm，下一次起的 Chrome 直接交给它然后退出
 //（症状只有一行 "no chrome"，实测踩过）
 for (const sig of ['SIGTERM', 'SIGINT'] as const) process.on(sig, () => { kill(); process.exit(130); });
@@ -45,9 +63,12 @@ let id = 0;
 const pending = new Map<number, (v: any) => void>();
 const listeners: ((m: any) => void)[] = [];
 const consoleLog: string[] = [];
+let topLevelNavigations = 0;
+let guardedNavigationCount: number | null = null;
 ws.addEventListener('message', (ev) => {
   const m = JSON.parse(String(ev.data));
   if (m.id && pending.has(m.id)) { pending.get(m.id)!(m); pending.delete(m.id); }
+  if (m.method === 'Page.frameNavigated' && !m.params.frame.parentId) topLevelNavigations++;
   if (m.method === 'Runtime.consoleAPICalled') {
     consoleLog.push(`${m.params.type} ${m.params.args.map((a: any) => a.value ?? a.description ?? '').join(' ').slice(0, 300)}`);
   }
@@ -64,6 +85,16 @@ const evalJs = async (expression: string): Promise<any> => {
 
 await send('Runtime.enable');
 await send('Page.enable');
+const browserVersion = (await send('Browser.getVersion')).result?.product ?? 'unknown';
+const reloadGuard = setInterval(() => {
+  if (guardedNavigationCount === null || topLevelNavigations <= guardedNavigationCount) return;
+  const report = `unexpected top-level reload: ${topLevelNavigations - guardedNavigationCount}\n\nconsole tail:\n${consoleLog.slice(-40).join('\n')}\n`;
+  console.error('RELOAD after the measured page became ready — this run failed');
+  writeFileSync(`${out}/reload.txt`, report);
+  clearInterval(reloadGuard);
+  kill();
+  process.exit(4);
+}, 50);
 if (Number(throttle) > 1) await send('Emulation.setCPUThrottlingRate', { rate: Number(throttle) });
 // DPR=3 → 高 DPI 屏；NET=slow → 模型 / 部件走慢网（下行 1.6Mbps、150ms）
 if (process.env.DPR) {
@@ -126,7 +157,12 @@ const waitFor = async (expr: string, ms: number): Promise<boolean> => {
 const tNav = Date.now();
 if (mode === 'swap') {
   await send('Page.navigate', { url: `${base}/?debug=1${QUERY}` });
-  console.log('entry', await waitFor(`!!document.querySelector('.sb-entry button.sb-act')`, 30000));
+  const entryReady = await waitFor(`!!document.querySelector('.sb-entry button.sb-act')`, 30000);
+  console.log('entry', entryReady);
+  if (!entryReady) { clearInterval(reloadGuard); kill(); process.exit(1); }
+  // 从入口出现起，这个文档不该再做一次顶层导航。产品看门狗的重载也算失败，
+  // 不能继续量重载后的深链页，再把第二次启动冒充第一次成功。
+  guardedNavigationCount = topLevelNavigations;
   await sleep(1500);
   await evalJs(`document.querySelector('.sb-entry button.sb-act').click()`);
   await sleep(3500);
@@ -152,6 +188,9 @@ if (mode === 'swap') {
   step(`raf count ${await evalJs('window.__probe.raf.length')}`);
 } else {
   await send('Page.navigate', { url: `${base}/?theme=porcelain&debug=1` });
+  const pageReady = await waitFor(`location.search.includes('theme=porcelain') && document.readyState === 'complete'`, 30000);
+  if (!pageReady) { clearInterval(reloadGuard); kill(); process.exit(1); }
+  guardedNavigationCount = topLevelNavigations;
 }
 
 // Trace from here on（TRACE=1 才开：解开帧率后 45 秒的 trace 有 1.4GB，它自己就是负载）
@@ -309,10 +348,27 @@ if (profiling) {
 
 const probe = await evalJs(`JSON.stringify(window.__probe)`);
 writeFileSync(`${out}/probe.json`, probe);
+const probeData = JSON.parse(probe) as { raf?: number[] };
+const raf = probeData.raf ?? [];
+const elapsedRaf = raf.length > 1 ? raf[raf.length - 1] - raf[0] : 0;
+const measuredRafFps = elapsedRaf > 0 ? Number((((raf.length - 1) * 1000) / elapsedRaf).toFixed(1)) : null;
+let maxRafGap = 0;
+for (let i = 1; i < raf.length; i++) maxRafGap = Math.max(maxRafGap, raf[i] - raf[i - 1]);
+writeFileSync(`${out}/run.json`, `${JSON.stringify({
+  cadence: unbounded ? 'unbounded' : 'display',
+  headed: process.env.HEADED === '1',
+  browser: browserVersion,
+  videoFixture,
+  measuredRafFps,
+  maxRafGapMs: Number(maxRafGap.toFixed(1)),
+  rafSamples: raf.length,
+}, null, 2)}\n`);
 const hud = await evalJs(`[...document.querySelectorAll('body *')].find(e => e.children.length >= 6 && /fps/.test(e.textContent||''))?.textContent?.replace(/\\s+/g,' ')`);
 writeFileSync(`${out}/console.txt`, consoleLog.join('\n') + `\nHUD ${hud}\n`);
-console.log('done', out);
+console.log('done', out, `cadence=${unbounded ? 'unbounded' : 'display'}`, `raf=${measuredRafFps ?? 'n/a'}fps`, `max-gap=${maxRafGap.toFixed(1)}ms`);
+clearInterval(reloadGuard);
 ws.close();
 kill();
 await sleep(300);
+cleanupProfile();
 process.exit(0);
