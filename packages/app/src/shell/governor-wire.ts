@@ -18,8 +18,8 @@ export const GOVERNOR_SWITCHES: Record<GovernorStep, string> = {
   swaps: 'swapShed',
   /** 采集端的推理频率（`WebcamCapture.setCadence`） */
   inference: 'setCadence',
-  /** 后期 —— 控件条「渲染」、降级阶梯第 1 级用的同一个 */
-  post: 'stage.setPost',
+  /** 后期 —— Stage 对同一条后期链的临时挂起位；永久开关仍归控件条 / 降级阶梯 */
+  post: 'stage.setPostSuspended',
   /** 渲染器像素比 —— 开机时设的那一个 */
   dpr: 'renderer.setPixelRatio',
   /** 读数的刷新（它不驱动身体） */

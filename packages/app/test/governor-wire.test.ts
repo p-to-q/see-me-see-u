@@ -52,7 +52,7 @@ test('调速器接线: 每一级都登记了它拨的是哪个开关，而且那
     ink: read('../src/stage/stage.ts'),
     swaps: main,
     inference: read('../src/capture/webcam.ts'),
-    post: read('../src/ui/control-table.ts') + main,
+    post: read('../src/stage/stage.ts') + main,
     dpr: main,
     ui: main,
     // 多人（docs/50 §5.4）：开关是 main.ts 里 `people` 那一块的 `shed` 位，帧循环里按它把伴随身体的预算压到 0

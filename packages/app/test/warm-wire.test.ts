@@ -4,7 +4,7 @@
  *
  * 实测（B-gov，强制 L4）：关后期那一帧 273ms、之后又一次 367ms。两处来路各守一条：
  *  1. 直出管线开机以来没用过 → 空闲里 `compileAsync` 先编好（`warm-plan.ts` 决定什么时候）；
- *  2. 关后期 = `post.dispose()`，拿回来时整条链重建 → 关后期只是不走它，链留着。
+ *  2. 调速器若调用永久开关会 `post.dispose()`，拿回来时整条链重建 → 临时挂起只是不走它，链留着。
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -16,10 +16,23 @@ const STAGE = read('../src/stage/stage.ts');
 const MAIN = read('../src/main.ts');
 const CREATURE = read('../src/creature/creature.ts');
 
-test('拨后期: 关后期仍然拆链（"不拆"量过没有量出好处，行为保持原样，docs/48 §10.3）', () => {
+test('拨后期: 永久关闭拆链释放，调速器挂起保留同一条链', () => {
   const body = /setPost\(on\)\s*\{([\s\S]*?)\n\s{4}\},/.exec(STAGE)?.[1] ?? '';
   assert.ok(body, 'stage.ts 里找不到 setPost');
-  assert.match(body, /post\?\.dispose\(\)/, 'setPost(false) 不再拆链 —— 改它之前先按 docs/48 §10 重量拿回后期那一帧');
+  assert.match(body, /post\?\.dispose\(\)/, '永久关闭没有释放后期链');
+  const suspend = /setPostSuspended\(suspended\)\s*\{([^}]*)\}/.exec(STAGE)?.[1] ?? '';
+  assert.match(suspend, /postSuspended = suspended/, '调速器挂起没有独立状态');
+  assert.doesNotMatch(suspend, /dispose|post\s*=|buildPost|createPost/, '调速器挂起不该拆链或重建链');
+  assert.match(STAGE, /const postActive = postEnabled && !postSuspended/, '渲染入口没有同时服从永久开关与临时挂起');
+  assert.match(MAIN, /post:\s*\(shed\)\s*=>\s*stage\.setPostSuspended\(shed\)/, '调速器仍在拨永久开关');
+});
+
+test('拨后期: 用户意愿不被调速器的临时状态覆盖', () => {
+  assert.match(MAIN, /post:\s*postWanted/, '控件没有显示用户选择，而是跟着临时挂起闪动');
+  assert.match(MAIN, /case 'post':\s*postWanted = v as boolean;\s*stage\.setPost\(postWanted\)/,
+    '调速器挂起时打开后期会被误写成永久关闭');
+  assert.doesNotMatch(MAIN, /stage\.setPost\(postWanted && !governor\.sheds\('post'\)\)/,
+    '用户意愿仍和调速器状态揉在一次永久写入里');
 });
 
 test('拨后期: 舞台能在空闲里把直出那条路编一遍（compileAsync，不是 render）', () => {

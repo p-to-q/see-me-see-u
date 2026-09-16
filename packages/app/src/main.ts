@@ -843,7 +843,9 @@ async function boot(): Promise<void> {
     ink: (shed) => stage.setInk(!shed),
     swaps: (shed) => { swapShed = shed; },
     inference: (shed) => { inferHz = shed ? GOVERNOR.inferenceHzShed : CAPTURE.targetHz; (capture as { setCadence?(hz: number): void }).setCadence?.(inferHz); },
-    post: (shed) => stage.setPost(postWanted && !shed),
+    // 调速器只是短暂让后期让路：保留已编译的链，拿回来不在帧循环里重建。
+    // 用户开关 / 永久降级仍走 setPost，负责真正释放显存。
+    post: (shed) => stage.setPostSuspended(shed),
     dpr: (shed) => renderer.setPixelRatio(shed ? Math.min(devicePixelRatio, GOVERNOR.dprShed) : Math.min(devicePixelRatio, GOVERNOR.dprMax)),
     ui: (shed) => { uiShed = shed; },
     // 单人时 `people` 是 null：这一级是 no-op（docs/50 §5.4）
@@ -1380,7 +1382,8 @@ async function boot(): Promise<void> {
     sound: !(sound.state === 'off' || sound.state === 'muted'),
     species: theme ?? null,
     refine: refineOn && refiner !== null,
-    post: stage.post,
+    // 控件显示用户的选择，不跟着调速器的短暂让路闪成「关」。实际渲染状态仍由 stage.post 给 warm-plan / HUD 读。
+    post: postWanted,
     framing: framingPolicy,
     people: String(flags.people),
   });
@@ -1413,8 +1416,8 @@ async function boot(): Promise<void> {
             break;
           case 'vitality': vitalityOn = v as boolean; if (!vitalityOn) vitality.reset(); break;
           case 'refine': refineOn = v as boolean; if (!refineOn) refiner?.reset(); break;
-          // 观众说了算的是"想不想要"；调速器此刻放着「后期」那一级时，要回来的那一刻才真的开
-          case 'post': postWanted = v as boolean; stage.setPost(postWanted && !governor.sheds('post')); break;
+          // 用户意愿与调速器的临时挂起分开记：即使此刻正在让路，用户打开后期也不能被写成永久关闭。
+          case 'post': postWanted = v as boolean; stage.setPost(postWanted); break;
           // 取景策略：下一帧 `decide()` 自己读到。分类器不重置 —— 它一直在看，换的只是听不听它
           case 'framing': framingPolicy = v as FramingPolicy; break;
           case 'sound': if (v !== controlValues().sound) sound.toggleMute(); break;
