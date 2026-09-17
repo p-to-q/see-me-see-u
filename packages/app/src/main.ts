@@ -1102,10 +1102,12 @@ async function boot(): Promise<void> {
       creature.setCompanions(crowdOut?.companions ?? []);
       stage.setGroup(crowdOut?.groupWidth ?? 0, crowdOut?.groupHeight ?? 0);
     }
-    // 横向根偏移：吃**原话**（和小屏同一份），夹在舞台此刻的横向余量里（随景别连续变化）。
+    // 横向根偏移：吃姿态时钟给身体的同一份连续流。模式分类 / 小屏仍吃 `live` 原话；
+    // 这里若也吃原话，30Hz 的同一结果会在 120Hz 屏上变成「三帧不动、下一帧跳一下」。
+    // 夹在舞台此刻的横向余量里（随景别连续变化）。
     // 台上有伴随身体时让位 —— 站位归 lineup；两个都是弹簧，加起来是连续的
     lateral = stepLateral(lateral, {
-      evidence: lateralEvidence(live), room: stage.lateralRoom, enabled: !crowdOut?.companions.length,
+      evidence: lateralEvidence(raw), room: stage.lateralRoom, enabled: !crowdOut?.companions.length,
       // 中景死区更小、弹簧更快：进中景已经是自适应取景，不受全景那条"相机距离不动"的主张约束
       upper: framing.shot === 'upper',
       // 我们自己的证据质量不够时的兜底：摄像头确认在自己取景就信它，回中线（`camFraming` 本帧已经算过一次）

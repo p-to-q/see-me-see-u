@@ -9,17 +9,25 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { cropActive, createSeeWatch, displaySide, seeState } from '../src/ui/preview-state.ts';
 import { assess } from '../src/ui/readout-state.ts';
 import { COPY } from '../src/ui/i18n.ts';
 import { DEFAULT_BOUNDS, fitFrame, lateralRoom, shotCamera } from '../src/stage/framing.ts';
 import { formatFramingRows } from '../src/shell/hud.ts';
-import { createFramingClassifier, decide, smoothstep, stepShot, SHOT_REST, type ShotState } from '../../core/src/autoframe.ts';
+import { createPoseClock } from '../src/capture/pose-clock.ts';
+import {
+  createFramingClassifier, decide, lateralEvidence, smoothstep, stepLateral, stepShot,
+  LATERAL_REST, SHOT_REST, type LateralState, type ShotState,
+} from '../../core/src/autoframe.ts';
 import { mulberry32 } from '../../core/src/rng.ts';
 import { AUTOFRAME, STAGE } from '../../core/src/tuning.ts';
 import { person, SEATED, WHOLE } from '../../core/test/framing-people.ts';
 
 const at = (cx: number) => person({ ...WHOLE, cx });
+
+const MAIN = readFileSync(fileURLToPath(new URL('../src/main.ts', import.meta.url)), 'utf8');
 
 test('引导：从观众自己的左 / 右边走出去 → 那一侧的话；排在「往后退一点」前面', () => {
   assert.deepEqual(seeState({ camera: true, pose: at(1.03) }), { state: 'partial', reason: 'side', side: 'left' });
@@ -111,6 +119,45 @@ test('连续性：任意景别 / hold 序列下，舞台相机的视角、移轴
   assert.ok(wf <= AUTOFRAME.maxStep.fovDeg + 1e-9, `视角一帧变了 ${wf.toFixed(3)}°/16ms（上限 ${AUTOFRAME.maxStep.fovDeg}）`);
   assert.ok(wp <= AUTOFRAME.maxStep.pan + 1e-9, `移轴一帧挪了 ${wp.toFixed(4)}m/16ms（上限 ${AUTOFRAME.maxStep.pan}）`);
   assert.ok(smoothstep(1) === 1);
+});
+
+test('横向接线：30Hz 推理先过姿态时钟，再喂 120Hz 跟随；分类器与小屏仍吃原话', () => {
+  assert.match(MAIN, /framer\.update\(live,[^]*preview\?\.update\(live, dt\)/,
+    '模式分类 / 小屏不该把插值出来的姿态说成摄像头原话');
+  assert.match(MAIN, /evidence:\s*lateralEvidence\(raw\)/,
+    '横向跟随还在重复吃采集端 30Hz 的同一份结果');
+  assert.doesNotMatch(MAIN, /evidence:\s*lateralEvidence\(live\)/);
+
+  const run = (renderHz: number): number[] => {
+    const clock = createPoseClock();
+    let lateral: LateralState = LATERAL_REST;
+    let nextInfer = 0;
+    const sampled: number[] = [];
+    const frameMs = 1000 / renderHz;
+    for (let now = 0, frame = 0; now < 2500; frame++, now = frame * frameMs) {
+      while (nextInfer <= now + 1e-9) {
+        const seconds = nextInfer / 1000;
+        const p = at(0.35 + 0.12 * Math.min(1, seconds / 1.5));
+        p.t = nextInfer;
+        clock.observe(p, nextInfer);
+        nextInfer += 1000 / 30;
+      }
+      const raw = clock.sample(now);
+      lateral = stepLateral(lateral, {
+        evidence: lateralEvidence(raw), room: 1, enabled: true,
+      }, 1 / renderHz);
+      // 两条渲染频率只在 30Hz 的共同时间点比较。
+      if (now >= 500 && Math.abs(now / (1000 / 30) - Math.round(now / (1000 / 30))) < 1e-6) sampled.push(lateral.x.x);
+    }
+    return sampled;
+  };
+
+  const at60 = run(60), at120 = run(120);
+  assert.equal(at60.length, at120.length);
+  const worst = Math.max(...at60.map((x, i) => Math.abs(x - at120[i])));
+  // 连续时间弹簧在不同积分步长下不可能逐位相等；把差异压在 5mm 内，
+  // 仍只是横向死区（50mm）的十分之一，不会变成可见的模式分歧。
+  assert.ok(worst < 0.005, `同一 30Hz 输入在 60/120Hz 上横向轨迹漂了 ${worst.toFixed(5)}m`);
 });
 
 test('HUD：横向那一段（偏移 / 余量 / 在做什么 / 出画侧）和"摄像头在取景"都读得出来', () => {
