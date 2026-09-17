@@ -1571,6 +1571,11 @@ export const SLOW_LOOP = {
   maxPerSession: 1,
   /** 进入 ALIVE 多久之后才允许触发（秒） */
   armAfter: 20,
+  /**
+   * 已武装但还没有人像 mask 时，多久再探测一次（秒）。
+   * 1 秒把回放 / 分割器降级时的空轮询从逐帧降到 1Hz，同时让晚到的 mask 最多只等一秒。
+   */
+  maskRetrySeconds: 1,
   /** 前端轮询间隔与上限 */
   pollIntervalMs: 5000,
   maxPolls: 24,

@@ -132,6 +132,7 @@ export function createSlowLoop(deps: SlowLoopDeps): SlowLoop {
   let phase: SlowPhase = 'idle';
   let note = '';
   let aliveFor = 0;
+  let maskRetryIn = 0;
   let used = 0;
   type RunToken = { epoch: number; abort: AbortController };
   let active: RunToken | null = null;
@@ -145,8 +146,14 @@ export function createSlowLoop(deps: SlowLoopDeps): SlowLoop {
   async function run(): Promise<void> {
     // mass / swarm 这类身体没有可挂载的槽位。必须在 PNG、网络和扣额度之前就停，
     // 不能花完一次 credit 才发现“身体不在了”。
-    if (!deps.body()) return off('当前形体不接慢回路零件');
-    const bitmap = deps.mask();
+    let bitmap: ImageBitmap | null;
+    try {
+      if (!deps.body()) return off('当前形体不接慢回路零件');
+      bitmap = deps.mask();
+    } catch (e) {
+      // 依赖来自采集 / WebGL 边界；即使它们违约也不能把拒绝传播回帧循环。
+      return off(e instanceof Error ? e.message : String(e));
+    }
     // 没有 mask 不是故障：回放模式本来就没有，ImageSegmenter 起不来也照样跑姿态。
     // 但没有参考图就没有"从这个人长出来的"，所以这一次不做，等下一次。
     if (!bitmap) { note = '等 mask'; return; }
@@ -217,11 +224,19 @@ export function createSlowLoop(deps: SlowLoopDeps): SlowLoop {
 
     update(alive, dt) {
       if (disabled || active) return;
-      if (!alive) { aliveFor = 0; return; }
-      aliveFor += dt;
+      const step = Number.isFinite(dt) && dt > 0 ? dt : 0;
+      if (!alive) { aliveFor = 0; maskRetryIn = 0; return; }
+      aliveFor += step;
       if (aliveFor < SLOW_LOOP.armAfter) return;
       if (used >= SLOW_LOOP.maxPerSession) return;
       if (phase === 'idle') phase = 'armed';
+      // mask 不可用时不能每个渲染帧都碰一次采集边界。倒计时只吃注入的 dt，
+      // 不读墙钟；第一次武装仍立即探测，晚到的 mask 最多等一个周期。
+      if (maskRetryIn > 0) {
+        maskRetryIn = Math.max(0, maskRetryIn - step);
+        if (maskRetryIn > 0) return;
+      }
+      maskRetryIn = SLOW_LOOP.maskRetrySeconds;
       // 故意不 await：慢回路的任何状态都不允许影响这一帧（纪律 3）
       void run();
     },
@@ -231,6 +246,7 @@ export function createSlowLoop(deps: SlowLoopDeps): SlowLoop {
       active?.abort.abort();
       active = null;
       aliveFor = 0;
+      maskRetryIn = 0;
       used = 0;
       sessionId = deps.newSessionId();
       if (!disabled) { phase = 'idle'; note = ''; }
