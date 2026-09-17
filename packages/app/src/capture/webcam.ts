@@ -399,6 +399,10 @@ export class WebcamCapture implements Capture {
     this.#rafId = 0;
     this.#stream?.getTracks().forEach((t) => t.stop());
     this.#stream = null;
+    // 不只停 track，也把 <video> 从旧 MediaStream 上摘下来。否则首次启动
+    // 在模型 / 首帧阶段失败后，预览仍会把这个已失效的 srcObject 当成“摄像头开着”。
+    try { this.video.pause(); } catch { /* 清理必须 best-effort */ }
+    try { this.video.srcObject = null; } catch { /* 同上 */ }
     // worker 不关：它是整页共用的，下一次打开摄像头直接用（不再建图）。只是不再听它
     this.#engine?.listen(null);
     this.#engine = null;
@@ -470,7 +474,13 @@ export class WebcamCapture implements Capture {
     this.video.srcObject = this.#stream;
     await this.video.play();
     if (!this.video.videoWidth) {
-      await new Promise<void>((res) => this.video.addEventListener('loadeddata', () => res(), { once: true }));
+      // 有些驱动会返回一条永远不出帧的 stream。不设界的 loadeddata 等待
+      // 会让整个启动卡死，连回放降级都永远没机会开始。
+      await withTimeout(
+        new Promise<void>((res) => this.video.addEventListener('loadeddata', () => res(), { once: true })),
+        CAPTURE.startTimeout * 1000,
+        '摄像头没有送来画面',
+      );
     }
   }
 

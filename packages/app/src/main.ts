@@ -30,7 +30,7 @@ import { createProbeState, stepProbe } from '../../core/src/people-probe.ts';
 import { AUTOFRAME, BUDGET, CAPTURE, GOVERNOR, NASCENT, PEOPLE, REFINE, STAGE, WARM } from '../../core/src/tuning.ts';
 import type { Genome, MotionFeatures, PartMeta, Presence, Skeleton, SlotKey, SlotPick, Tier } from '../../core/src/types.ts';
 
-import { createCapture, type Capture } from './capture/capture.ts';
+import { createCapture, startInitialCapture, type Capture, type StartedCapture } from './capture/capture.ts';
 import { createPartLibrary } from './assets/library.ts';
 import { createCreature } from './creature/creature.ts';
 import { createCompanions, createPipes } from './creature/companions.ts';
@@ -223,16 +223,20 @@ async function boot(): Promise<void> {
   // 会盯着一块黑屏等它加载 —— 而那正是整个体验里最需要连贯的一刻
   //（卡片冲向镜头、溶解、然后身体应该**已经在那里了**）。
   loading.begin('body');
-  const capturePromise = (async () => {
+  const capturePromise: Promise<StartedCapture> = (async () => {
     // 入口层在场 = 还没人授权过 → 先用回放起步（见 shell/entry.ts 的文件头）
     // onStep 是采集端自己报的真实里程碑，不是定时器（见 capture.ts 的 CaptureStep）
-    const c = await createCapture(entry ? 'replay' : undefined, {
+    const started = await startInitialCapture(entry ? 'replay' : undefined, {
       onStep: (done, total) => loading.progress('body', done / total),
     });
-    await c.start();
-    if (c.lastError) console.warn('[main] capture:', c.lastError);
+    for (const failure of started.failures) {
+      console.warn(`[main] capture(${failure.kind}) 开机失败，已降级：`, failure.error);
+    }
+    if (!started.failures.length && started.capture.lastError) {
+      console.info(`[main] capture(${started.kind}) 已兜住：`, started.capture.lastError);
+    }
     loading.done('body');
-    return c;
+    return started;
   })();
 
   // 展签还立着的时候不要把选择页顶出来。加载在后面照常进行，这里只等那一下点击。
@@ -275,7 +279,10 @@ async function boot(): Promise<void> {
     // 这一页在此期间照常可以用鼠标/键盘，不需要等它。
     const waveOn = flags.wave !== 'off' && !entry && !flags.demo;
     let captureForChoose: { latest(): ReturnType<Capture['latest']> } | null = null;
-    if (waveOn) void capturePromise.then((c) => { captureForChoose = c; });
+    if (waveOn) void capturePromise.then((started) => {
+      // 摄像头起不来时初始编排会退到回放。录像不许倒过来操作选择页。
+      if (started.kind === 'webcam') captureForChoose = started.capture;
+    });
     console.info(`[main] 选择页举手滚动：${waveOn ? 'on' : 'off'}（?wave=${flags.wave ?? '默认'}）`);
     await new Promise<void>((done) => {
       void chooseTheme({
@@ -350,7 +357,8 @@ async function boot(): Promise<void> {
 
   // `let` 而不是 `const`：观众按下「用我的摄像头」之后，这一个引用会被换掉
   // （回放 → 摄像头）。两个实现可互换是 Capture 的硬契约，帧循环不需要知道换过。
-  let capture = await capturePromise;
+  const initialCapture = await capturePromise;
+  let capture = initialCapture.capture;
 
   // 身体方案：物种自己声明，?plan= 可覆盖（docs/18-BODY-PLANS.md）。
   // 这是「物种真的不一样」与「同一具人体换皮」之间的那一行。
@@ -465,7 +473,7 @@ async function boot(): Promise<void> {
    * 弧线走完的那一刻读它，而弧线和帧循环都建在这一行之前 —— `let` 有 TDZ，
    * 一个建得更早、调得更晚的闭包会在第一帧上炸，而那正是绝不许炸的地方（P2）。
    */
-  let cameraOn = !entry && !flags.demo;
+  let cameraOn = initialCapture.kind === 'webcam';
 
   /**
    * 存档（`docs/43 §8`）—— 一次走完的相遇往 `/api/visit` 写一行。
@@ -1548,7 +1556,7 @@ async function boot(): Promise<void> {
     `[main] running · theme=${theme} · seed=${seed} · ` +
     `plan=${planKind}${intent.form === undefined && planKind !== 'rig' ? '(第 III 乐章到场)' : ''} · ` +
     `arc=${arc.total}s · theseus=${theseus ? (flags.theseus.rate === 1 ? 'on' : `×${flags.theseus.rate}`) : 'off'} · ` +
-    `capture=${entry || flags.demo ? 'replay' : 'webcam'} · ` +
+    `capture=${cameraOn ? 'webcam' : 'replay'} · ` +
     `acts=${ACTS.map((a) => a.id).join(',')} · sound=${sound.state}`,
   );
 }

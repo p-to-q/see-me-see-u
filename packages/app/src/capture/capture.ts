@@ -42,6 +42,24 @@ export interface Capture {
 
 export type CaptureKind = 'webcam' | 'replay';
 
+export interface StartedCapture {
+  /** 真正留下来驱动画面的那一路，不是开机时的意图 */
+  capture: Capture;
+  kind: CaptureKind;
+  /** 开机期间已经被回放或空采集吸收的失败，只给日志 / 自检 */
+  failures: readonly CaptureFailure[];
+}
+
+export interface CaptureFailure {
+  kind: CaptureKind;
+  error: string;
+}
+
+export type CaptureFactory = (
+  kind: CaptureKind,
+  opts?: { video?: HTMLVideoElement; onStep?: CaptureStep },
+) => Promise<Capture>;
+
 /**
  * `?demo=1` → 回放（评委演示 / 断网 / 摄像头翻车时的兜底，docs/06 §6）。
  * URL 开关的解析只有 `readFlags` 一份，这里不再自己读 URLSearchParams。
@@ -65,6 +83,88 @@ export async function createCapture(
   }
   const { WebcamCapture } = await import('./webcam.ts');
   return new WebcamCapture(opts.video, undefined, opts.onStep);
+}
+
+/**
+ * 开机时启动采集，并把摄像头的致命失败收成回放。
+ *
+ * 运行中切换不用这个函数：那条路必须在新采集可用之前保留旧画面，
+ * `main.ts` 的 `swapCapture()` 已经拥有这个交易边界。开机时还没有旧画面，
+ * 所以需要另一条“webcam 失败 → replay”的受控退路。
+ *
+ * 这个边界不信任具体实现：`create` / `start` 即使违反 Capture 的
+ * “不 reject”契约，也不能把摄像头权限错误变成整个作品的启动错误。
+ * 回放自己也起不来时，保留那个已停止的实例；连实例都造不出时，
+ * 返回一个安静的空采集。舞台仍能进 idle，而不是白屏。
+ */
+export async function startInitialCapture(
+  preferred: CaptureKind = captureKindFromUrl(),
+  opts: { video?: HTMLVideoElement; onStep?: CaptureStep } = {},
+  create: CaptureFactory = createCapture,
+): Promise<StartedCapture> {
+  const failures: CaptureFailure[] = [];
+  const first = await attemptCapture(preferred, opts, create, failures);
+  if (first.ok && first.capture) return { capture: first.capture, kind: preferred, failures };
+  stopCapture(first.capture);
+
+  if (preferred === 'webcam') {
+    const replay = await attemptCapture('replay', opts, create, failures);
+    if (replay.ok && replay.capture) return { capture: replay.capture, kind: 'replay', failures };
+    stopCapture(replay.capture);
+    return { capture: replay.capture ?? emptyCapture(lastFailure(failures)), kind: 'replay', failures };
+  }
+
+  return { capture: first.capture ?? emptyCapture(lastFailure(failures)), kind: 'replay', failures };
+}
+
+interface CaptureAttempt { capture: Capture | null; ok: boolean }
+
+async function attemptCapture(
+  kind: CaptureKind,
+  opts: { video?: HTMLVideoElement; onStep?: CaptureStep },
+  create: CaptureFactory,
+  failures: CaptureFailure[],
+): Promise<CaptureAttempt> {
+  let capture: Capture | null = null;
+  try {
+    capture = await create(kind, opts);
+    await capture.start();
+    if (captureUsable(capture)) return { capture, ok: true };
+    failures.push({ kind, error: capture.lastError ?? `${kind} 采集未就绪` });
+    return { capture, ok: false };
+  } catch (error) {
+    failures.push({ kind, error: describeCaptureError(error) });
+    return { capture, ok: false };
+  }
+}
+
+/** `lastError` 可以是已经被实现内部吸收的警告；有 `failed` 时它才是真正判据。 */
+export function captureUsable(capture: Capture): boolean {
+  return !(capture.failed ?? (capture.lastError !== null));
+}
+
+function describeCaptureError(error: unknown): string {
+  return error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+}
+
+function lastFailure(failures: readonly CaptureFailure[]): string {
+  return failures.at(-1)?.error ?? '采集不可用';
+}
+
+function stopCapture(capture: Capture | null): void {
+  try { capture?.stop(); } catch { /* 失败路径里的清理不得取代回放降级 */ }
+}
+
+function emptyCapture(error: string): Capture {
+  return {
+    async start() { /* 最后一道无画面退路：维持 Capture 契约 */ },
+    latest: () => null,
+    latestMask: () => null,
+    fps: 0,
+    lastError: error,
+    failed: true,
+    stop() {},
+  };
 }
 
 /**
