@@ -35,6 +35,8 @@ interface Capture {
   takeMask(): ImageBitmap | null;
   /** 慢回路开/撤一张 mask 的需求；回放可不实现 */
   setMaskDemand?(wanted: boolean): void;
+  /** `latest()` 姿态所属输入帧的宽高比；未就绪 / 无元数据时可为 null */
+  readonly frameAspect?: number | null;
   readonly fps: number;
   readonly lastError: string | null;
   stop(): void;
@@ -42,6 +44,9 @@ interface Capture {
 ```
 实现两个：`WebcamCapture`（MediaPipe）与 `ReplayCapture`（读 `/demo/pose-*.json`，`?demo=1` 时启用）。
 **两者必须可互换**，这是 P3 降级路径与现场 plan B 的基础。
+消费者统一通过 `captureAspect()` 读取画幅：只接受有限正数，回放没有
+`screen` 元数据或驱动尚未报尺寸时回落 16:9。Webcam 的值必须绑定到已接受的
+那次推理输入帧，不能在 worker 回执时重读可能已换分辨率的 `<video>`。
 
 mask 不是快回路的持续输出。普通启动只建姿态图；慢回路武装后才请求
 ImageSegmenter，并且每位观众只接收一张。请求与 worker 回执携带同一个

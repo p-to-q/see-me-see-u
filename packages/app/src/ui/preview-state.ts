@@ -118,6 +118,8 @@ export interface SeeInput {
   pose: RawPose | null;
   /** 上半身是正当取景（`FramingDecision.upperIsIntended`）。缺省 false = 这一版之前的行为 */
   upperIsIntended?: boolean;
+  /** 摄像头画面宽 / 高；缺省由 Auto Framing 安全回落 16:9。 */
+  aspect?: number;
 }
 
 // 四个数都在 `core/tuning.ts` 的 `PREVIEW` 块里，各自的理由写在那边。
@@ -176,7 +178,7 @@ export function seeState(input: SeeInput): SeeReading {
   if (pose.screen?.length) {
     // 从左右走出去的排在「往后退」前面：它按躯干**坐标**判，不数可信点 ——
     // MediaPipe 对画外的点给低可见度，半个人出了左边时画外点一个都不可信（docs/49 §6.2 S4）
-    const side = lateralEvidence(pose)?.side;
+    const side = lateralEvidence(pose, input.aspect)?.side;
     if (side) return { state: 'partial', reason: 'side', side };
     if (outOfFrame(pose.screen, input.upperIsIntended) >= OUT_OF_FRAME_POINTS) return { state: 'partial', reason: 'bounds' };
   }

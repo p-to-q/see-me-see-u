@@ -33,6 +33,8 @@ export type PoseIn =
     frame: VideoFrame | ImageBitmap;
     /** 主线程的 `performance.now()`，严格递增。worker 的时钟原点不同，所以时间戳只用这一个 */
     stamp: number;
+    /** 这张输入帧自己的宽高比；回执原样带回，不能拿下一张视频尺寸配旧 pose。 */
+    aspect: number;
     /** 非 null 才抠图；generation 把迟到回执隔离在原观众内。 */
     maskGeneration: number | null;
   };
@@ -43,7 +45,7 @@ export type PoseOut =
   /** 起不来（init 失败）。之后这个 worker 不再可用 */
   | { type: 'error'; error: string }
   | {
-    type: 'pose'; stamp: number; world: Landmark[] | null; screen: Landmark[] | null; score: number; inferMs: number;
+    type: 'pose'; stamp: number; aspect: number; world: Landmark[] | null; screen: Landmark[] | null; score: number; inferMs: number;
     /**
      * MediaPipe 这一帧给出的**其余**几个人（下标 1..n−1）。`numPoses = 1` 时永远不出现。
      * 顺序不保证、不带身份（docs/24 #4681）：身份由主线程的 `core/src/people.ts` 跟出来。

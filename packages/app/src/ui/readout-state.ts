@@ -78,6 +78,8 @@ export interface ReadoutInput {
    * 这个开关也原样递过去：从画面下边出去的腿不是"部分出画"，头被切照样是。缺省 false
    */
   upperIsIntended?: boolean;
+  /** 摄像头画面宽 / 高；WRN12 与取景/小屏共用。 */
+  aspect?: number;
 }
 
 export interface Readout {
@@ -318,7 +320,7 @@ export function assess(input: ReadoutInput, inferred = true): Assessment {
     if (seen !== null && total > 0 && seen < total / 2) {
       levels.joints = 'alarm'; hit.add('ALM01');
     } else if (pose!.screen?.length
-      && (lateralEvidence(pose)?.side || outOfFrame(pose!.screen, input.upperIsIntended) >= PREVIEW.outOfFramePoints)) {
+      && (lateralEvidence(pose, input.aspect)?.side || outOfFrame(pose!.screen, input.upperIsIntended) >= PREVIEW.outOfFramePoints)) {
       // 从左右走出去的也是部分出画，和小屏同一把尺子（`lateralEvidence`，按躯干坐标判，docs/49 §6.2 S4）。
       // **出画不给「关节」那一行上色。** 出画的点照样是看得见的点：截图上 33/33 被涂成琥珀，
       // 读起来是"全都看见了，但有问题"—— 一行数和它的颜色自相矛盾。出画这件事没有哪一行在量，

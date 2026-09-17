@@ -212,6 +212,8 @@ export interface ClassifierFrame {
    * 那时腿不在是预期：进上半身走快档；**不用尺度趋势判退后**（摄像头自己在缩放，尺度不再说明人在动）。
    */
   cameraFraming?: boolean;
+  /** 这一帧 `screen` 坐标所属的原始画幅；缺省沿用构造时的兼容值。 */
+  aspect?: number;
 }
 
 export interface FramingClassifier {
@@ -235,7 +237,7 @@ const leak = (held: number, on: boolean, dt: number): number => (on ? held + dt 
 
 export function createFramingClassifier(opts: ClassifierOptions = {}): FramingClassifier {
   const T = AUTOFRAME;
-  const aspect = opts.aspect ?? 16 / 9;
+  const fallbackAspect = Number.isFinite(opts.aspect) && (opts.aspect ?? 0) > 0 ? opts.aspect! : 16 / 9;
   let mode: FramingMode = 'full';
   let why: FramingWhy = 'start';
   let inMode = 0;
@@ -285,6 +287,7 @@ export function createFramingClassifier(opts: ClassifierOptions = {}): FramingCl
       cam = frame?.cameraFraming === true;
       inMode += dt;
       cooldown = Math.max(0, cooldown - dt);
+      const aspect = Number.isFinite(frame?.aspect) && (frame?.aspect ?? 0) > 0 ? frame!.aspect! : fallbackAspect;
       const ev = frameEvidence(pose, aspect);
 
       if (!ev) {

@@ -298,6 +298,8 @@ export class WebcamCapture implements Capture {
   #tickTimes: number[] = [];
   #lastVideoTime = -1;
   #lastStamp = -1;
+  /** 最近一次已接受推理所属输入帧的画幅；不是 `<video>` 此刻可能已变化的新尺寸。 */
+  #frameAspect: number | null = null;
   #running = false;
   #rafId = 0;
   #error: string | null = null;
@@ -374,6 +376,10 @@ export class WebcamCapture implements Capture {
   get inferredAt(): number { return this.#inferredAt; }
   /** 单次推理耗时（毫秒，EMA；worker 那条路才有） */
   get inferMs(): number { return this.#inferMs; }
+  /** MediaPipe `screen` 坐标所属的原始画幅；驱动尚未报尺寸时交给 Capture 的统一回退。 */
+  get frameAspect(): number | null {
+    return this.#frameAspect;
+  }
 
   /**
    * 推理频率上限（Hz）。帧调速器放下「推理」那一级时降到 `GOVERNOR.inferenceHzShed`（docs/48 §4）。
@@ -484,6 +490,7 @@ export class WebcamCapture implements Capture {
     this.#mask?.close();
     this.#mask = null;
     this.#latest = null;
+    this.#frameAspect = null;
     this.#fps = 0;
   }
 
@@ -625,6 +632,7 @@ export class WebcamCapture implements Capture {
     const stamp = now <= this.#lastStamp ? this.#lastStamp + 1 : now;
     this.#lastStamp = stamp;
     this.#lastSent = now;
+    const aspect = videoAspect(this.video) ?? 16 / 9;
     if (typeof VideoFrame !== 'undefined') {
       let frame: VideoFrame;
       try { frame = new VideoFrame(this.video, { timestamp: Math.round(stamp * 1000) }); }
@@ -633,7 +641,7 @@ export class WebcamCapture implements Capture {
       this.#inFlight = true;
       this.#sentAt = now;
       try {
-        engine.post({ type: 'frame', frame, stamp, maskGeneration }, [frame]);
+        engine.post({ type: 'frame', frame, stamp, aspect, maskGeneration }, [frame]);
       } catch (error) {
         try { frame.close(); } catch { /* 转移失败时所有权仍在主线程 */ }
         if (maskGeneration !== null) this.#maskDemand.settle(maskGeneration, false);
@@ -648,7 +656,7 @@ export class WebcamCapture implements Capture {
       if (!this.#running || this.#engine !== engine) { bmp.close(); this.#inFlight = false; return; }
       const maskGeneration = this.#maskDemand.begin(engine.segmenterReady);
       try {
-        engine.post({ type: 'frame', frame: bmp, stamp, maskGeneration }, [bmp]);
+        engine.post({ type: 'frame', frame: bmp, stamp, aspect, maskGeneration }, [bmp]);
       } catch (error) {
         try { bmp.close(); } catch { /* 转移失败时所有权仍在主线程 */ }
         if (maskGeneration !== null) this.#maskDemand.settle(maskGeneration, false);
@@ -662,6 +670,7 @@ export class WebcamCapture implements Capture {
       this.#inFlight = false;
       if (!(m.stamp > this.#accepted)) return;
       this.#accepted = m.stamp;
+      this.#frameAspect = cleanAspect(m.aspect);
       const now = performance.now();
       this.#latest = m.world?.length
         ? { world: m.world, screen: m.screen ?? undefined, score: m.score, t: m.stamp }
@@ -813,6 +822,7 @@ export class WebcamCapture implements Capture {
     const stamp = now <= this.#lastStamp ? this.#lastStamp + 1 : now;
     this.#lastStamp = stamp;
     this.#lastSent = now;
+    const aspect = videoAspect(this.video);
 
     const res = lm.detectForVideo(this.video, stamp);
     const world = res.worldLandmarks?.[0];
@@ -835,6 +845,7 @@ export class WebcamCapture implements Capture {
     }
     res.close?.();
     this.#inferredAt = stamp;
+    this.#frameAspect = aspect;
 
     // 顺手上报"有没有人"给无人降帧（shell/idle.ts）。
     // 这件事只有采集端知道，让它自己说，收口的 main.ts 就一行都不用改。
@@ -878,6 +889,16 @@ async function listVideoInputs(): Promise<CamDevice[]> {
 function currentDeviceId(stream: MediaStream | null): string {
   return stream?.getVideoTracks()[0]?.getSettings?.().deviceId ?? '';
 }
+
+/** 输入帧自身的画幅。读取失败留给 Capture 的统一 16:9 回退，不把坏尺寸扩散成 NaN。 */
+function videoAspect(video: Pick<HTMLVideoElement, 'videoWidth' | 'videoHeight'>): number | null {
+  const width = video.videoWidth;
+  const height = video.videoHeight;
+  return Number.isFinite(width) && Number.isFinite(height) && width > 0 && height > 0 ? width / height : null;
+}
+
+const cleanAspect = (value: number): number | null =>
+  Number.isFinite(value) && value > 0 ? value : null;
 
 /** 本地有模型就用本地（现场断网），否则 CDN */
 async function resolveModel(m: { local: string; cdn: string }): Promise<string> {

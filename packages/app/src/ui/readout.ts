@@ -103,7 +103,7 @@ const HEIGHT_VAR = '--sb-readout-h';
 
 export interface Readout {
   /** 每帧调一次。`pose` / `features` 是帧循环手上那一份，不另算 */
-  update(pose: RawPose | null, features: MotionFeatures | null, inferenceHz: number, dt: number): void;
+  update(pose: RawPose | null, features: MotionFeatures | null, inferenceHz: number, dt: number, aspect?: number): void;
   dispose(): void;
 }
 
@@ -220,7 +220,7 @@ export function mountReadout(options: ReadoutOptions): Readout | null {
   resize?.observe(root);
 
   return {
-    update(pose, features, inferenceHz, dt) {
+    update(pose, features, inferenceHz, dt, aspect) {
       since += Number.isFinite(dt) && dt > 0 ? dt : 0;
       // 收着的时候不写 DOM：看不见的数不值得一次样式重算
       if (!open || since < SAMPLE_SECONDS) return;
@@ -230,6 +230,7 @@ export function mountReadout(options: ReadoutOptions): Readout | null {
       const input = {
         pose, features, inferenceHz, live: options.live?.() ?? true,
         upperIsIntended: options.upperIsIntended?.() ?? false,
+        aspect,
       };
       const r = readOut(input);
       // 告警憋过才换（readout-state.ts 的 createAlarmWatch），所以喂进去的是这两次采样之间真实过去的时间

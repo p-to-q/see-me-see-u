@@ -18,6 +18,8 @@ export interface Capture {
   takeMask(): ImageBitmap | null;
   /** 慢回路的单张需求。可选：回放/空采集没有分割器。 */
   setMaskDemand?(wanted: boolean): void;
+  /** 当前输入画面的宽高比。尺寸尚未就绪或回放无元数据时为 null / 缺省。 */
+  readonly frameAspect?: number | null;
   readonly fps: number;
   readonly lastError: string | null;
   stop(): void;
@@ -40,6 +42,15 @@ export interface Capture {
   latestAll?(): readonly RawPose[];
   /** 运行中改人数上限。没实现 = 这一路只认一个人 */
   setPeople?(n: number): void;
+}
+
+/**
+ * 一条输入几何的统一出口。消费者不得各自去摸 `<video>`，否则换源、回放和坏驱动会分叉。
+ * 16:9 是旧录制没有尺寸元数据时的既有契约；只接受有限正数。
+ */
+export function captureAspect(capture: Pick<Capture, 'frameAspect'>): number {
+  const value = capture.frameAspect;
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : 16 / 9;
 }
 
 export type CaptureKind = 'webcam' | 'replay';

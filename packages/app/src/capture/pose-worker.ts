@@ -205,6 +205,7 @@ function onFrame(m: Extract<PoseIn, { type: 'frame' }>): void {
     const out: PoseOut = {
       type: 'pose',
       stamp: m.stamp,
+      aspect: m.aspect,
       inferMs,
       world: found ? world!.map(toLandmark) : null,
       screen: found && screen?.length ? screen.map(toLandmark) : null,

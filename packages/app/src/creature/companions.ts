@@ -175,7 +175,7 @@ export function createCompanions(opts: { seed: () => number }): Companions {
           const cooked = e.pipes.refiner && ctx.refineOn ? e.pipes.refiner.apply(raw, dt) : raw;
           const tracked = e.pipes.stabilizer.apply(buildSkeleton(mediapipeToWorld(cooked), cooked.world, cooked.t), dt);
           if (e.pipes.refiner && ctx.refineOn) clampFold(tracked);
-          const reading = e.classifier.update(raw, dt);
+          const reading = e.classifier.update(raw, dt, { aspect: ctx.aspect });
           e.legHold = stepToward(e.legHold, decide('auto', reading).holdLegs ? 1 : 0, dt, AUTOFRAME.legBlendSeconds);
           const human = holdLegs(tracked, e.legHold);
           const features = e.motion.update(human, dt);

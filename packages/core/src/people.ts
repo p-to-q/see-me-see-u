@@ -170,7 +170,8 @@ export interface PeopleFrame {
 }
 
 export interface PeopleTracker {
-  update(poses: readonly (RawPose | null | undefined)[], dt: number): PeopleFrame;
+  /** `aspect` 可随 Capture 换源更新；缺省沿用创建时的值。 */
+  update(poses: readonly (RawPose | null | undefined)[], dt: number, aspect?: number): PeopleFrame;
   readonly current: PeopleFrame;
   /** 运行中改人数上限（控件条）。多出来的身体按"最后拿到的先让"退场 */
   setCap(n: number): void;
@@ -263,7 +264,9 @@ export function bestAssignment(cost: readonly (readonly number[])[], nTracks: nu
 export const leak = (held: number, on: boolean, dt: number): number => (on ? held + dt : Math.max(0, held - 2 * dt));
 
 export function createPeopleTracker(opts: { cap?: number; aspect?: number } = {}): PeopleTracker {
-  const aspect = opts.aspect ?? 16 / 9;
+  const cleanAspect = (value: number | undefined): number =>
+    typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : 16 / 9;
+  let aspect = cleanAspect(opts.aspect);
   let cap = clampCap(opts.cap ?? PEOPLE.defaultCap);
   let tracks: Internal[] = [];
   let ghosts: Ghost[] = [];
@@ -372,7 +375,8 @@ export function createPeopleTracker(opts: { cap?: number; aspect?: number } = {}
   }
 
   return {
-    update(poses, dtIn) {
+    update(poses, dtIn, aspectIn = aspect) {
+      aspect = cleanAspect(aspectIn);
       const dt = Number.isFinite(dtIn) && dtIn > 0 ? Math.min(dtIn, 0.25) : 0;
       clock += dt;
       const raw: PersonObs[] = [];

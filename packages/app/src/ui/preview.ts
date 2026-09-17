@@ -102,7 +102,7 @@ export function previewReservedTop(): number {
 
 export interface Preview {
   /** 每帧调一次。`pose` 是帧循环手上那一份，不另取 */
-  update(pose: RawPose | null, dt: number): void;
+  update(pose: RawPose | null, dt: number, aspect?: number): void;
   dispose(): void;
 }
 
@@ -294,11 +294,11 @@ export function mountPreview(opts: {
   }
 
   return {
-    update(pose, dt) {
+    update(pose, dt, aspect) {
       const camera = opts.cameraOn();
       attach(camera ? opts.video() : null);
       const upper = opts.framing?.() ?? false;
-      const seen = watch.update({ camera, pose, upperIsIntended: upper }, dt);
+      const seen = watch.update({ camera, pose, upperIsIntended: upper, aspect }, dt);
       say(seen);
       sayNotice(opts.notice?.() ?? null);
       applyCrop(cropActive({

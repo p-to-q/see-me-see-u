@@ -30,7 +30,7 @@ import { createProbeState, stepProbe } from '../../core/src/people-probe.ts';
 import { AUTOFRAME, BUDGET, CAPTURE, GOVERNOR, NASCENT, PEOPLE, REFINE, STAGE, WARM } from '../../core/src/tuning.ts';
 import type { Genome, MotionFeatures, PartMeta, Presence, Skeleton, SlotKey, SlotPick, Tier } from '../../core/src/types.ts';
 
-import { createCapture, startInitialCapture, type Capture, type StartedCapture } from './capture/capture.ts';
+import { captureAspect, createCapture, startInitialCapture, type Capture, type StartedCapture } from './capture/capture.ts';
 import { createPartLibrary } from './assets/library.ts';
 import { createCreature } from './creature/creature.ts';
 import { createCompanions, createPipes, type CompanionResult } from './creature/companions.ts';
@@ -1019,6 +1019,8 @@ async function boot(): Promise<void> {
     // 多人（docs/50）：跟踪器给身份，"主身体"那个人的那一份才是 `live` —— 小屏、读数、取景、声音都跟着他。
     // 单人时 `people` 是 null，`live` 就是 `capture.latest()`，一个字都不变
     const latest = capture.latest();
+    // 本帧所有 screen-space 消费者共用一份画幅。换源后下一帧自然读新值；回放/坏驱动回落 16:9。
+    const sourceAspect = captureAspect(capture);
     const poseAt = latest?.t;
     const inference = people
       ? freshInference(peopleInferenceAt, capture.inferredAt, poseAt, dt)
@@ -1031,7 +1033,7 @@ async function boot(): Promise<void> {
       : null;
     if (inferredPeople) detectedPeopleCount = inferredPeople.length;
     const crowd = people
-      ? (inference ? people.tracker.update(inferredPeople ?? [], inference.dt) : people.tracker.current)
+      ? (inference ? people.tracker.update(inferredPeople ?? [], inference.dt, sourceAspect) : people.tracker.current)
       : null;
     if (people) people.frame = crowd;
 
@@ -1141,9 +1143,9 @@ async function boot(): Promise<void> {
     // 它要回答"画面里此刻是什么样"，插值出来的那一份不是画面里有过的样子
     // 摄像头自己在取景时，腿被它裁掉是预期（docs/49 §6.3 三）：分类器和引导都要知道
     const camFraming = cameraFraming();
-    framing = decide(framingPolicy, framer.update(live, dt, { cameraFraming: camFraming }), { cameraFraming: camFraming });
+    framing = decide(framingPolicy, framer.update(live, dt, { cameraFraming: camFraming, aspect: sourceAspect }), { cameraFraming: camFraming });
     legHold = stepToward(legHold, framing.holdLegs ? 1 : 0, dt, AUTOFRAME.legBlendSeconds);
-    preview?.update(live, dt);
+    preview?.update(live, dt, sourceAspect);
 
     // 伴随身体（docs/50 §4）：每个人各自的骨架、在场、站位。开场团块还没长出零件时（`emergence` 0）它们也不长
     // 稳定单人先判：命中时连 `bodyAt()` / CompanionContext 都不构造。
@@ -1152,6 +1154,7 @@ async function boot(): Promise<void> {
       dt, freshInference: inference !== null, plan: activePlan(), drift: planDrift(), refineOn, vitalityOn,
       bodies: people.shed ? 1 : people.plan.bodies,
       scale: nascent ? nascent.stats.emergence : 1,
+      aspect: sourceAspect,
     }) : null);
     if (people && crowdOut !== renderedCrowd) {
       creature.setCompanions(crowdOut?.companions ?? []);
@@ -1163,7 +1166,8 @@ async function boot(): Promise<void> {
     // 夹在舞台此刻的横向余量里（随景别连续变化）。
     // 台上有伴随身体时让位 —— 站位归 lineup；两个都是弹簧，加起来是连续的
     lateral = stepLateral(lateral, {
-      evidence: lateralEvidence(raw), room: stage.lateralRoom, enabled: !crowdOut?.companions.length,
+      evidence: lateralEvidence(raw, sourceAspect), room: stage.lateralRoom, enabled: !crowdOut?.companions.length,
+      aspect: sourceAspect,
       // 中景死区更小、弹簧更快：进中景已经是自适应取景，不受全景那条"相机距离不动"的主张约束
       upper: framing.shot === 'upper',
       // 我们自己的证据质量不够时的兜底：摄像头确认在自己取景就信它，回中线（`camFraming` 本帧已经算过一次）
@@ -1420,7 +1424,7 @@ async function boot(): Promise<void> {
     // 而"晚一帧"在一块 4Hz 刷新的读数上看不出来，正是 P21 说的那种坏法。
     // `raw` 和小屏幕吃的是同一份（滤波之前），理由也同：读数要说实话。
     // 调速器放下最后一级（UI）时读数停刷：它不驱动身体。小屏幕不停 —— 它回答的是「它有没有看见我」
-    if (!uiShed) readout?.update(live, lastFeatures, capture.fps, dt);
+    if (!uiShed) readout?.update(live, lastFeatures, capture.fps, dt, sourceAspect);
 
     if (hud) {
       // 多人取证（docs/50 §10）：这一帧**真的交给身体的**骨架和站位。只在 `?debug=1` 下写，
