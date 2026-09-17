@@ -354,8 +354,10 @@ node scripts/capture-smoothness/summarize.ts /tmp/run
 - `attribute.ts`：**按 `long-animation-frame` 的真实窗口切**，不按"连续忙碌的样本"切 ——
   解开帧率之后帧和帧之间的空闲不到 2ms，按忙碌段切会把几十个普通帧连成一段"300ms 长任务"（第一版就是这么错的）。
   每一帧里的样本按调用栈分到：节点构建 / 管线 / GLB 解码 / 镜像 / 上传 / GC / 装配 / 其他。
-- `GOV_AT="20:4,26:5,34:0"`：借 `?debug=1` 的 `__governorProbe` 在按下后第 20 秒把调速器**强制**拨到 L4（关后期）、
-  26 秒 L5（像素比）、34 秒拨回 L0 —— 拨开关本身的代价要在没有别的负载混进来的时候单独量。
+- `GOV_AT="20:4,26:5,34:0"`：借 `?debug=1` 的 `__governorProbe` 在按下后第 20 秒把调速器**强制**拨到
+  当前 L4（降像素比）、26 秒 L5（临时绕过后期）、34 秒拨回 L0。这个顺序与 `GOVERNOR_LADDER`
+  同源；本节下面那张“L4 关后期 / L5 像素比”是**调换顺序之前的历史取证**，不是今天的操作说明。
+  拨开关本身的代价要在没有别的负载混进来的时候单独量。写错层级 / 时刻现在会在开 Chrome 前直接失败。
 - `[governor]` / `[theseus]` / `[tier]` 三种调试行都带页面时刻 `@秒`，和 `long-animation-frame` 的 `startTime` 是同一个钟。
 
 ### 10.2 量到的来源（改前，B 场）
@@ -485,7 +487,10 @@ STEPS=1 QUERY=seed=7 node scripts/capture-smoothness/measure.ts http://localhost
 共享 device、保留 renderer 等候选都没有形成“只改这一项就稳定消失”的结果。今天失败时 `Debugger.pause` 多数完全不回答，
 也和上表第三轮“定时器活着、停在 poll”不是同一份原生状态。因此不能拿这些场次授权删除过渡或改 GPU 生命周期。
 
-探针现在做三件事防止再次误判：默认显示器节拍，帧成本压力测试才显式 `UNBOUNDED=1`；`run.json` 写实际 fps / 最大间隔 / Chrome 版本；
+探针现在做四件事防止再次误判：默认显示器节拍，帧成本压力测试才显式 `UNBOUNDED=1`；
+`invocation.json` 在开 Chrome 之前先写，失败诊断也有来历；`run.json` 写 commit / dirty、计划与最终 URL / QUERY、
+mode、DPR、CPU / 网络节流、冷暖缓存、操作时序、实际服务的带 hash 脚本 URL、fps / 最大间隔 / Chrome 版本；
+摄像头行按 `data-action="camera"` 定位且要求恰好一个，不再猜“第三个 DOM”；
 入口出现后的任何顶层重载直接写 `reload.txt` 并以 exit 4 失败，不能把产品自愈后的第二次启动算成第一次成功。产品的 4 秒重载兜底继续保留，
 但 Q1 不再作为观众必撞的 P0。这里仍然**没有真摄像头**；将来若在正常节拍 + 真窗口下再次稳定复现，再从那份新证据重开。
 

@@ -1,21 +1,92 @@
 // Capture smoothness probe. Raw CDP, no deps.
 // node measure.ts <baseUrl> <outDir> <mode: swap|deeplink> [recordSec=45] [cpuThrottle=1] [warmCache=0]
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { createWriteStream, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import {
+  CAMERA_EXIT_SELECTOR, isProbeMode, normaliseQuery, parseGovernorSchedule, probeRunManifest, probeUrl,
+} from './run-meta.ts';
 
-const [base, out, mode = 'swap', recS = '45', throttle = '1', warm = '0'] = process.argv.slice(2);
+const [base, out, modeArg = 'swap', recS = '45', throttleArg = '1', warm = '0'] = process.argv.slice(2);
 // fileURLToPath 而不是 `.pathname`：路径里有非 ASCII（`今天`）时 pathname 是百分号编码的，
 // Chrome 拿它找不到假摄像头的 y4m，摄像头那一路静静地 NotFoundError
 const HERE = fileURLToPath(new URL('.', import.meta.url));
+const ROOT = resolve(HERE, '../..');
+const failUsage = (message: string): never => {
+  console.error(`${message}\nusage: node measure.ts <baseUrl> <outDir> <swap|deeplink> [recordSec=45] [cpuThrottle=1] [warmCache=0]`);
+  process.exit(1);
+};
+if (!base || !out) failUsage('missing baseUrl or outDir');
+if (!isProbeMode(modeArg)) failUsage(`invalid mode: ${modeArg}`);
+const mode = modeArg;
+try {
+  const u = new URL(base);
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') failUsage(`baseUrl must be http(s): ${base}`);
+} catch { failUsage(`invalid baseUrl: ${base}`); }
+const recordSeconds = Number(recS);
+const cpuThrottle = Number(throttleArg);
+if (!Number.isFinite(recordSeconds) || recordSeconds <= 0) failUsage(`recordSec must be > 0: ${recS}`);
+if (!Number.isFinite(cpuThrottle) || cpuThrottle < 1) failUsage(`cpuThrottle must be >= 1: ${throttleArg}`);
+if (warm !== '0' && warm !== '1') failUsage(`warmCache must be 0 or 1: ${warm}`);
+const requestedDpr = process.env.DPR === undefined ? null : Number(process.env.DPR);
+if (requestedDpr !== null && (!Number.isFinite(requestedDpr) || requestedDpr <= 0)) failUsage(`DPR must be > 0: ${process.env.DPR}`);
+if (process.env.NET !== undefined && process.env.NET !== 'slow') failUsage(`NET must be slow or unset: ${process.env.NET}`);
+const hoverMs = Number(process.env.HOVER_MS ?? 1500);
+const watchdogMs = Number(process.env.WATCHDOG_MS ?? 2000);
+if (!Number.isFinite(hoverMs) || hoverMs < 0) failUsage(`HOVER_MS must be >= 0: ${process.env.HOVER_MS}`);
+if (!Number.isFinite(watchdogMs) || watchdogMs < 0) failUsage(`WATCHDOG_MS must be >= 0: ${process.env.WATCHDOG_MS}`);
+let governorSchedule;
+try { governorSchedule = parseGovernorSchedule(process.env.GOV_AT); }
+catch (e) { failUsage(e instanceof Error ? e.message : String(e)); }
+const query = normaliseQuery(process.env.QUERY);
+const plannedUrl = probeUrl(base, mode, query);
+const cameraSelector = JSON.stringify(CAMERA_EXIT_SELECTOR);
 const videoFixture = process.env.VIDEO_FIXTURE ?? `${HERE}/figure.y4m`;
+mkdirSync(`${out}/shots`, { recursive: true });
+const gitText = (args: string[]): string | null => {
+  try { return execFileSync('git', args, { cwd: ROOT, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim(); }
+  catch { return null; }
+};
+const commit = gitText(['rev-parse', 'HEAD']);
+const status = gitText(['status', '--porcelain=v1']);
+const source = { commit, dirty: status === null ? null : status.length > 0 };
+const startedAt = new Date().toISOString();
+// 先落参数再开 Chrome：即使启动 / 重载 / 停摆失败，诊断文件也不会变成无来历孤件。
+writeFileSync(`${out}/invocation.json`, `${JSON.stringify({
+  schemaVersion: 1,
+  startedAt,
+  source,
+  target: { baseUrl: base, mode, query, plannedUrl },
+  workload: { videoFixture, recordSeconds },
+  cache: { warmProfile: warm === '1', disabledByByteProbe: process.env.BYTES === '1' },
+  emulation: {
+    cadence: process.env.UNBOUNDED === '1' ? 'unbounded' : 'display',
+    headed: process.env.HEADED === '1',
+    requestedDpr,
+    cpuThrottle,
+    network: process.env.NET ?? 'native',
+  },
+  actions: {
+    selector: CAMERA_EXIT_SELECTOR,
+    noClick: process.env.NOCLICK === '1',
+    hover: process.env.HOVER === '1',
+    hoverMs: process.env.HOVER === '1' ? hoverMs : null,
+    governorSchedule,
+  },
+  diagnostics: {
+    watchdogMs,
+    bytes: process.env.BYTES === '1',
+    trace: process.env.TRACE === '1',
+    profile: process.env.PROFILE === '1',
+    nativeSample: process.env.NATIVE_SAMPLE === '1',
+  },
+}, null, 2)}\n`);
 if (!existsSync(videoFixture)) {
   console.error(`missing fake-camera fixture: ${videoFixture}\nGenerate one with docs/48 §9, then pass VIDEO_FIXTURE=/absolute/path/file.y4m.`);
   process.exit(1);
 }
-mkdirSync(`${out}/shots`, { recursive: true });
 const transientProfile = warm !== '1';
 // 冷缓存运行不该在仓库里留下几十 MB 的 Chrome 状态。热缓存才用固定目录；需要并行或隔离时可显式改路径。
 const profile = transientProfile
@@ -45,7 +116,7 @@ process.once('exit', () => {
 // 被 kill 的时候也要带走 Chrome：否则那个孤儿 Chrome 占着 profile-warm，下一次起的 Chrome 直接交给它然后退出
 //（症状只有一行 "no chrome"，实测踩过）
 for (const sig of ['SIGTERM', 'SIGINT'] as const) process.on(sig, () => { kill(); process.exit(130); });
-setTimeout(() => { console.log('hard timeout'); kill(); process.exit(2); }, (Number(recS) + 150) * 1000);
+setTimeout(() => { console.log('hard timeout'); kill(); process.exit(2); }, (recordSeconds + 150) * 1000);
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 let target: { webSocketDebuggerUrl: string } | undefined;
@@ -95,16 +166,21 @@ const reloadGuard = setInterval(() => {
   kill();
   process.exit(4);
 }, 50);
-if (Number(throttle) > 1) await send('Emulation.setCPUThrottlingRate', { rate: Number(throttle) });
+if (cpuThrottle > 1) await send('Emulation.setCPUThrottlingRate', { rate: cpuThrottle });
 // DPR=3 → 高 DPI 屏；NET=slow → 模型 / 部件走慢网（下行 1.6Mbps、150ms）
-if (process.env.DPR) {
-  await send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 800, deviceScaleFactor: Number(process.env.DPR), mobile: false });
+if (requestedDpr !== null) {
+  await send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 800, deviceScaleFactor: requestedDpr, mobile: false });
 }
+const slowNetwork = { latencyMs: 150, downloadBytesPerSecond: 200 * 1024, uploadBytesPerSecond: 100 * 1024 };
 if (process.env.NET === 'slow') {
   await send('Network.enable');
-  await send('Network.emulateNetworkConditions', { offline: false, latency: 150, downloadThroughput: 200 * 1024, uploadThroughput: 100 * 1024 });
+  await send('Network.emulateNetworkConditions', {
+    offline: false,
+    latency: slowNetwork.latencyMs,
+    downloadThroughput: slowNetwork.downloadBytesPerSecond,
+    uploadThroughput: slowNetwork.uploadBytesPerSecond,
+  });
 }
-const QUERY = process.env.QUERY ? `&${process.env.QUERY}` : '';
 // BYTES=1 → 按 docs/13 的口径数首屏：标签页 → 选择页 → 舞台出现为止的传输字节（encodedDataLength）
 const bytes = { total: 0, requests: 0, byUrl: new Map<string, number>(), frozen: false };
 if (process.env.BYTES === '1') {
@@ -156,7 +232,7 @@ const waitFor = async (expr: string, ms: number): Promise<boolean> => {
 
 const tNav = Date.now();
 if (mode === 'swap') {
-  await send('Page.navigate', { url: `${base}/?debug=1${QUERY}` });
+  await send('Page.navigate', { url: plannedUrl });
   const entryReady = await waitFor(`!!document.querySelector('.sb-entry button.sb-act')`, 30000);
   console.log('entry', entryReady);
   if (!entryReady) { clearInterval(reloadGuard); kill(); process.exit(1); }
@@ -167,7 +243,7 @@ if (mode === 'swap') {
   await evalJs(`document.querySelector('.sb-entry button.sb-act').click()`);
   await sleep(3500);
   for (const type of ['keyDown', 'keyUp']) await send('Input.dispatchKeyEvent', { type, key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 });
-  console.log('stage', await waitFor(`document.querySelectorAll('.sb-exits .sb-exit').length >= 3`, 60000), `${(Date.now() - tNav) / 1000}s`);
+  console.log('stage', await waitFor(`!!document.querySelector(${cameraSelector})`, 60000), `${(Date.now() - tNav) / 1000}s`);
   if (process.env.BYTES === '1') {
     await sleep(3000);   // 舞台出现之后，预取的部件还在路上（main.ts 等它最多 2.5s）
     bytes.frozen = true;
@@ -189,7 +265,7 @@ if (mode === 'swap') {
 } else {
   // deeplink 也必须吃 QUERY：Q3 的历史 A/M/R 场原以为钉了 seed=7，实际这里曾把 QUERY 丢掉，
   // “同一种子 A/B”因此不成立（docs/48 §10.4）。两条入口必须共用同一组实验变量。
-  await send('Page.navigate', { url: `${base}/?theme=porcelain&debug=1${QUERY}` });
+  await send('Page.navigate', { url: plannedUrl });
   const pageReady = await waitFor(`location.search.includes('theme=porcelain') && document.readyState === 'complete'`, 30000);
   if (!pageReady) { clearInterval(reloadGuard); kill(); process.exit(1); }
   guardedNavigationCount = topLevelNavigations;
@@ -215,19 +291,31 @@ if (profiling) {
   await send('Profiler.start');
 }
 const clickPerf = await evalJs(`(performance.mark('probe:click'), performance.now())`);
+let cameraActionText: string | null = null;
 // GOV_AT="20:4,32:0" → 按下后第 20 秒把调速器拨到 L4、第 32 秒拨回 L0（`?debug=1` 的 `__governorProbe`）。
 // 拨开关本身是不是一次长任务，要在没有别的负载的时候单独看（docs/48 §8 第 3 条）
-for (const spec of (process.env.GOV_AT ?? '').split(',').filter(Boolean)) {
-  const [sec, lvl] = spec.split(':').map(Number);
+for (const { atSeconds, level } of governorSchedule) {
   setTimeout(() => {
-    void evalJs(`(window.__probe.gov = window.__probe.gov || [], window.__probe.gov.push([Math.round(performance.now()), ${lvl}]), window.__governorProbe?.apply(${lvl}))`);
-  }, sec * 1000);
+    void evalJs(`(window.__probe.gov = window.__probe.gov || [], window.__probe.gov.push([Math.round(performance.now()), ${level}]), window.__governorProbe?.apply(${level}))`);
+  }, atSeconds * 1000);
 }
 if (mode === 'swap') {
+  const cameraTarget = await evalJs(`(() => {
+    const matches = [...document.querySelectorAll(${cameraSelector})];
+    return { count: matches.length, text: (matches[0]?.textContent || '').replace(/\\s+/g, ' ').trim() };
+  })()`);
+  if (cameraTarget?.count !== 1) {
+    writeFileSync(`${out}/action-target.json`, `${JSON.stringify({ selector: CAMERA_EXIT_SELECTOR, ...cameraTarget }, null, 2)}\n`);
+    console.error(`camera action target count was ${cameraTarget?.count ?? 'unknown'}, expected 1`);
+    clearInterval(reloadGuard);
+    kill();
+    process.exit(5);
+  }
+  cameraActionText = cameraTarget.text;
   // HOVER=1 → 观众先把手移到「摄像头」那一行上（悬停预取），停 HOVER_MS 再按
   if (process.env.HOVER === '1') {
-    await evalJs(`document.querySelectorAll('.sb-exits .sb-exit')[2].dispatchEvent(new PointerEvent('pointerenter'))`);
-    await sleep(Number(process.env.HOVER_MS ?? 1500));
+    await evalJs(`document.querySelector(${cameraSelector}).dispatchEvent(new PointerEvent('pointerenter'))`);
+    await sleep(hoverMs);
   }
   // NOCLICK=1 → 只记下"按下"的时刻，不按。深链（`?theme=`）没有展签，开机就是摄像头 ——
   // 那时再按「摄像头」那一行是**关**摄像头，量出来的是回放，不是改前那一场的摄像头稳态
@@ -235,7 +323,7 @@ if (mode === 'swap') {
     console.log(`step exits: ${JSON.stringify(await evalJs(`[...document.querySelectorAll('.sb-exits .sb-exit')].map((e, i) => i + ':' + (e.textContent || '').replace(/\\s+/g, ' ').trim().slice(0, 30))`))}`);
   }
   if (process.env.NOCLICK === '1') await evalJs(`window.__probe.click = performance.now()`);
-  else await evalJs(`(window.__probe.click = performance.now(), document.querySelectorAll('.sb-exits .sb-exit')[2].click())`);
+  else await evalJs(`(window.__probe.click = performance.now(), document.querySelector(${cameraSelector}).click())`);
 } else {
   await evalJs(`window.__probe.click = performance.now()`);
 }
@@ -245,7 +333,6 @@ console.log('clicked', clickPerf);
 // 卡死的页面上 Runtime.evaluate 永远不返回（截图也一样），脚本会一直挂到 hard timeout —— 那不是结论。
 // 所以心跳只在上一次返回之后才发，另一个定时器看"rAF 计数最后一次增长是什么时候"。
 // 判定卡死时先要一个 Debugger.pause 的栈（JS 在跑的死循环能被打断；卡在原生等待里拿不到，也照实写下来）。
-const watchdogMs = Number(process.env.WATCHDOG_MS ?? 2000);
 if (watchdogMs > 0) {
   let lastCount = -1;
   let lastAdvance = Date.now();
@@ -326,7 +413,7 @@ while (Date.now() - tClick < 12000) {
   await sleep(150);
 }
 writeFileSync(`${out}/shots/index.tsv`, shots.join('\n') + '\n');
-const remain = Number(recS) * 1000 - (Date.now() - tClick);
+const remain = recordSeconds * 1000 - (Date.now() - tClick);
 if (remain > 0) await sleep(remain);
 
 if (tracing) {
@@ -356,15 +443,62 @@ const elapsedRaf = raf.length > 1 ? raf[raf.length - 1] - raf[0] : 0;
 const measuredRafFps = elapsedRaf > 0 ? Number((((raf.length - 1) * 1000) / elapsedRaf).toFixed(1)) : null;
 let maxRafGap = 0;
 for (let i = 1; i < raf.length; i++) maxRafGap = Math.max(maxRafGap, raf[i] - raf[i - 1]);
-writeFileSync(`${out}/run.json`, `${JSON.stringify({
-  cadence: unbounded ? 'unbounded' : 'display',
-  headed: process.env.HEADED === '1',
-  browser: browserVersion,
-  videoFixture,
-  measuredRafFps,
-  maxRafGapMs: Number(maxRafGap.toFixed(1)),
-  rafSamples: raf.length,
-}, null, 2)}\n`);
+const runtime = await evalJs(`({
+  href: location.href,
+  dpr: devicePixelRatio,
+  width: innerWidth,
+  height: innerHeight,
+  userAgent: navigator.userAgent,
+  scripts: performance.getEntriesByType('resource').map((e) => e.name).filter((u) => /\\/assets\\/main-[^/]+\\.js(?:$|\\?)/.test(u)),
+})`) as {
+  href?: string; dpr?: number; width?: number; height?: number; userAgent?: string; scripts?: string[];
+} | undefined;
+const manifest = probeRunManifest({
+  source,
+  target: { baseUrl: base, mode, query, plannedUrl, finalUrl: runtime?.href ?? plannedUrl },
+  browser: { product: browserVersion, userAgent: runtime?.userAgent ?? null, headed: process.env.HEADED === '1' },
+  workload: { videoFixture, recordSeconds },
+  cache: { warmProfile: warm === '1', disabledByByteProbe: process.env.BYTES === '1' },
+  emulation: {
+    cadence: unbounded ? 'unbounded' : 'display',
+    viewport: {
+      width: runtime?.width ?? 1280,
+      height: runtime?.height ?? 800,
+      requestedDpr,
+      actualDpr: typeof runtime?.dpr === 'number' ? runtime.dpr : null,
+    },
+    cpuThrottle,
+    network: process.env.NET === 'slow'
+      ? { preset: 'slow', ...slowNetwork }
+      : { preset: 'native', latencyMs: 0, downloadBytesPerSecond: 0, uploadBytesPerSecond: 0 },
+  },
+  actions: {
+    noClick: process.env.NOCLICK === '1',
+    hover: process.env.HOVER === '1',
+    hoverMs: process.env.HOVER === '1' ? hoverMs : null,
+    governorSchedule,
+  },
+  measurement: {
+    measuredRafFps,
+    maxRafGapMs: Number(maxRafGap.toFixed(1)),
+    rafSamples: raf.length,
+  },
+});
+const run = {
+  ...manifest,
+  startedAt,
+  completedAt: new Date().toISOString(),
+  actionTarget: mode === 'swap' ? { selector: CAMERA_EXIT_SELECTOR, text: cameraActionText } : null,
+  servedScripts: runtime?.scripts ?? [],
+  diagnostics: {
+    watchdogMs,
+    bytes: process.env.BYTES === '1',
+    trace: tracing,
+    profile: profiling,
+    nativeSample: process.env.NATIVE_SAMPLE === '1',
+  },
+};
+writeFileSync(`${out}/run.json`, `${JSON.stringify(run, null, 2)}\n`);
 const hud = await evalJs(`[...document.querySelectorAll('body *')].find(e => e.children.length >= 6 && /fps/.test(e.textContent||''))?.textContent?.replace(/\\s+/g,' ')`);
 writeFileSync(`${out}/console.txt`, consoleLog.join('\n') + `\nHUD ${hud}\n`);
 console.log('done', out, `cadence=${unbounded ? 'unbounded' : 'display'}`, `raf=${measuredRafFps ?? 'n/a'}fps`, `max-gap=${maxRafGap.toFixed(1)}ms`);
