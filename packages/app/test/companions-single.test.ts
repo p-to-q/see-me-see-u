@@ -10,6 +10,7 @@ const SINGLE: PeopleFrame = { tracks: [], selected: [1], primary: 1 };
 const MULTI: PeopleFrame = { tracks: [], selected: [1, 2], primary: 1 };
 const CONTEXT: CompanionContext = {
   dt: 1 / 120,
+  freshInference: true,
   plan: 'rig',
   drift: 0,
   refineOn: false,

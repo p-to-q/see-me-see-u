@@ -155,6 +155,11 @@ export interface PersonTrack {
   primary: boolean;
 }
 
+/** `reacquired` 只是一次新推理事件；重复渲染同一份 PeopleFrame 不能重复消费它。 */
+export function isFreshReacquisition(freshInference: boolean, track: Pick<PersonTrack, 'reacquired'>): boolean {
+  return freshInference && track.reacquired;
+}
+
 export interface PeopleFrame {
   /** 活着的轨迹（含还没转正的），按 id 升序 */
   tracks: readonly PersonTrack[];

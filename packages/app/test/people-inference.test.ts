@@ -7,12 +7,14 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { freshInference } from '../src/capture/inference-clock.ts';
-import { createPeopleTracker } from '../../core/src/people.ts';
+import { createPeopleTracker, isFreshReacquisition } from '../../core/src/people.ts';
 import { stepProbe, type ProbeState } from '../../core/src/people-probe.ts';
 import { PEOPLE } from '../../core/src/tuning.ts';
 import { person, WHOLE } from '../../core/test/framing-people.ts';
+import { shouldStepPeopleProbe } from '../src/capture/people-probe-runtime.ts';
 
 const MAIN = readFileSync(fileURLToPath(new URL('../src/main.ts', import.meta.url)), 'utf8');
+const COMPANIONS = readFileSync(fileURLToPath(new URL('../src/creature/companions.ts', import.meta.url)), 'utf8');
 
 test('主线：tracker 与自动探测都只在 fresh inference 上推进', () => {
   assert.match(MAIN, /freshInference\(/, '主线没有区分新推理与缓存结果');
@@ -36,6 +38,12 @@ test('主线：tracker 与自动探测都只在 fresh inference 上推进', () =
     '人数上限收缩后没有同步截断缓存人数');
   assert.match(MAIN, /if \(people && crowdOut !== renderedCrowd\)/,
     '稳定单人快路的同一个空结果仍被每帧重复写进渲染器');
+  assert.match(MAIN, /shouldStepPeopleProbe\(inference !== null, peopleProbe\.state\)/,
+    '稳定 idle 时仍在每个缓存渲染帧分配人数探测状态');
+  assert.match(MAIN, /isFreshReacquisition\(inference !== null, t\)/,
+    '主身体 reacquired 事件没有被新推理门控');
+  assert.match(COMPANIONS, /isFreshReacquisition\(ctx\.freshInference, t\)/,
+    '伴随身体 reacquired 事件没有被新推理门控');
 });
 
 test('120Hz 渲染只按 30Hz 新推理读取多人快照', () => {
@@ -53,6 +61,27 @@ test('120Hz 渲染只按 30Hz 新推理读取多人快照', () => {
     assert.equal(cached[0], reads || undefined);
   }
   assert.equal(reads, 90, '三秒 120Hz 渲染把 30Hz 快照读了不止 90 次');
+});
+
+test('120Hz / 30Hz：idle probe 与 reacquired 事件都只消费新推理', () => {
+  const idle: ProbeState = {
+    level: 1, floor: 1, phase: 'idle', clock: 0, held: 0, topHeld: 0,
+    idleHeld: 0, hint: 0, hintLevel: 0,
+  };
+  let stamp = Number.NaN;
+  let probeSteps = 0;
+  let reacquiredResets = 0;
+  for (let frame = 0; frame < 360; frame++) {
+    const inferenceStamp = 1000 + Math.floor(frame / 4) * (1000 / 30);
+    const tick = freshInference(stamp, inferenceStamp, inferenceStamp, 1 / 120);
+    const fresh = tick !== null;
+    if (tick) stamp = tick.stamp;
+    if (shouldStepPeopleProbe(fresh, idle)) probeSteps++;
+    const eventStillCached = Math.floor(frame / 4) === 0;
+    if (isFreshReacquisition(fresh, { reacquired: eventStillCached })) reacquiredResets++;
+  }
+  assert.equal(probeSteps, 90);
+  assert.equal(reacquiredResets, 1, '同一份 reacquired 推理被缓存渲染帧重复消费');
 });
 
 test('一份缓存结果在 120Hz 被读 3 秒：只算一次观测，不能把 tentative 轨迹催熟', () => {

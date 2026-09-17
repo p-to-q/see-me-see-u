@@ -6,7 +6,8 @@ import { stepProbe, type ProbeState } from '../../core/src/people-probe.ts';
 import { CAPTURE, PEOPLE } from '../../core/src/tuning.ts';
 import { person, WHOLE } from '../../core/test/framing-people.ts';
 import {
-  canRunPeopleProbe, peopleProbeCadence, trackedPrimaryOrSingleFallback, visiblePrimaryPose, visibleSelectedCount,
+  canRunPeopleProbe, peopleProbeCadence, shouldStepPeopleProbe, trackedPrimaryOrSingleFallback,
+  visiblePrimaryPose, visibleSelectedCount,
 } from '../src/capture/people-probe-runtime.ts';
 
 const DT = 1 / 30;
@@ -98,4 +99,12 @@ test('探测窗降频但不低于现有插值能平顺覆盖的频率', () => {
   assert.equal(peopleProbeCadence(10, true), 10, '治理器已经更低时不能反向抬频');
   assert.ok(1 / PEOPLE.probeInferenceHz <= CAPTURE.interpDelayMax,
     '探测频率低到超过姿态时钟插值上限，单人身体会在后台探测时卡顿');
+});
+
+test('稳定 idle 的缓存渲染帧跳过探测，窗口与提示仍逐帧推进', () => {
+  const idle = { ...probing(), phase: 'idle' as const };
+  assert.equal(shouldStepPeopleProbe(false, idle), false);
+  assert.equal(shouldStepPeopleProbe(true, idle), true);
+  assert.equal(shouldStepPeopleProbe(false, probing()), true, '探测窗不能错过卡顿当帧');
+  assert.equal(shouldStepPeopleProbe(false, { ...idle, hint: 1 }), true, '提示必须按 UI 时钟收起');
 });

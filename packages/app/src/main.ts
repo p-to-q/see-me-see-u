@@ -25,7 +25,7 @@ import { arcPresent, createArc, type ArcState } from '../../core/src/arc.ts';
 import { makeGenome, toPlaceholderGenome } from '../../core/src/genome.ts';
 import { blendSkeletons, remapSkeleton, type BodyPlan } from '../../core/src/bodyplan.ts';
 import { mulberry32 } from '../../core/src/rng.ts';
-import { createPeopleTracker, shiftSkeleton, type PeopleFrame } from '../../core/src/people.ts';
+import { createPeopleTracker, isFreshReacquisition, shiftSkeleton, type PeopleFrame } from '../../core/src/people.ts';
 import { createProbeState, stepProbe } from '../../core/src/people-probe.ts';
 import { AUTOFRAME, BUDGET, CAPTURE, GOVERNOR, NASCENT, PEOPLE, REFINE, STAGE, WARM } from '../../core/src/tuning.ts';
 import type { Genome, MotionFeatures, PartMeta, Presence, Skeleton, SlotKey, SlotPick, Tier } from '../../core/src/types.ts';
@@ -56,7 +56,7 @@ import { createLongTaskCounter } from './shell/long-tasks.ts';
 import { createPoseClock } from './capture/pose-clock.ts';
 import { freshInference } from './capture/inference-clock.ts';
 import {
-  canRunPeopleProbe, peopleProbeCadence, trackedPrimaryOrSingleFallback, visibleSelectedCount,
+  canRunPeopleProbe, peopleProbeCadence, shouldStepPeopleProbe, trackedPrimaryOrSingleFallback, visibleSelectedCount,
 } from './capture/people-probe-runtime.ts';
 import { showBootError } from './shell/boot-error.ts';
 import { createSlowLoop } from './slow/slow.ts';
@@ -1042,7 +1042,7 @@ async function boot(): Promise<void> {
     // 之后会**合成**另外几个人（`people-synth.ts`），那是给工作台 / 演示用的，不该在观众
     // 还没按「用我的摄像头」之前的默认画面里自己冒出来。这一条不加的话，展签之前的默认展示
     // 每隔 `probeIntervalSeconds` 就会凭空多出一两具合成的身体——2026-09-15 真人测出来的回归。
-    if (peopleProbe && people) {
+    if (peopleProbe && people && shouldStepPeopleProbe(inference !== null, peopleProbe.state)) {
       const previousPhase = peopleProbe.state.phase;
       const step = stepProbe(peopleProbe.state, {
         // 只有新推理能推进人数证据；渲染帧只负责提示倒计时和及时撤掉超预算窗口。
@@ -1088,7 +1088,7 @@ async function boot(): Promise<void> {
       : latest;
     // 主身体的人丢了一阵又被认回来：姿态时钟和滤波器不许在"之前"和"之后"之间插值（docs/50 §2.4）——
     // 中间可能隔着一次换姿势，甚至是另一个人被认成了他。插过去的结果是一具摊在地上的星形（2026-09-14 无头取证撞到的）
-    if (trackerHasPrimary && crowd?.tracks.some((t) => t.primary && t.reacquired)) {
+    if (trackerHasPrimary && crowd?.tracks.some((t) => t.primary && isFreshReacquisition(inference !== null, t))) {
       poseClock.reset(); refiner?.reset(); stabilizer.reset(); vitality.reset();
     }
     if (people && crowd && trackerOwnsChannel && crowd.primary !== people.primary) {
@@ -1148,7 +1148,7 @@ async function boot(): Promise<void> {
     // 稳定单人先判：命中时连 `bodyAt()` / CompanionContext 都不构造。
     const stableSingle = people && crowd ? people.bodies.stableSingle(crowd) : null;
     const crowdOut = stableSingle ?? (people && crowd ? people.bodies.update(crowd, {
-      dt, plan: activePlan(), drift: planDrift(), refineOn, vitalityOn,
+      dt, freshInference: inference !== null, plan: activePlan(), drift: planDrift(), refineOn, vitalityOn,
       bodies: people.shed ? 1 : people.plan.bodies,
       scale: nascent ? nascent.stats.emergence : 1,
     }) : null);

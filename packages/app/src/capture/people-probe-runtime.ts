@@ -3,6 +3,7 @@
  * 谁这一帧真的还在、主身体是哪一份姿态、机器此刻有没有余量，以及探测时该跑多快。
  */
 import type { PeopleFrame } from '../../../core/src/people.ts';
+import type { ProbeState } from '../../../core/src/people-probe.ts';
 import type { RawPose } from '../../../core/src/types.ts';
 import { CAPTURE, GOVERNOR, PEOPLE } from '../../../core/src/tuning.ts';
 
@@ -64,4 +65,12 @@ export function canRunPeopleProbe(b: PeopleProbeBudget): boolean {
 export function peopleProbeCadence(baseHz: number, probing: boolean): number {
   const base = Number.isFinite(baseHz) && baseHz > 0 ? baseHz : CAPTURE.targetHz;
   return probing ? Math.min(base, PEOPLE.probeInferenceHz) : base;
+}
+
+/**
+ * idle 且没有提示时，人数证据只能被新推理推进；缓存渲染帧可直接跳过。
+ * probing 仍须逐渲染帧看性能预算，才能在卡顿当帧撤窗；hint 也要吃 UI 时钟收起。
+ */
+export function shouldStepPeopleProbe(freshInference: boolean, state: Pick<ProbeState, 'phase' | 'hint'>): boolean {
+  return freshInference || state.phase !== 'idle' || state.hint > 0;
 }

@@ -16,7 +16,7 @@ import { createPresence, type PresenceMachine } from '../../../core/src/presence
 import { createFramingClassifier, decide, stepFollow, stepToward, type FramingClassifier, type Follow } from '../../../core/src/autoframe.ts';
 import { holdLegs } from '../../../core/src/leghold.ts';
 import { blendSkeletons, remapSkeleton, type BodyPlan } from '../../../core/src/bodyplan.ts';
-import { lineup, tintFor, type PeopleFrame } from '../../../core/src/people.ts';
+import { isFreshReacquisition, lineup, tintFor, type PeopleFrame } from '../../../core/src/people.ts';
 import { AUTOFRAME, PEOPLE, PRESENCE, REFINE } from '../../../core/src/tuning.ts';
 import type { Skeleton } from '../../../core/src/types.ts';
 import type { Companion } from './creature.ts';
@@ -51,6 +51,8 @@ interface Entry {
 
 export interface CompanionContext {
   dt: number;
+  /** 这一次 update 是否正在消费一份新推理；`reacquired` 只能在这一次生效。 */
+  freshInference: boolean;
   /** 这一帧主身体的方案与漂移（伴随身体跟主身体同一个形体，docs/50 §3.1：同一条船） */
   plan: BodyPlan;
   drift: number;
@@ -165,7 +167,7 @@ export function createCompanions(opts: { seed: () => number }): Companions {
         const p = e.presence.update(detected, dt);
         if (detected && t) {
           // 丢了一阵又被认回来：这个人的时间状态清掉，不在"之前"和"之后"之间插值（和主身体同一条，docs/50 §2.4）
-          if (t.reacquired) {
+          if (isFreshReacquisition(ctx.freshInference, t)) {
             e.pipes.refiner?.reset(); e.pipes.stabilizer.reset(); e.pipes.vitality.reset();
             e.motion.reset(); e.classifier.reset(); e.legHold = 0;
           }
