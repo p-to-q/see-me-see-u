@@ -18,10 +18,10 @@ export const GOVERNOR_SWITCHES: Record<GovernorStep, string> = {
   swaps: 'swapShed',
   /** 采集端的推理频率（`WebcamCapture.setCadence`） */
   inference: 'setCadence',
-  /** 后期 —— Stage 对同一条后期链的临时挂起位；永久开关仍归控件条 / 降级阶梯 */
-  post: 'stage.setPostSuspended',
   /** 渲染器像素比 —— 开机时设的那一个 */
   dpr: 'renderer.setPixelRatio',
+  /** 后期 —— Stage 对同一条后期链的临时挂起位；永久开关仍归控件条 / 降级阶梯 */
+  post: 'stage.setPostSuspended',
   /** 读数的刷新（它不驱动身体） */
   ui: 'uiShed',
   /** 台上的身体数（docs/50 §5.4）：`people.shed` 为真时伴随身体的预算是 0（帧循环里 `bodies: people.shed ? 1 : …` 读它） */

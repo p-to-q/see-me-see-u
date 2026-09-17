@@ -4,7 +4,7 @@
  * ## 为什么是一个东西，不是一堆补丁（docs/48 §4）
  *
  * 卡顿的来源有十几种（推理、着色器编译、换件、GC、后台标签页……），但页面能做的动作
- * 只有几件，而且每一件都**已经有开关**：墨色采样、换件、推理频率、后期、像素比、读数刷新。
+ * 只有几件，而且每一件都**已经有开关**：墨色采样、换件、推理频率、像素比、后期、读数刷新、伴随身体。
  * 于是这里只回答一个问题：**此刻该放下阶梯上的第几级**。谁造成的卡不重要 ——
  * 帧间隔和长任务是结果，结果变好就拿回来。
  *
@@ -13,8 +13,8 @@
  *   1 `ink`        角上字的墨色采样（2Hz GPU 读回）停；墨停在最后一次的那一档
  *   2 `swaps`      忒修斯的替换延后最多 `GOVERNOR.swapDeferMax` 秒（不取消）
  *   3 `inference`  推理降到 `GOVERNOR.inferenceHzShed`，姿态时钟插值盖住中间
- *   4 `post`       关后期（和控件条「渲染」、降级阶梯第 1 级同一个开关）
- *   5 `dpr`        像素比降到 `GOVERNOR.dprShed`
+ *   4 `dpr`        像素比降到 `GOVERNOR.dprShed`（实测切换本身不产生长帧，先用这枚便宜旋钮）
+ *   5 `post`       临时绕过后期（第一次真实直出仍可能漏帧，所以排在已经降过 DPR 之后）
  *   6 `ui`         读数与小屏幕停止刷新（它们不驱动身体）
  *   7 `people`     只留主身体，伴随身体溶掉（docs/50 §5.4）。单人时是 no-op。放在最后：放下一个人的身体是观众最看得出来的
  *
@@ -40,9 +40,9 @@
  */
 import { GOVERNOR } from '../../../core/src/tuning.ts';
 
-export type GovernorStep = 'ink' | 'swaps' | 'inference' | 'post' | 'dpr' | 'ui' | 'people';
+export type GovernorStep = 'ink' | 'swaps' | 'inference' | 'dpr' | 'post' | 'ui' | 'people';
 
-export const GOVERNOR_LADDER: readonly GovernorStep[] = ['ink', 'swaps', 'inference', 'post', 'dpr', 'ui', 'people'];
+export const GOVERNOR_LADDER: readonly GovernorStep[] = ['ink', 'swaps', 'inference', 'dpr', 'post', 'ui', 'people'];
 
 export interface GovernorSample {
   /** 这一帧的时刻（毫秒） */

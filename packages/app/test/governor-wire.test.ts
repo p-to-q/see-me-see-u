@@ -29,7 +29,7 @@ test('调速器接线: 放到第 n 级 = 前 n 个开关拨成"放下"，只拨�
   assert.deepEqual(calls, [['swaps', false]], '拿回一级只拨那一个');
   calls.length = 0;
   apply(GOVERNOR_LADDER.length);
-  assert.deepEqual(calls.map((c) => c[0]), ['swaps', 'inference', 'post', 'dpr', 'ui', 'people']);
+  assert.deepEqual(calls.map((c) => c[0]), ['swaps', 'inference', 'dpr', 'post', 'ui', 'people']);
   assert.ok(calls.every((c) => c[1] === true));
 });
 

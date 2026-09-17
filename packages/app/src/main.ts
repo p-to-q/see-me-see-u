@@ -1255,8 +1255,8 @@ async function boot(): Promise<void> {
     // 多人：台上有伴随身体时一律全景（docs/50 §4.3 —— 三个人的中景要么切掉两侧的人，要么不再是中景）
     stage.setShot(framing.shot === 'upper' && planDrift() <= 0 && !crowdOut?.companions.length ? 'upper' : 'full', {
       reduced: reducedMotion?.matches ?? false,
-      // 调速器放到「后期」那一级（docs/48 §4 的阶梯第 4 级）才算真的在砍：前三级（墨色采样、
-      // 换件延后、推理降频）不会让一段 1 秒的运镜读成卡顿，那时候照常动
+      // 调速器放到「后期」那一级（docs/48 §4 的阶梯第 5 级）才冻结跟随；景别仍照常缓动。
+      // 前四级（墨色采样、换件延后、推理降频、DPR）连跟随也不冻结
       hold: loop.stats.degraded !== null || loop.stats.throttled || governor.sheds('post'),
     });
     stage.update(p, lastFeatures, dt);
