@@ -661,7 +661,7 @@ export function stepCrop(c: Crop, input: CropInput, dt: number): Crop {
 export type Side = 'left' | 'right';
 
 export interface LateralEvidence {
-  /** 根的画面横坐标（原图 0..1）：胯中点；胯没有坐标时退到两肩中点。**只看胯**：前倾时胯不动，迈步时胯才动 */
+  /** 根的画面横坐标（原图 0..1）：成对可信的胯中点；近处胯被裁时退到成对可信的肩中点。 */
   x: number;
   /** 躯干长（画面高度单位，`torsoScale()`） */
   scale: number;
@@ -672,7 +672,7 @@ export interface LateralEvidence {
   /** 追踪质量够（`qualityScale ≥ 1`）。不够 = 冻结，不往一个坏光下的坐标漂 */
   quality: boolean;
   /**
-   * 至少一个躯干点可信地在画内。false = 位置全靠 MediaPipe 外推：**侧边照样报**（人确实在那一侧的边外），
+   * 胯或肩至少有一对可信，且其中一点在画内。false = 位置全靠 MediaPipe 外推：**侧边照样报**（人确实在那一侧的边外），
    * 但位置不作数 —— 没有侧边时控制器把它当成跟丢。
    */
   trusted: boolean;
@@ -695,10 +695,17 @@ export function lateralEvidence(pose: RawPose | null | undefined, aspect = 16 / 
   if (!has(sL) || !has(sR)) return null;
   const hips = has(hL) && has(hR);
   const torso = hips ? [sL, sR, hL, hR] : [sL, sR];
-  // 位置可不可信：至少一个躯干点可信地在画内（画外的肩和胯可见度只有 0.2，胯中点一出左边就只剩画内那一只肩）
-  const trusted = torso.some((l) => trustedLandmark(l) && inFrame(l));
-  const x = hips ? (hL.x + hR.x) / 2 : (sL.x + sR.x) / 2;
-  const scale = torsoScale(sL, sR, hips ? hL : null, hips ? hR : null, aspect);
+  const shouldersTrusted = trustedLandmark(sL) && trustedLandmark(sR) && (inFrame(sL) || inFrame(sR));
+  const hipsTrusted = hips && trustedLandmark(hL) && trustedLandmark(hR) && (inFrame(hL) || inFrame(hR));
+  // 坐标“存在”不等于可以驱动根。近处胯被裁时 MediaPipe 仍会给两个有限、但低置信的外推点：
+  // 用它们会让身体突然冲向画边。可信胯仍优先（不把前倾当迈步），胯不可信才用可信肩。
+  const trusted = hipsTrusted || shouldersTrusted;
+  const x = hipsTrusted
+    ? (hL.x + hR.x) / 2
+    : shouldersTrusted
+      ? (sL.x + sR.x) / 2
+      : hips ? (hL.x + hR.x) / 2 : (sL.x + sR.x) / 2;
+  const scale = torsoScale(sL, sR, hipsTrusted ? hL : null, hipsTrusted ? hR : null, aspect);
   const xs = torso.map((l) => l.x * aspect);
   const lo = Math.min(...xs), hi = Math.max(...xs);
   // 侧身时躯干宽度缩到几乎为 0：分母给一个按躯干长折算的下限，免得一点抖动就是"一半出画"

@@ -77,6 +77,25 @@ test('前倾 vs 迈步：只有胯动才动。上半身往一边倾 0.05 画面�
   assert.ok(last(stepping).x.x < -0.08, `迈了一步身体只挪了 ${last(stepping).x.x.toFixed(3)}`);
 });
 
+test('近处胯被裁：低置信胯点不拖走根，改用成对可信的肩中心', () => {
+  const close = at(0.56, { s: 1 });
+  const corrupted: RawPose = {
+    ...close,
+    screen: close.screen!.map((l, i) => i === 23 || i === 24
+      ? { ...l, x: 0.95, visibility: 0.1 }
+      : l),
+  };
+  const ev = lateralEvidence(corrupted)!;
+  const shoulderX = (corrupted.screen![11].x + corrupted.screen![12].x) / 2;
+  assert.ok(Math.abs(ev.x - shoulderX) < 1e-12, `坏胯点把根拖到 ${ev.x.toFixed(3)}，肩中心是 ${shoulderX.toFixed(3)}`);
+  assert.equal(ev.trusted, true);
+  assert.equal(ev.side, null);
+
+  const result = run([...hold(1, () => at(0.5, { s: 1 })), ...hold(3, () => corrupted)], { upper: true });
+  assert.ok(last(result).x.x < -0.02, '胯被裁后的小幅横移仍要能跟');
+  assert.ok(last(result).x.x > -0.35, `低置信胯点把身体拖过头了：${last(result).x.x.toFixed(3)}m`);
+});
+
 test('贴边但整个人都在画里：不报侧边、照常跟随，走到舞台余量的边上为止', () => {
   const ev = lateralEvidence(at(0.08))!;
   assert.equal(ev.side, null, `整个人都在画里却报了 ${ev.side}（越界 ${ev.out}）`);
@@ -100,6 +119,12 @@ test('整个人走出一边、检测还在（躯干点全不可信、坐标在�
   const ev = lateralEvidence(at(1.08))!;
   assert.equal(ev.side, 'left');
   assert.equal(ev.trusted, false);
+  const highConfidenceOutside = at(1.3);
+  highConfidenceOutside.screen = highConfidenceOutside.screen!.map((l, i) => [11, 12, 23, 24].includes(i)
+    ? { ...l, visibility: 0.95 }
+    : l);
+  assert.equal(lateralEvidence(highConfidenceOutside)?.trusted, false,
+    '可见度高但整对都在画外，仍不得驱动根');
   const s0 = run(hold(3, () => at(0.8)));
   const s = run(hold(4, () => at(1.08)), {}, last(s0));
   assert.ok(s.every((k) => k.why === 'hold-edge'), `人还在边外却：${[...new Set(s.map((k) => k.why))]}`);
