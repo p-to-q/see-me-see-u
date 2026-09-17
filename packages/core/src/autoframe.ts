@@ -307,11 +307,14 @@ export function createFramingClassifier(opts: ClassifierOptions = {}): FramingCl
         const need = cam || (!opts.kiosk && present <= T.firstWindowSeconds) ? T.enterUpperFirstSeconds
           : opts.kiosk ? T.enterUpperSecondsKiosk : T.enterUpperSeconds;
         toUpper = leak(toUpper, legsOut, dt);
-        if (toUpper >= need && cooldown <= 0) go('upper', 'legs-out');
+        // 冷却期间桶可以继续积累，但真正切换的这一帧仍必须有 legs-out 证据。
+        // 否则候选刚消失、桶还没漏到门限下，又恰好冷却归零时，会用过期证据误切。
+        if (legsOut && toUpper >= need && cooldown <= 0) go('upper', 'legs-out');
       } else if (mode === 'upper') {
         const appearing = !legsOut;
-        toStep = leak(toStep, appearing || shrinking, dt);
-        if (toStep >= T.stepBackConfirmSeconds && cooldown <= 0) go('stepping-back', appearing ? 'legs-appearing' : 'shrinking');
+        const stepping = appearing || shrinking;
+        toStep = leak(toStep, stepping, dt);
+        if (stepping && toStep >= T.stepBackConfirmSeconds && cooldown <= 0) go('stepping-back', appearing ? 'legs-appearing' : 'shrinking');
       } else {
         toFull = leak(toFull, legsIn, dt);
         // 退后完成不等冷却：人已经退到位了，再让他等一秒是在惩罚照做的人

@@ -108,6 +108,53 @@ test('边界 · 腿在画面底边上一帧进一帧出：十秒里一次都不�
   assert.equal(flickUpper.final, 'upper', flickUpper.summary);
 });
 
+test('边界 · 冷却到期时腿已重新进画，不用过期的 legs-out 桶切到上半身', () => {
+  const c = createFramingClassifier();
+  let r = c.current;
+  for (let i = 0; i < 11; i++) r = c.update(person(SEATED), DT);
+  assert.equal(r.mode, 'upper', '测试前提：应先进入上半身');
+
+  // 头肩出画迫使切回全身，并开始 1.2 秒冷却。
+  for (let i = 0; i < 30 && r.mode !== 'full'; i++) r = c.update(person(STOOD_UP_CLOSE), DT);
+  assert.equal(r.mode, 'full', '测试前提：异常取景应切回全身');
+  assert.ok(r.cooldown > 0);
+
+  // 冷却里一直只露上半身，legs-out 桶已越过门限；最后一帧腿回到画里。
+  for (let i = 0; i < 60 && c.current.cooldown > DT + 1e-9; i++) {
+    r = c.update(person(SEATED), DT);
+    assert.equal(r.mode, 'full', '冷却期间不该切换');
+  }
+  assert.ok(c.current.cooldown <= DT + 1e-9, '测试前提：冷却应已走到最后一帧');
+  r = c.update(person(WHOLE), DT);
+  assert.equal(r.cooldown, 0, '反证帧应恰好结束冷却');
+  assert.equal(r.evidence?.legs, 4, '反证帧的腿已经在画里');
+  assert.equal(r.mode, 'full', '当前腿已进画，不许用过期桶值切到上半身');
+});
+
+test('边界 · 冷却到期时退后候选已消失，不用过期的 toStep 桶切到退后中', () => {
+  const c = createFramingClassifier();
+  let r = c.current;
+  for (let i = 0; i < 11; i++) r = c.update(person(SEATED), DT);
+  assert.equal(r.mode, 'upper', '测试前提：应先进入上半身');
+  assert.ok(r.cooldown > 0);
+
+  // 只把腿点放回画内，头肩与躯干尺度不变：这是 legs-appearing，不是 shrinking。
+  const appearing = person(SEATED);
+  const appearingScreen = appearing.screen?.map((l, i) => i >= 25 ? { ...l, y: 0.9, visibility: 0.95 } : l);
+  const legsAppearing = { ...appearing, screen: appearingScreen };
+  for (let i = 0; i < 60 && c.current.cooldown > DT + 1e-9; i++) {
+    r = c.update(legsAppearing, DT);
+    assert.equal(r.mode, 'upper', '冷却期间不该切换');
+  }
+  assert.ok(c.current.cooldown <= DT + 1e-9, '测试前提：冷却应已走到最后一帧');
+
+  r = c.update(person(SEATED), DT);
+  assert.equal(r.cooldown, 0, '反证帧应恰好结束冷却');
+  assert.equal(r.evidence?.legs, 0, '反证帧已不再是 legs-appearing');
+  assert.ok(Math.abs(r.trend - 1) < 1e-12, `反证帧尺度没有缩小：trend=${r.trend}`);
+  assert.equal(r.mode, 'upper', '当前没有腿出现或缩小，不许用过期桶值切到退后中');
+});
+
 test('边界 · 前倾（肩变宽、躯干透视变短）再坐直：不是退后', () => {
   const lean = { ...SEATED, width: 1.2, torso: 0.8 };
   const { switches, summary } = timeline([hold(SEATED, 3), move(SEATED, lean, 0.5), hold(lean, 1), move(lean, SEATED, 0.5), hold(SEATED, 2)]);
