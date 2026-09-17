@@ -75,6 +75,8 @@ export interface NascentBody extends BodyInstance {
   setTier(tier: number): void;
   /** 转给团块的运动能量（驱动表面"沸腾"）。tier ≥ 1 之后它自然不再有可见影响 */
   setEnergy(v: number): void;
+  /** 换观众：回到未分化起点；随后一次 setTier 决定新场是从 0 开始还是深链直达 */
+  reset(): void;
   readonly stats: NascentStats;
 }
 
@@ -152,6 +154,20 @@ export function createNascent(opt: NascentOptions): NascentBody {
   const body: NascentBody = {
     get object() { return object; },
     get stats() { return stats; },
+
+    reset() {
+      target = 0;
+      emergence = 0;
+      seeded = false;
+      stats.emergence = 0;
+      stats.triangles = 0;
+      stats.drawCalls = 0;
+      stats.instances = 0;
+      mass.reset();
+      creature.reset();
+      mass.object.visible = false;
+      creature.object.visible = false;
+    },
 
     setTier(tier) {
       target = Number.isFinite(tier) && tier >= 1 ? 1 : 0;

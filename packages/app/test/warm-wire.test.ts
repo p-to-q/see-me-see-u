@@ -65,7 +65,8 @@ test('升档: 同一个 live Mesh 走真实后期 render，失败也恢复根节
 });
 
 test('升档: 换观众、换着色和来不及升档都有明确撤回路径', () => {
-  assert.match(MAIN, /if \(arcState\.justReset\) \{[\s\S]{0,220}resetBucketWarm\(\)/, '换观众没有清掉上一 seed 的准备桶');
+  assert.match(MAIN, /const resetEncounter = \(reason:[\s\S]{0,500}resetBucketWarm\(\)/, '统一的换观众边界没有清掉上一 seed 的准备桶');
+  assert.match(MAIN, /if \(arcState\.justReset\) resetEncounter\('absence'\)/, '自然离场没有走统一的换观众边界');
   assert.match(MAIN, /case 'outline':[\s\S]{0,180}resetBucketWarm\(\)[\s\S]{0,180}creature\.setShading/, '换材质前没有撤回旧桶');
   assert.match(MAIN, /if \(bucketWarmActive\) abandonBucketWarm\(\)[\s\S]{0,80}morph\(want\)/, '准备赶不上升档时没有先让正式路径接管');
 });

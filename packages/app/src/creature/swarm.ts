@@ -61,6 +61,8 @@ export interface SwarmStats extends BodyStats {
 
 export interface SwarmBody extends BodyInstance {
   readonly stats: SwarmStats;
+  /** 清掉上一位观众的拖影环与落地基准，保留点表和 GPU 管线 */
+  reset(): void;
   /** 换条目：重新取 palette 的 primary 颜色 */
   setTheme(themeId: string): void;
 }
@@ -140,6 +142,17 @@ export function createSwarmBody(opt: SwarmOptions = {}): SwarmBody {
   const body: SwarmBody = {
     get object() { return object; },
     get stats() { return stats; },
+    reset() {
+      lift = 0;
+      liftSeeded = false;
+      field.resetTrail();
+      field.setLift(0);
+      field.update(0, 0, 0, 1);
+      stats.triangles = 0;
+      stats.drawCalls = 0;
+      stats.lift = 0;
+      stats.cpuMs = 0;
+    },
     setTheme(themeId: string) { applyTheme(themeId); },
 
     pose(sk: Skeleton, presence: Presence, dt: number) {

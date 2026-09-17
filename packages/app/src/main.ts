@@ -609,6 +609,7 @@ async function boot(): Promise<void> {
   const body: BodyInstance = speciesBody === null ? humanBody : {
     object: bodyRoot,
     get stats() { return speciesArrived() ? speciesBody.stats : humanBody.stats; },
+    reset() { humanBody.reset?.(); speciesBody.reset?.(); },
     pose(sk, presence, dt) {
       const t = planDrift();
       const alive = aliveOf(presence);
@@ -627,7 +628,14 @@ async function boot(): Promise<void> {
   };
   if (speciesBody) speciesBody.object.visible = intent.form !== undefined;
 
-  let seed = flags.seed ?? (Math.random() * 0xffffffff) >>> 0;   // 会话级种子，仅此一处
+  // 页面只在入口边界向平台取一次熵；每一场的种子随后都由注入的 Rng 给出。
+  // 极旧浏览器没有 crypto 时用固定种子继续跑（可复现的降级胜过偷偷改读时钟 / Math.random）。
+  const entropy = new Uint32Array(1);
+  try { globalThis.crypto?.getRandomValues(entropy); } catch { /* 固定种子兜底 */ }
+  const encounterSeeds = mulberry32(entropy[0] || 0x5ee1e55);
+  const nextEncounterSeed = (): number => flags.seed ?? Math.floor(encounterSeeds.next() * 0x100000000) >>> 0;
+  let seed = nextEncounterSeed();
+  let encounterRng = mulberry32(seed);
 
   // 声音（docs/29-SOUND.md）。四层各绑一个**已经算好的**信号，所以这里只是转手，
   // 不新增任何计算。它自己等第一次用户手势才建 AudioContext（浏览器自动播放策略），
@@ -847,9 +855,89 @@ async function boot(): Promise<void> {
     // getter：按钮会把整份叠加换成新的一份（它是不可变的），导演每帧读到的必须是当前那一份
     get intent() { return intent; },
     creature: body, stage, library, flags,
-    rng: mulberry32(seed),
+    // getter 让换人后的玩法读到新 Rng；World 对象本身不重建，导演也不需要重新接线。
+    get rng() { return encounterRng; },
     morph,
     note: (s) => { note = s; },
+  };
+
+  type EncounterResetReason = 'absence' | 'capture-change';
+
+  /**
+   * 一场的唯一清零点。自然离场与成功换输入源都走这里；页面级能力、调速器、
+   * 已编译管线，以及 slow / visit 因真实失败立下的 disabled 闸都故意保留。
+   */
+  const resetEncounter = (reason: EncounterResetReason): void => {
+    // 画外准备持有的是上一位观众 seed 下的正式 Mesh；先收起并解除保留，不能跨场沿用。
+    resetBucketWarm();
+    seed = nextEncounterSeed();
+    encounterRng = mulberry32(seed);
+
+    // 检测、时间轴与输出侧取景必须一起归零。少任何一个，新输入的第一帧都会与旧时间线插值。
+    presence.reset();
+    arc.reset();
+    arcState = arc.state;
+    elapsedT = 0;
+    poseClock.reset();
+    framer.reset();
+    framing = decide(framingPolicy, framer.current);
+    legHold = 0;
+    lateral = LATERAL_REST;
+
+    motion.reset();
+    boneEnergy.reset();
+    evolution.reset();
+    stabilizer.reset();
+    refiner?.reset();
+    vitality.reset();
+    groundSense.reset();
+    swapGate.reset();
+
+    // 异步回路先换 epoch / abort，再清画面状态；旧结果晚回来也不能写到新观众头上。
+    slow.reset();
+    slowWas = slow.phase;
+    visits.reset();
+    grown.length = 0;
+    swapped.clear();
+
+    if (people) {
+      people.tracker.reset();
+      people.bodies.reset();
+      people.primary = null;
+      people.frame = null;
+      creature.setCompanions([]);
+      stage.setGroup(0, 0);
+    }
+    if (peopleProbe) {
+      peopleProbe.state = createProbeState(PEOPLE.defaultCap);
+      peopleCap = PEOPLE.defaultCap;
+      liveCap = PEOPLE.defaultCap;
+      people?.tracker.setCap(liveCap);
+      capture.setPeople?.(liveCap);
+      replanPeople();
+    }
+
+    lastFeatures = null;
+    lastSkeleton = null;
+    lastBase = null;
+    lastShift = 0;
+    note = '';
+    evoTier = 0;
+    tier = (flags.tier ?? 0) as Tier;
+
+    // 身体实现各自清拖影 / 能量 / 在途交接，但保留 GPU 资源。新 seed 的形态随后直接落位。
+    body.reset?.();
+    bodyRoot.scale.setScalar(1);
+    theseus?.reset(seed);
+    morph(tier);
+    body.pose(REFERENCE_POSE, presence.current, 0);
+    stage.setArc(0);
+    body.setArc?.(0);
+
+    // 上一位可能把身体还回去了；下一位重新服从弧线。URL 写下的叠加仍是开机意图。
+    if (director.forced && flags.act !== HANDED_BACK_ACT) director.release(world);
+    intent = intentFromFlags(flags);
+    if (hud) console.info(`[arc] 归零（${reason === 'absence' ? '离场' : '输入源已切换'}）—— 下一位从第 I 乐章开始`);
   };
 
   /**
@@ -1202,51 +1290,7 @@ async function boot(): Promise<void> {
     // **被按住的玩法**（`untether` 写进 URL 那次 bug 的同一类）。
     // 物种身体的到场不用在这里写一行 —— `speciesArrived()` 读的就是
     // `arcState.movement`，弧线一归零它自己就退回人形。派生状态不该被复制两份。
-    if (arcState.justReset) {
-      // 画外准备持有的是上一位观众 seed 下的正式 Mesh；先收起并解除保留，不能跨场沿用。
-      resetBucketWarm();
-      seed = (Math.random() * 0xffffffff) >>> 0;
-      motion.reset();
-      boneEnergy.reset();
-      // docs/44 §8：人一走，18 个槽位全部回到原件。下面那句 `morph(tier)` 是拿
-      // **新的 seed** 从头抽一具身体，所以清空这张表就等于归零 —— 不归零的话
-      // 第二个观众看到的是一具已经被换了一半的身体，而他没见过原件：
-      // 对他来说忒修斯之船从来没发生过，而且失效得看不出来（画面照常在动）。
-      swapped.clear();
-      grown.length = 0;
-      evolution.reset();
-      stabilizer.reset();
-      refiner?.reset();
-      vitality.reset();
-      slow.reset();
-      // 存档也要收回来。装置那台机器一开就是一整天，不收等于把这一页数的东西
-      // 从「人」偷偷换成「开机次数」—— 正是这一段注释说的那种跨观众留存的状态。
-      // 和 `slow.reset()` 一样，它不解除写失败之后那道会话级的闸
-      visits.reset();
-      groundSense.reset();   // 换了一个人：下一次观测重新立基准，不在进场那一帧砸一下
-      swapGate.reset();      // 闸里压着的那件属于上一个人（调速器本身不归零：机器还是那台机器）
-      // 多人：所有人都走了才会走到这里（在场判定看的是"任何一具身体的人"）。身份、伴随身体、交接状态一起收
-      if (people) { people.tracker.reset(); people.bodies.reset(); people.primary = null; people.frame = null; creature.setCompanions([]); stage.setGroup(0, 0); }
-      // 探测也回到起步：下一位观众从"只有一个人"重新开始被探测，不带着上一位观众探出来的那一档
-      if (peopleProbe) {
-        peopleProbe.state = createProbeState(PEOPLE.defaultCap);
-        peopleCap = PEOPLE.defaultCap; liveCap = PEOPLE.defaultCap;
-        people?.tracker.setCap(liveCap);
-        capture.setPeople?.(liveCap);
-        replanPeople();
-      }
-      lastSkeleton = null;
-      evoTier = 0;
-      tier = (flags.tier ?? 0) as Tier;
-      theseus?.reset(seed);
-      morph(tier);
-      // 上一个人可能把身体还回去了（右下角那一行）。下一个人站上去必须被跟随，
-      // 否则他看到的是一具从第一秒就不理他的身体 —— docs/40 §3 点名的那个 bug。
-      if (director.forced && flags.act !== HANDED_BACK_ACT) director.release(world);
-      // 上一个人叠上去的玩法 / 形体同理：回到开机时 URL 写的那一份（通常是什么都没叠）
-      intent = intentFromFlags(flags);
-      if (hud) console.info('[arc] 归零 —— 下一位从第 I 乐章开始');
-    }
+    if (arcState.justReset) resetEncounter('absence');
 
     // 声音吃的是 **未经时间停滞缩放的 dt**：升档那 0.15 秒画面顿一下是设计，
     // 声音跟着顿会变成"卡带"。理由和状态机不吃 timeScale 是同一条。
@@ -1478,23 +1522,36 @@ async function boot(): Promise<void> {
    */
   const swapCapture = async (kind: 'webcam' | 'replay'): Promise<boolean> => {
     if (kind === 'webcam') cameraStarting = true;
+    let next: Capture | null = null;
     try {
-      const next = await createCapture(kind);
+      next = await createCapture(kind);
       await next.start();
       const failed = next.failed ?? (next.lastError !== null);
-      if (failed) { console.warn(`[main] capture(${kind}):`, next.lastError); next.stop(); return false; }
+      if (failed) {
+        console.warn(`[main] capture(${kind}):`, next.lastError);
+        try { next.stop(); } catch (e) { console.warn(`[main] capture(${kind}) stop after failure:`, e); }
+        return false;
+      }
       if (next.lastError) console.info(`[main] capture(${kind}) 已兜住：`, next.lastError);
-      capture.stop();
+      const kindChanged = cameraOn !== (kind === 'webcam');
+      try { capture.stop(); } catch (e) { console.warn('[main] previous capture stop:', e); }
       capture = next;
       cameraOn = kind === 'webcam';
-      // 换了一条时间线：不在两路之间插值；推理频率照调速器此刻的要求
-      poseClock.reset();
+      // 新的一路已经成功启动才提交清零；创建 / 启动失败时旧 encounter 原样继续。
+      if (kindChanged) resetEncounter('capture-change');
+      else poseClock.reset();
       (capture as { setCadence?(hz: number): void }).setCadence?.(inferHz);
       // 团块 / 点场上多人不开：别让 worker 白白按三个人跑检测器（docs/50 §1.2）。
       // 用 `liveCap` 不用 `flags.people`：换 capture 的那一刻探测可能已经把它抬起来了，新的
       // capture 要接着用同一个数，不能因为换了一次摄像头 / 回放就悄悄把探出来的第二个人弄丢
       capture.setPeople?.(multi ? liveCap : 1);
       return true;
+    } catch (e) {
+      console.warn(`[main] capture(${kind}) switch failed:`, e);
+      if (next && next !== capture) {
+        try { next.stop(); } catch (stopError) { console.warn(`[main] capture(${kind}) cleanup:`, stopError); }
+      }
+      return false;
     } finally {
       if (kind === 'webcam') cameraStarting = false;
     }

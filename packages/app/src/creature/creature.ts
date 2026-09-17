@@ -62,6 +62,8 @@ export interface Creature {
   /** 只对变化的槽位做 crossfade，最多同时 MORPH.maxConcurrentSwaps 个（docs/05 §3） */
   remorph(g: Genome): void;
   pose(sk: Skeleton, p: Presence, dt: number): void;
+  /** 换观众：丢掉 genome 与所有在途交接，保留桶和 GPU 资源供下一场复用 */
+  reset(): void;
   /** 慢回路产物到货：把某个槽位热插拔成新部件，带组装动画 */
   graft(slot: SlotKey, meta: PartMeta, geometry: THREE.BufferGeometry): void;
   /**
@@ -453,6 +455,27 @@ export function createCreature(opt: CreatureOptions): Creature {
 
   // ── 接口 ────────────────────────────────────────────────────────────────
   const creature: Creature = {
+    reset() {
+      genome = null;
+      active.clear();
+      queued.length = 0;
+      companions = [];
+      arc = 0;
+      weights = ARC_OFF;
+      applyArcToMaterials();
+      for (const e of meshes.values()) {
+        e.mesh.count = 0;
+        e.mesh.visible = false;
+        if (e.outline) { e.outline.count = 0; e.outline.visible = false; }
+      }
+      stats.instances = 0;
+      stats.triangles = 0;
+      stats.drawCalls = 0;
+      stats.swapsActive = 0;
+      stats.swapsQueued = 0;
+      stats.placeholders = 0;
+    },
+
     remorph(g) {
       if (!g || !g.slots) return;
       const prev = genome;
