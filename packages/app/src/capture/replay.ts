@@ -80,7 +80,7 @@ export class ReplayCapture implements Capture {
   }
 
   /** 录制里没有 mask（慢回路在 demo 模式下本来就该关掉） */
-  latestMask(): ImageBitmap | null { return null; }
+  takeMask(): ImageBitmap | null { return null; }
 
   /** 永不 reject：加载失败只写 lastError，latest() 恒为 null */
   async start(): Promise<void> {

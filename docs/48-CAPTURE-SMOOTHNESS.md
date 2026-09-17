@@ -165,6 +165,10 @@ worker（155KB）、`vision_bundle`（153KB）、两份 11.7MB 的 wasm 都不�
   运行中改 `numPoses` 时，`setOptions()` 异步重建图的窗口内不调用 `detectForVideo()`；成功或失败收口后，下一份到期视频帧恢复，
   与 worker 的 `reconfigureQueue.busy` 互斥语义一致。
   worker 中途死了 → 重新拿（最多 2 次）；一帧 2 秒没回来 → 当它丢了。
+- **2026-09-18，ImageSegmenter 退出启动和稳态快回路。** 上面的 §1 / §2 数字是当时“启动即建第二张图、之后持续 2Hz 抠图”的历史测量，
+  不是这次改动后的新测量。现在只有慢回路武装时才解析模型并发 `segmenter-init`，每位观众只请求一张；generation 隔离换人后的迟到回执，
+  取走 / 取消均明确转移或释放 `ImageBitmap`，worker 的 MediaPipe result 在回调 `finally` 中 close。初始化失败在同一 worker 内不重试，避免 1Hz
+  慢回路轮询变成反复建图。`?worker=off` 明确不建分割图：牺牲慢回路，保住主线程姿态。**尚未重跑 §2 的真浏览器启动字节、耗时与长期内存。**
 
 ### 3.2 回放一直驱动身体，直到第一次推理完成
 

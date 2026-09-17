@@ -334,7 +334,8 @@ async function boot(): Promise<void> {
    */
   const grown: PartMeta[] = [];
   const slow = createSlowLoop({
-    mask: () => capture.latestMask(),
+    mask: () => capture.takeMask(),
+    maskDemand: (wanted) => capture.setMaskDemand?.(wanted),
     species: () => theme ?? '',
     loadGeometry: (url) => library.loadUrl(url),
     // id 只用来做人均预算闸，不落任何身份。随机源放在入口边界，

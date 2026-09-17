@@ -25,8 +25,10 @@ export interface Graftable {
 }
 
 export interface SlowLoopDeps {
-  /** 最近一帧的人像 mask；没有就是没有（回放模式、ImageSegmenter 起不来） */
+  /** 取走一张新人像 mask；返回后所有权归慢回路，没有就是 null。 */
   mask(): ImageBitmap | null;
+  /** 开/撤单张需求。换人撤销后，旧回调不得成为下一位的 mask。 */
+  maskDemand?(wanted: boolean): void;
   /** 当前物种 id，决定血统池落在谁名下 */
   species(): string;
   /** 把 glb 地址变成几何。复用 library 的 loader —— meshopt decoder 必须是同一个 */
@@ -133,6 +135,7 @@ export function createSlowLoop(deps: SlowLoopDeps): SlowLoop {
   let note = '';
   let aliveFor = 0;
   let maskRetryIn = 0;
+  let wantsMask = false;
   let used = 0;
   type RunToken = { epoch: number; abort: AbortController };
   let active: RunToken | null = null;
@@ -141,7 +144,15 @@ export function createSlowLoop(deps: SlowLoopDeps): SlowLoop {
   const encodeMask = deps.encodeMask ?? maskToPng;
   const current = (token: RunToken) => active === token && token.epoch === epoch;
 
-  const off = (why: string) => { disabled = true; phase = 'off'; note = why; };
+  const setMaskDemand = (wanted: boolean): void => {
+    if (wantsMask === wanted) return;
+    wantsMask = wanted;
+    try { deps.maskDemand?.(wanted); } catch { /* 慢回路边界不得抛进帧循环 */ }
+  };
+  const off = (why: string) => {
+    setMaskDemand(false);
+    disabled = true; phase = 'off'; note = why;
+  };
 
   async function run(): Promise<void> {
     // mass / swarm 这类身体没有可挂载的槽位。必须在 PNG、网络和扣额度之前就停，
@@ -149,6 +160,7 @@ export function createSlowLoop(deps: SlowLoopDeps): SlowLoop {
     let bitmap: ImageBitmap | null;
     try {
       if (!deps.body()) return off('当前形体不接慢回路零件');
+      setMaskDemand(true);
       bitmap = deps.mask();
     } catch (e) {
       // 依赖来自采集 / WebGL 边界；即使它们违约也不能把拒绝传播回帧循环。
@@ -157,13 +169,20 @@ export function createSlowLoop(deps: SlowLoopDeps): SlowLoop {
     // 没有 mask 不是故障：回放模式本来就没有，ImageSegmenter 起不来也照样跑姿态。
     // 但没有参考图就没有"从这个人长出来的"，所以这一次不做，等下一次。
     if (!bitmap) { note = '等 mask'; return; }
+    // 这一场已取得唯一一张；先撤需求，防止编码/网络期间继续抐图。
+    setMaskDemand(false);
 
     const token: RunToken = { epoch, abort: new AbortController() };
     active = token;
     used += 1;
     phase = 'running';
     try {
-      const png = await encodeMask(bitmap);
+      let png: Blob | null;
+      try {
+        png = await encodeMask(bitmap);
+      } finally {
+        try { bitmap.close?.(); } catch { /* 所有权已在慢回路，释放失败也不得中断收口 */ }
+      }
       if (!current(token)) return;
       if (!png) return off('canvas 出不了 PNG');
 
@@ -247,6 +266,7 @@ export function createSlowLoop(deps: SlowLoopDeps): SlowLoop {
       active = null;
       aliveFor = 0;
       maskRetryIn = 0;
+      setMaskDemand(false);
       used = 0;
       sessionId = deps.newSessionId();
       if (!disabled) { phase = 'idle'; note = ''; }

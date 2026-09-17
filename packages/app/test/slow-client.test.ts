@@ -190,6 +190,31 @@ test('没有 mask 时低频探测，mask 晚到仍在一个周期内只提交一
   assert.equal(requests, 1);
 });
 
+test('单张 mask 的 demand 成对收口，PNG 编码后只释放一次所有权', async () => {
+  const demand: boolean[] = [];
+  let closes = 0;
+  const ownedMask = { close() { closes += 1; } } as unknown as ImageBitmap;
+  const slow = createSlowLoop({
+    maskDemand: (wanted) => demand.push(wanted),
+    mask: () => ownedMask,
+    species: () => 'proof',
+    body: () => ({ graft() {} }),
+    newSessionId: () => 'visitor-a',
+    encodeMask: png,
+    request: async () => ready(),
+    loadGeometry: async () => geometry().value,
+  });
+
+  slow.update(true, SLOW_LOOP.armAfter + 1);
+  await until(() => slow.phase === 'grafted', '单张 mask 没有走完慢回路');
+  assert.deepEqual(demand, [true, false]);
+  assert.equal(closes, 1, '慢回路没有恰好释放一次已取走的 ImageBitmap');
+
+  slow.reset();
+  assert.deepEqual(demand, [true, false], '已收口的需求在 reset 时重复通知 Capture');
+  assert.equal(closes, 1);
+});
+
 test('等 mask 的重试倒计时不跨观众，新观众仍立即探测', () => {
   let masks = 0;
   const sessions = ['visitor-a', 'visitor-b'];

@@ -34,6 +34,9 @@ let segmenter: ImageSegmenter | null = null;
 let maskCanvas: OffscreenCanvas | null = null;
 let lastStamp = 0;
 let segStamp = 0;
+let fileset: Fileset | null = null;
+let segmenterStarted = false;
+let segmenterBusy = false;
 
 type Fileset = { wasmLoaderPath: string; wasmBinaryPath: string };
 
@@ -111,6 +114,7 @@ const reconfigureQueue = createReconfigureQueue(
 ctx.onmessage = (ev) => {
   const m = ev.data;
   if (m.type === 'init') void init(m);
+  else if (m.type === 'segmenter-init') void initSegmenter(m.model);
   else if (m.type === 'frame') onFrame(m);
   else if (m.type === 'options') reconfigureQueue.submit({ requestId: m.requestId, numPoses: posesOf(m.numPoses) });
 };
@@ -120,7 +124,7 @@ const posesOf = (n: unknown): number => (typeof n === 'number' && Number.isFinit
 
 async function init(m: Extract<PoseIn, { type: 'init' }>): Promise<void> {
   try {
-    const fileset: Fileset = { wasmLoaderPath: m.wasmLoaderPath, wasmBinaryPath: m.wasmBinaryPath };
+    fileset = { wasmLoaderPath: m.wasmLoaderPath, wasmBinaryPath: m.wasmBinaryPath };
     const opts = { runningMode: 'VIDEO' as const, numPoses: posesOf(m.numPoses), outputSegmentationMasks: false };
     let backend: 'GPU' | 'CPU' = 'GPU';
     let warning: string | null = null;
@@ -153,16 +157,17 @@ async function init(m: Extract<PoseIn, { type: 'init' }>): Promise<void> {
     } catch { /* 预热失败不致命：第一帧真画面会自己编译 */ }
     ctx.postMessage({ type: 'ready', backend, warning, warmMs: performance.now() - t0 });
 
-    // 抠图是慢回路的输入：姿态先就位，它在后面慢慢起，起不来也不拖垮姿态
-    if (m.segmenterModel) void initSegmenter(fileset, m.segmenterModel);
-    else ctx.postMessage({ type: 'segmenter', ok: false, warning: null });
   } catch (e) {
     ctx.postMessage({ type: 'error', error: describe(e) });
   }
 }
 
-async function initSegmenter(fileset: Fileset, model: string): Promise<void> {
+async function initSegmenter(model: string): Promise<void> {
+  // 初始化失败也是终态。慢回路可以没有剪影，但不能每秒重复下载/建图去伤快回路。
+  if (segmenterStarted) return;
+  segmenterStarted = true;
   try {
+    if (!fileset) throw new Error('姿态模型还没就位');
     await restoreFactory(fileset.wasmLoaderPath);
     segmenter = await ImageSegmenter.createFromOptions(fileset, {
       baseOptions: { modelAssetPath: model, delegate: 'GPU' },
@@ -183,6 +188,9 @@ function onFrame(m: Extract<PoseIn, { type: 'frame' }>): void {
     const lm = landmarker;
     if (!lm || reconfigureQueue.busy) {
       ctx.postMessage({ type: 'fail', stamp: m.stamp, error: lm ? '正在按新的人数重建' : '模型还没就位' });
+      if (m.maskGeneration !== null) {
+        ctx.postMessage({ type: 'mask-fail', generation: m.maskGeneration, error: '姿态图正在重建' });
+      }
       return;
     }
     // MediaPipe 要求时间戳严格递增，否则抛
@@ -215,39 +223,65 @@ function onFrame(m: Extract<PoseIn, { type: 'frame' }>): void {
     }
     (res as { close?: () => void }).close?.();
     ctx.postMessage(out);
-    if (m.mask && segmenter) segment(src, stamp);
+    if (m.maskGeneration !== null) segment(src, stamp, m.maskGeneration);
   } catch (e) {
     ctx.postMessage({ type: 'fail', stamp: m.stamp, error: describe(e) });
+    if (m.maskGeneration !== null) {
+      ctx.postMessage({ type: 'mask-fail', generation: m.maskGeneration, error: describe(e) });
+    }
   } finally {
     try { (src as { close?: () => void }).close?.(); } catch { /* 已经关过 */ }
   }
 }
 
-function segment(src: VideoFrame | ImageBitmap, stamp: number): void {
+function segment(src: VideoFrame | ImageBitmap, stamp: number, generation: number): void {
   const seg = segmenter;
-  if (!seg) return;
+  if (!seg || segmenterBusy) {
+    ctx.postMessage({
+      type: 'mask-fail', generation,
+      error: seg ? '上一张剪影仍在处理' : 'ImageSegmenter 未就位',
+    });
+    return;
+  }
+  segmenterBusy = true;
   try {
     segStamp = stamp <= segStamp ? segStamp + 1 : stamp;
     seg.segmentForVideo(src as unknown as ImageBitmap, segStamp, (result) => {
-      const mask = result.categoryMask;
-      if (!mask) return;
-      const w = mask.width, h = mask.height;
-      const data = mask.getAsUint8Array();
-      const cvs = maskCanvas ??= new OffscreenCanvas(w, h);
-      if (cvs.width !== w) cvs.width = w;
-      if (cvs.height !== h) cvs.height = h;
-      const g = cvs.getContext('2d');
-      if (!g) return;
-      const img = g.createImageData(w, h);
-      for (let i = 0; i < data.length; i++) {
-        // selfie_segmenter 的 category mask：0 = 背景，非 0 = 人
-        const p = i * 4;
-        img.data[p] = img.data[p + 1] = img.data[p + 2] = 255;
-        img.data[p + 3] = data[i] !== 0 ? 255 : 0;
+      try {
+        const mask = result.categoryMask;
+        if (!mask) {
+          ctx.postMessage({ type: 'mask-fail', generation, error: 'ImageSegmenter 没有返回 category mask' });
+          return;
+        }
+        const w = mask.width, h = mask.height;
+        const data = mask.getAsUint8Array();
+        const cvs = maskCanvas ??= new OffscreenCanvas(w, h);
+        if (cvs.width !== w) cvs.width = w;
+        if (cvs.height !== h) cvs.height = h;
+        const g = cvs.getContext('2d');
+        if (!g) {
+          ctx.postMessage({ type: 'mask-fail', generation, error: '无法创建剪影画布' });
+          return;
+        }
+        const img = g.createImageData(w, h);
+        for (let i = 0; i < data.length; i++) {
+          // selfie_segmenter 的 category mask：0 = 背景，非 0 = 人
+          const p = i * 4;
+          img.data[p] = img.data[p + 1] = img.data[p + 2] = 255;
+          img.data[p + 3] = data[i] !== 0 ? 255 : 0;
+        }
+        g.putImageData(img, 0, 0);
+        const bitmap = cvs.transferToImageBitmap();
+        ctx.postMessage({ type: 'mask', generation, bitmap }, [bitmap]);
+      } catch (e) {
+        ctx.postMessage({ type: 'mask-fail', generation, error: describe(e) });
+      } finally {
+        segmenterBusy = false;
+        try { result.close?.(); } catch { /* wasm 结果释放失败不许逃出回调 */ }
       }
-      g.putImageData(img, 0, 0);
-      const bitmap = cvs.transferToImageBitmap();
-      ctx.postMessage({ type: 'mask', bitmap }, [bitmap]);
     });
-  } catch { /* 抠图掉一帧无所谓 */ }
+  } catch (e) {
+    segmenterBusy = false;
+    ctx.postMessage({ type: 'mask-fail', generation, error: describe(e) });
+  }
 }

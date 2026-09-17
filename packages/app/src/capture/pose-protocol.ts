@@ -12,7 +12,6 @@ export type PoseIn =
     wasmLoaderPath: string;
     wasmBinaryPath: string;
     poseModel: string;
-    segmenterModel: string | null;
     /** 预热用的画布尺寸：让着色器按真实输入的尺寸编译 */
     width: number;
     height: number;
@@ -22,6 +21,8 @@ export type PoseIn =
      */
     numPoses?: number;
   }
+  /** 慢回路第一次需要剪影时才建分割图；一次 worker 生命周期最多请求一次。 */
+  | { type: 'segmenter-init'; model: string }
   /**
    * 运行中改人数上限（控件条）。worker 在两帧之间重建图，这期间来的帧回 `fail`。
    * `requestId` 让主线程可以丢掉旧回执；只有匹配的成功回执才能改“已生效”人数。
@@ -32,8 +33,8 @@ export type PoseIn =
     frame: VideoFrame | ImageBitmap;
     /** 主线程的 `performance.now()`，严格递增。worker 的时钟原点不同，所以时间戳只用这一个 */
     stamp: number;
-    /** 这一帧顺手抠一次图（慢回路用，2Hz） */
-    mask: boolean;
+    /** 非 null 才抠图；generation 把迟到回执隔离在原观众内。 */
+    maskGeneration: number | null;
   };
 
 export type PoseOut =
@@ -54,7 +55,8 @@ export type PoseOut =
   | { type: 'fail'; stamp: number; error: string }
   /** `setOptions()` 的显式结果；失败时不得把目标值当成已生效 */
   | { type: 'options-result'; requestId: number; numPoses: number; ok: boolean; error?: string }
-  | { type: 'mask'; bitmap: ImageBitmap };
+  | { type: 'mask'; generation: number; bitmap: ImageBitmap }
+  | { type: 'mask-fail'; generation: number; error: string };
 
 export function toLandmark(l: { x: number; y: number; z: number; visibility?: number }): Landmark {
   return { x: l.x, y: l.y, z: l.z, visibility: l.visibility };

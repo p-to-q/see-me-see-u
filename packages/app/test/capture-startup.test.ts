@@ -34,7 +34,7 @@ function fake(opts: FakeOptions = {}): Capture & { starts: number; stops: number
       if (opts.reject) throw opts.reject;
     },
     latest: () => null,
-    latestMask: () => null,
+    takeMask: () => null,
     stop() {
       this.stops++;
       if (opts.stopThrows) throw new Error('清理也坏了');

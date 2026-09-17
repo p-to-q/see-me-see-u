@@ -31,8 +31,10 @@ interface Capture {
   start(): Promise<void>;
   /** 最近一次成功的姿态；没有人/还没就绪时返回 null。绝不抛异常 */
   latest(): RawPose | null;
-  /** 最近一帧的人像 mask（慢回路用），可能为 null */
-  latestMask(): ImageBitmap | null;
+  /** 取走一张人像 mask；调用方取得所有权并负责 close，可能为 null */
+  takeMask(): ImageBitmap | null;
+  /** 慢回路开/撤一张 mask 的需求；回放可不实现 */
+  setMaskDemand?(wanted: boolean): void;
   readonly fps: number;
   readonly lastError: string | null;
   stop(): void;
@@ -40,6 +42,11 @@ interface Capture {
 ```
 实现两个：`WebcamCapture`（MediaPipe）与 `ReplayCapture`（读 `/demo/pose-*.json`，`?demo=1` 时启用）。
 **两者必须可互换**，这是 P3 降级路径与现场 plan B 的基础。
+
+mask 不是快回路的持续输出。普通启动只建姿态图；慢回路武装后才请求
+ImageSegmenter，并且每位观众只接收一张。请求与 worker 回执携带同一个
+generation，离场后迟到的旧图必须关闭而不能交给下一位。主线程姿态降级
+（`?worker=off`）不再建第二张 MediaPipe 图：没有 mask 时慢回路静默等待，姿态优先。
 
 ## 3. PartLibrary 接口
 

@@ -14,8 +14,10 @@ export interface Capture {
   start(): Promise<void>;
   /** 最近一次成功的姿态；没有人/还没就绪时返回 null。绝不抛异常 */
   latest(): RawPose | null;
-  /** 最近一帧的人像 mask（慢回路用），可能为 null */
-  latestMask(): ImageBitmap | null;
+  /** 取走一张新人像 mask；调用方接管 ImageBitmap 并负责 close。没有就是 null。 */
+  takeMask(): ImageBitmap | null;
+  /** 慢回路的单张需求。可选：回放/空采集没有分割器。 */
+  setMaskDemand?(wanted: boolean): void;
   readonly fps: number;
   readonly lastError: string | null;
   stop(): void;
@@ -159,7 +161,7 @@ function emptyCapture(error: string): Capture {
   return {
     async start() { /* 最后一道无画面退路：维持 Capture 契约 */ },
     latest: () => null,
-    latestMask: () => null,
+    takeMask: () => null,
     fps: 0,
     lastError: error,
     failed: true,

@@ -36,7 +36,7 @@
  * 这里**不做任何姿态处理**：不滤波、不建骨架、不换坐标系。
  * 坐标转换只允许发生在 core/skeleton.ts 的 mediapipeToWorld()（docs/04 §1）。
  */
-import type { ImageSegmenter, PoseLandmarker } from '@mediapipe/tasks-vision';
+import type { PoseLandmarker } from '@mediapipe/tasks-vision';
 import type { RawPose } from '../../../core/src/types.ts';
 import { CAPTURE, PEOPLE } from '../../../core/src/tuning.ts';
 import { notePresence } from '../shell/idle.ts';
@@ -49,6 +49,7 @@ import {
 import { describe, overallScore, toLandmark, type PoseIn, type PoseOut } from './pose-protocol.ts';
 import { applyCamFraming, readCamFraming, type CamFramingFlag, type CamFramingStatus, type TrackLike } from './cam-framing.ts';
 import { cadenceDue, mainThreadInferenceDue } from './cadence.ts';
+import { createMaskDemand } from './mask-demand.ts';
 
 // 本地 wasm：打包进产物，现场断网也能起（Vite 把它们当静态资源发出去）
 // 注意子路径没有 /wasm/：包的 exports 就是这么导出的
@@ -94,13 +95,6 @@ function poseModelSource(which: PoseModel): { local: string; cdn: string } {
 }
 
 /**
- * 每多少个推理 tick 抠一次图。mask 只给慢回路用（docs/06 §5），
- * 2Hz 足够，跟着姿态跑会白白吃掉快回路的预算。
- * 不放 tuning.ts：这不是"现场要调的数"，是一条实现内部的节流。
- */
-const MASK_EVERY_N_TICKS = Math.max(1, Math.round(CAPTURE.targetHz / 2));
-
-/**
  * 发出去的一帧这么久（毫秒）没回来 = 那一帧丢了（worker 被系统挂起、消息丢了）。
  * 不放 tuning.ts，理由同上：它是一道保险，不是一个观感旋钮。没有它，一次丢消息就是永久停滞。
  */
@@ -122,6 +116,8 @@ interface PoseEngine {
   post(msg: PoseIn, transfer: Transferable[]): void;
   /** 目标值会串行发送；只有 worker 成功回执才会改 `numPoses` */
   requestNumPoses(numPoses: number): void;
+  /** 首次慢回路需求才解析模型并建分割图；同一 worker 最多启动一次。 */
+  requestSegmenter(): void;
   listen(fn: ((m: PoseEngineEvent) => void) | null): void;
 }
 
@@ -162,10 +158,7 @@ const othersToPoses = (others: PoseOut extends infer M ? M extends { type: 'pose
 
 async function createPoseEngine(model: PoseModel, forget: () => void): Promise<PoseEngine> {
   if (typeof Worker === 'undefined') throw new Error('浏览器没有 Worker');
-  const [poseModel, segModel] = await Promise.all([
-    resolveModel(poseModelSource(model)),
-    resolveModel(MODELS.segmenter),
-  ]);
+  const poseModel = await resolveModel(poseModelSource(model));
   const worker = new Worker(new URL('./pose-worker.ts', import.meta.url), { type: 'module', name: 'sb-pose' });
   let listener: ((m: PoseEngineEvent) => void) | null = null;
   const numPoses = peopleCap();
@@ -173,6 +166,7 @@ async function createPoseEngine(model: PoseModel, forget: () => void): Promise<P
   let optionsRequest: Extract<PoseIn, { type: 'options' }> | null = null;
   let optionsSequence = 0;
   let failedNumPoses: number | null = null;
+  let segmenterRequested = false;
 
   const pumpOptions = (): void => {
     if (engine.dead || optionsRequest || desiredNumPoses === engine.numPoses || failedNumPoses === desiredNumPoses) return;
@@ -207,6 +201,17 @@ async function createPoseEngine(model: PoseModel, forget: () => void): Promise<P
       // 显式再请求一次同值，就是对上次失败的重试。
       if (failedNumPoses === value) failedNumPoses = null;
       pumpOptions();
+    },
+    requestSegmenter() {
+      if (segmenterRequested || engine.dead) return;
+      segmenterRequested = true;
+      // 模型探测也在需求之后才发生；失败是本 worker 的终态，避免 slow 轮询反复下载/建图。
+      void resolveModel(MODELS.segmenter).then((segmenterModel) => {
+        if (!engine.dead) engine.post({ type: 'segmenter-init', model: abs(segmenterModel) }, []);
+      }).catch((error) => {
+        engine.segmenterReady = false;
+        listener?.({ type: 'segmenter', ok: false, warning: `ImageSegmenter 未启用（慢回路会静默关掉）：${describe(error)}` });
+      });
     },
     listen(fn) { listener = fn; },
   };
@@ -266,7 +271,6 @@ async function createPoseEngine(model: PoseModel, forget: () => void): Promise<P
       wasmLoaderPath: abs(wasmModuleLoaderUrl),
       wasmBinaryPath: abs(wasmModuleBinaryUrl),
       poseModel: abs(poseModel),
-      segmenterModel: abs(segModel),
       width: CAPTURE.requestedVideo.width,
       height: CAPTURE.requestedVideo.height,
       numPoses,
@@ -281,7 +285,6 @@ export class WebcamCapture implements Capture {
 
   #stream: MediaStream | null = null;
   #landmarker: PoseLandmarker | null = null;
-  #segmenter: ImageSegmenter | null = null;
 
   #latest: RawPose | null = null;
   /** 这一帧 MediaPipe 给出的其余几个人（`numPoses > 1`）。单人时永远是空数组 */
@@ -289,11 +292,10 @@ export class WebcamCapture implements Capture {
   /** `?people=` / 控件条要的人数上限 */
   #people = peopleCap();
   #mask: ImageBitmap | null = null;
-  #maskCanvas: HTMLCanvasElement | null = null;
+  #maskDemand = createMaskDemand();
 
   #fps = 0;
   #tickTimes: number[] = [];
-  #tick = 0;
   #lastVideoTime = -1;
   #lastStamp = -1;
   #running = false;
@@ -402,7 +404,20 @@ export class WebcamCapture implements Capture {
     if (engine && !engine.dead) engine.requestNumPoses(v);
     this.#syncMainPeople();
   }
-  latestMask(): ImageBitmap | null { return this.#mask; }
+  takeMask(): ImageBitmap | null {
+    const mask = this.#mask;
+    this.#mask = null;
+    return mask;
+  }
+  setMaskDemand(wanted: boolean): void {
+    this.#maskDemand.set(wanted);
+    if (!wanted) {
+      this.#mask?.close();
+      this.#mask = null;
+      return;
+    }
+    this.#engine?.requestSegmenter();
+  }
 
   /** 永不 reject：失败写进 lastError + failed，让页面自己决定怎么显示 */
   async start(): Promise<void> {
@@ -464,9 +479,8 @@ export class WebcamCapture implements Capture {
     this.#mainPeopleRequest = null;
     this.#mainPeopleApplied = null;
     try { this.#landmarker?.close(); } catch { /* 关闭失败不值得吵 */ }
-    try { this.#segmenter?.close(); } catch { /* 同上 */ }
     this.#landmarker = null;
-    this.#segmenter = null;
+    this.#maskDemand.set(false);
     this.#mask?.close();
     this.#mask = null;
     this.#latest = null;
@@ -577,6 +591,7 @@ export class WebcamCapture implements Capture {
     // worker 是整页共用的：上一个 capture 可能把它改成了别的人数
     engine.listen((m) => this.#onEngine(m));
     engine.requestNumPoses(this.#people);
+    if (this.#maskDemand.wanted) engine.requestSegmenter();
   }
 
   #pump = (): void => {
@@ -610,16 +625,20 @@ export class WebcamCapture implements Capture {
     const stamp = now <= this.#lastStamp ? this.#lastStamp + 1 : now;
     this.#lastStamp = stamp;
     this.#lastSent = now;
-    this.#tick++;
-    const mask = engine.segmenterReady && this.#tick % MASK_EVERY_N_TICKS === 0;
-
     if (typeof VideoFrame !== 'undefined') {
       let frame: VideoFrame;
       try { frame = new VideoFrame(this.video, { timestamp: Math.round(stamp * 1000) }); }
       catch { return; }   // 这一刻还拿不到一帧（尺寸为 0 之类）：下一帧再来
+      const maskGeneration = this.#maskDemand.begin(engine.segmenterReady);
       this.#inFlight = true;
       this.#sentAt = now;
-      engine.post({ type: 'frame', frame, stamp, mask }, [frame]);
+      try {
+        engine.post({ type: 'frame', frame, stamp, maskGeneration }, [frame]);
+      } catch (error) {
+        try { frame.close(); } catch { /* 转移失败时所有权仍在主线程 */ }
+        if (maskGeneration !== null) this.#maskDemand.settle(maskGeneration, false);
+        throw error;
+      }
       return;
     }
     // 没有 VideoFrame 的浏览器：ImageBitmap 也能转移，只是多一次异步
@@ -627,7 +646,14 @@ export class WebcamCapture implements Capture {
     this.#sentAt = now;
     void createImageBitmap(this.video).then((bmp) => {
       if (!this.#running || this.#engine !== engine) { bmp.close(); this.#inFlight = false; return; }
-      engine.post({ type: 'frame', frame: bmp, stamp, mask }, [bmp]);
+      const maskGeneration = this.#maskDemand.begin(engine.segmenterReady);
+      try {
+        engine.post({ type: 'frame', frame: bmp, stamp, maskGeneration }, [bmp]);
+      } catch (error) {
+        try { bmp.close(); } catch { /* 转移失败时所有权仍在主线程 */ }
+        if (maskGeneration !== null) this.#maskDemand.settle(maskGeneration, false);
+        throw error;
+      }
     }).catch(() => { this.#inFlight = false; });
   }
 
@@ -650,9 +676,15 @@ export class WebcamCapture implements Capture {
       this.#firstResult = null;
       done?.();
     } else if (m.type === 'mask') {
-      // 新的到货再换掉旧的，别让消费者拿到半张图
-      this.#mask?.close();
-      this.#mask = m.bitmap;
+      if (this.#maskDemand.settle(m.generation, true)) {
+        // 新的到货再换掉旧的，别让消费者拿到半张图
+        this.#mask?.close();
+        this.#mask = m.bitmap;
+      } else {
+        m.bitmap.close();
+      }
+    } else if (m.type === 'mask-fail') {
+      this.#maskDemand.settle(m.generation, false);
     } else if (m.type === 'fail') {
       this.#inFlight = false;
       this.#error = m.error;
@@ -666,6 +698,8 @@ export class WebcamCapture implements Capture {
     if (this.#reacquiring || this.#retries >= WORKER_RETRIES) return;
     this.#reacquiring = true;
     this.#retries++;
+    // worker 已终止，不会再有旧 mask 回执；把那张在途需求退回可重试态。
+    this.#maskDemand.settle(this.#maskDemand.generation, false);
     this.#engine?.listen(null);
     void acquirePoseEngine(this.model).then((e) => {
       if (this.#running) this.#attach(e);
@@ -677,7 +711,7 @@ export class WebcamCapture implements Capture {
   // ── 主线程那条路（降级路径：worker 起不来 / `?worker=off`）─────────────────
   async #openModels(): Promise<void> {
     // 动态 import：worker 那条路上主线程一个字节的 MediaPipe 都不需要
-    const { FilesetResolver, ImageSegmenter } = await import('@mediapipe/tasks-vision');
+    const { FilesetResolver } = await import('@mediapipe/tasks-vision');
     const poseModel = await resolveModel(poseModelSource(this.model));
 
     // wasm：先本地，失败再 CDN
@@ -696,19 +730,6 @@ export class WebcamCapture implements Capture {
     this.#mainPeopleApplied = opened.numPoses;
     this.#syncMainPeople();
     this.#step();
-
-    // 抠图是慢回路的输入，起不来不该拖垮姿态
-    try {
-      this.#segmenter = await ImageSegmenter.createFromOptions(fileset, {
-        baseOptions: { modelAssetPath: await resolveModel(MODELS.segmenter), delegate: 'GPU' },
-        runningMode: 'VIDEO',
-        outputCategoryMask: true,
-        outputConfidenceMasks: false,
-      });
-    } catch (e) {
-      this.#segmenter = null;
-      this.#error = `ImageSegmenter 未启用（慢回路会静默关掉）：${describe(e)}`;
-    }
   }
 
   async #makeLandmarker(
@@ -819,9 +840,7 @@ export class WebcamCapture implements Capture {
     // 这件事只有采集端知道，让它自己说，收口的 main.ts 就一行都不用改。
     notePresence((this.#latest?.score ?? 0) > CAPTURE.minScore, now);
 
-    this.#tick++;
     this.#countTick(now);
-    if (this.#segmenter && this.#tick % MASK_EVERY_N_TICKS === 0) this.#segment(stamp);
   }
 
   /** 推理 Hz：数最近 1 秒里成功跑了几次 */
@@ -840,38 +859,6 @@ export class WebcamCapture implements Capture {
     return (this.#stream?.getVideoTracks()[0] as unknown as TrackLike | undefined) ?? null;
   }
 
-  #segment(stamp: number): void {
-    const seg = this.#segmenter;
-    if (!seg) return;
-    try {
-      seg.segmentForVideo(this.video, stamp, (result) => {
-        const m = result.categoryMask;
-        if (!m) return;
-        const w = m.width, h = m.height;
-        const src = m.getAsUint8Array();
-        const cvs = this.#maskCanvas ??= document.createElement('canvas');
-        cvs.width = w; cvs.height = h;
-        const ctx = cvs.getContext('2d');
-        if (!ctx) return;
-        const img = ctx.createImageData(w, h);
-        for (let i = 0; i < src.length; i++) {
-          // selfie_segmenter 的 category mask：0 = 背景，非 0 = 人
-          const on = src[i] !== 0 ? 255 : 0;
-          const p = i * 4;
-          img.data[p] = img.data[p + 1] = img.data[p + 2] = 255;
-          img.data[p + 3] = on;
-        }
-        ctx.putImageData(img, 0, 0);
-        // createImageBitmap 是异步的：新的到货再换掉旧的，别让消费者拿到半张图
-        void createImageBitmap(cvs).then((bmp) => {
-          this.#mask?.close();
-          this.#mask = bmp;
-        }).catch(() => { /* 抠图掉一帧无所谓 */ });
-      });
-    } catch (e) {
-      this.#error = describe(e);
-    }
-  }
 }
 
 function withTimeout<T>(p: Promise<T>, ms: number, why: string): Promise<T> {
