@@ -371,7 +371,7 @@ draw call：任何人数下 = 一具身体（共用桶，`people-budget.test.ts`
 | 调速器第 7 级 `people`：只留主身体 | `shell/governor.ts`、`governor-wire.ts` | `test/governor{,-wire}.test.ts` |
 | `?people=auto\|1\|2\|3`、控件「人数」· N（重载）、HUD 的 people 几行、小屏画其余的人 | `shell/kiosk.ts`、`ui/control-table.ts`、`ui/i18n.ts`、`shell/hud.ts`、`ui/preview.ts` | `people-flag` / `people-hud` / `control-table` |
 | 工作台 `/dev/people.html`：六个合成场景、轨迹时间线、舞台俯视、门限 | `dev/people.{html,ts}`，目录里一行 | — |
-| 取证脚本（raw CDP）与合成假摄像头 | `scripts/people/{measure.ts,figures.py}` | — |
+| 取证脚本（raw CDP）与合成假摄像头 | `scripts/people/{measure.ts,accept.ts,figures.py}` | `people-acceptance-script.test.ts`：自动验收必须串行跑 worker / main、正常显示节拍、阶段 / cadence / 单 id / 无 companion / reload / stall 断言；宿主过载时开 Chrome 前拒绝，不能制造产品回归 |
 | **自动探测**（2026-09-17）：网页 / kiosk 默认自动；真摄像头先保留单人稳定期，之后只在可见、未降级、帧预算有余量时降频并临时把 `numPoses` 抬到 `hardMax`；一扇窗可直接 1→3，卡顿就立即收回并退避；不稳定的人不入画，久不在场一次收回到已证明人数；显式 1/2/3 优先。单人快速横移让 tracker 短暂失配时，只有检测器仍确实只返回一人，主通道才受限地退回 `latest`，不冻结也不在多人间乱跳 | `core/src/people-probe.ts`（纯状态机）；`capture/people-probe-runtime.ts`（可见人数、稳定主身份、受限单人回退、预算与探测节拍）；`capture/cadence.ts`（worker / 主线程降级共用节拍）；`main.ts` 的 `peopleProbe` / `peopleCap` / `liveCap`；`flags.peopleAuto`；控件新增 `auto`；桶容量开机按 `hardMax` 留够 | `people-probe.test.ts` 12 条；`people-probe-runtime.test.ts` 5 条；`cadence.test.ts` 2 条钉住两条推理路径；URL / 控件 / 推理时钟另有守卫。确认到 3 不代表预算能画 3 具；**真摄像头未测** |
 | **多人推理时钟**（2026-09-17）：tracker 的出生/丢失/换人和自动探测的确认只在 `inferredAt` 变大时推进；没有实现该字段的 Capture 退到 `RawPose.t`。主线每帧只读一次 `latest()`，避免同一 rAF 拿到不同快照 | `capture/inference-clock.ts`（纯函数）+ `main.ts`；相遇清零同时清 cursor | `app/test/people-inference.test.ts`：同一份结果在 120Hz 被读 3 秒，轨迹仍是 tentative、探测仍在 level 1；真实 30Hz 新结果才按 0.3s / 1.2s 门限推进；重复、倒退、NaN 时刻不 throw |
 | **运行中人数重配置**（2026-09-17）：`setOptions({ numPoses })` 只能串行，连续改目标时只追最后一个；不再在发送前乐观地把目标写成已生效，也不再吞掉失败 | `capture/pose-protocol.ts` 统一 request/ack；`pose-worker.ts` 串行队列；`webcam.ts` 的 worker 和主线程降级路径同样按 applied/desired/in-flight 分层 | `app/test/people-reconfigure.test.ts`：不并发重建、中间值被取代有回执、失败同值可重试、旧 ack 不覆盖新目标、stop 使旧回调失效；**真摄像头快速 1→3→1 未测** |
@@ -528,6 +528,38 @@ retreat 回放的那几秒）探测完全不动，`peopleCap` 停在探测开始
 **还剩的那一个"摊在地上"不是多人的 bug**：`pose-walkturn` 的第 298–346 帧是录像本身的一段转身 / 下蹲，分数 0.72–0.89、肩胯全可见，
 而骨架高只有 0.34–0.84m。**单人那条链在同一段上也有 18 帧低于 0.7m**（最低 0.35m，第 321 帧）—— 这一版之前就是这样。
 页内快照（`?debug=1` 时 `globalThis.__people`）与截图同一刻取，数和形状对得上：主身体骨架高 0.406m、骨盆 0.059m，伴随身体 1.595m。
+
+### 10.3 自动单人的浏览器验收（2026-09-17）
+
+`scripts/people/accept.ts` 不再拿固定 `?people=1` 当作自动策略的替身。它用同一份由骨架数据画出来的
+单人 Y4M，串行开两个全新临时 profile：默认 worker 与 `?worker=off` 主线程降级。两场都必须亲眼走完
+`probe:idle → probing → idle`，并同时守住确认上限 1、单一主 id、可见 selected 轨迹恰好一条、主骨架连续、
+零 companion、常态档 → 探测档 → 常态档、无重载 / exception / 2 秒停帧。帧率判据承认浏览器采样与调度抖动：
+前后两段中位数各不低于 21Hz，探测段在 9.75–18.75Hz 且不高于前后较低者的 80%，并不把它写成精确
+`30 → 15 → 30`。每次开跑先清掉这个输出目录里上一轮的四个同名结果，`summary.json` 只在两条路径都结束后才写，
+四份文件还共享同一个 `runId`，所以被拒绝或中断的本轮不会继承旧 PASS。`invocation.json` 记录的是运行脚本所在
+checkout；`worker.json` / `main.json` 另记浏览器实际打开的 URL、页面 DOM 与入口脚本 SHA-256，不能拿本地 commit
+冒充被测构建。结果分别写进 `invocation.json`、`worker.json`、`main.json`、`summary.json`；截图不是通过条件。
+
+两个终端分开运行：
+
+```bash
+# 终端 A
+python3 scripts/people/figures.py assets/demo/pose-jumpingjacks.json /tmp/smu-single.y4m 1 20
+npm run build
+(cd packages/app && npx vite preview --host 127.0.0.1 --port 4777 --strictPort)
+```
+
+```bash
+# 终端 B，等终端 A 的 preview ready
+node scripts/people/accept.ts http://127.0.0.1:4777 /tmp/people-auto /tmp/smu-single.y4m
+```
+
+这一轮没有伪造一个绿结果。第一次尝试在冷 profile 上看到了稳定单人 id、`1/1` 与零 companion，
+但 worker / main 分别只剩 4Hz 与 7–8Hz，并触发 2 秒停帧；同一时刻机器的 1 分钟 load 约 190 / 14 核，
+仓库原有 `capture-smoothness/measure.ts` 对照也只剩 27.8–35.3fps（历史同口径 58.5–58.7fps）。
+因此这组数字不能归因给 auto，也不能叫产品通过。验收入口现在先把 `loadavg` / 逻辑核数写进 `invocation.json`；
+每核 load 超过 2 时在开 Chrome 前 exit 2。**完整浏览器验收 Not run：当前宿主不合格；空闲机器上的复跑仍是本卡缺的证据。**
 
 ## 11 · 和旧文档的冲突（登记，不改原文）
 
