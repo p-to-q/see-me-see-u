@@ -121,9 +121,9 @@ test('连续性：任意景别 / hold 序列下，舞台相机的视角、移轴
   assert.ok(smoothstep(1) === 1);
 });
 
-test('横向接线：30Hz 推理先过姿态时钟，再喂 120Hz 跟随；分类器与小屏仍吃原话', () => {
-  assert.match(MAIN, /framer\.update\(live,[^]*preview\?\.update\(live, dt, sourceAspect\)/,
-    '模式分类 / 小屏不该把插值出来的姿态说成摄像头原话');
+test('横向接线：30Hz 推理先过姿态时钟，再喂 120Hz 跟随；分类器与小屏只吃未停滞原话', () => {
+  assert.match(MAIN, /const measured = measuredPose\(live, poseClock\.state\)[^]*framer\.update\(measured,[^]*preview\?\.update\(measured, dt, sourceAspect\)/,
+    '模式分类 / 小屏不该把插值姿态或停滞缓存说成摄像头原话');
   assert.match(MAIN, /evidence:\s*lateralEvidence\(raw, sourceAspect\)/,
     '横向跟随还在重复吃采集端 30Hz 的同一份结果');
   assert.doesNotMatch(MAIN, /evidence:\s*lateralEvidence\(live\)/);

@@ -53,7 +53,7 @@ import { createDeferral, createGovernor, GOVERNOR_LADDER } from './shell/governo
 import { wireGovernor } from './shell/governor-wire.ts';
 import { createWarmPlan } from './stage/warm-plan.ts';
 import { createLongTaskCounter } from './shell/long-tasks.ts';
-import { createPoseClock } from './capture/pose-clock.ts';
+import { createPoseClock, measuredPose } from './capture/pose-clock.ts';
 import { freshInference } from './capture/inference-clock.ts';
 import {
   canRunPeopleProbe, peopleProbeCadence, shouldStepPeopleProbe, trackedPrimaryOrSingleFallback, visibleSelectedCount,
@@ -1113,6 +1113,9 @@ async function boot(): Promise<void> {
     // 此前这里直接是 `capture.latest()`：30Hz 的结果被 60–120Hz 的帧连着吃好几次，动作一大身体就一顿一顿地追。
     poseClock.observe(live, capture.inferredAt ?? live?.t ?? Number.NaN);
     const raw = poseClock.sample(tMs);
+    // 身体在推理短停时按姿态时钟的设计保持一会儿；“机器此刻看到什么”不能。
+    // `capture.latest()` 是缓存，若继续直接喂它，小屏 / 读数 / 取景会永远粘在最后一帧。
+    const measured = measuredPose(live, poseClock.state);
     // "有没有人"：多人时任何一具身体的人此刻被看见就算（主身体被挡住一下，弧线不停、在场不掉，docs/50 §3.2）
     const detected = (raw !== null && raw.score > CAPTURE.minScore)
       || (crowd !== null && crowd.tracks.some((t) => t.selected && t.missing === 0));
@@ -1136,7 +1139,7 @@ async function boot(): Promise<void> {
     stage.setArc(arcState.overall);
     body.setArc?.(arcState.overall);
 
-    // 那块小屏幕吃的是 **raw，不是精化之后的 cooked**。
+    // 那块小屏幕吃的是 **measured，不是精化之后的 cooked**。
     // 精化器会在遮挡时保持最后一次可信位置最多 0.67 秒（`core/refine.ts`）——
     // 那对身体是对的（抽搐比迟钝更毁体验），对这块屏幕是致命的：
     // 它会在人已经走出画面之后继续显示一副"看得见"的骨架。
@@ -1145,9 +1148,9 @@ async function boot(): Promise<void> {
     // 它要回答"画面里此刻是什么样"，插值出来的那一份不是画面里有过的样子
     // 摄像头自己在取景时，腿被它裁掉是预期（docs/49 §6.3 三）：分类器和引导都要知道
     const camFraming = cameraFraming();
-    framing = decide(framingPolicy, framer.update(live, dt, { cameraFraming: camFraming, aspect: sourceAspect }), { cameraFraming: camFraming });
+    framing = decide(framingPolicy, framer.update(measured, dt, { cameraFraming: camFraming, aspect: sourceAspect }), { cameraFraming: camFraming });
     legHold = stepToward(legHold, framing.holdLegs ? 1 : 0, dt, AUTOFRAME.legBlendSeconds);
-    preview?.update(live, dt, sourceAspect);
+    preview?.update(measured, dt, sourceAspect);
 
     // 伴随身体（docs/50 §4）：每个人各自的骨架、在场、站位。开场团块还没长出零件时（`emergence` 0）它们也不长
     // 稳定单人先判：命中时连 `bodyAt()` / CompanionContext 都不构造。
@@ -1163,7 +1166,7 @@ async function boot(): Promise<void> {
       stage.setGroup(crowdOut?.groupWidth ?? 0, crowdOut?.groupHeight ?? 0);
       renderedCrowd = crowdOut;
     }
-    // 横向根偏移：吃姿态时钟给身体的同一份连续流。模式分类 / 小屏仍吃 `live` 原话；
+    // 横向根偏移：吃姿态时钟给身体的同一份连续流。模式分类 / 小屏吃未停滞的 `measured` 原话；
     // 这里若也吃原话，30Hz 的同一结果会在 120Hz 屏上变成「三帧不动、下一帧跳一下」。
     // 夹在舞台此刻的横向余量里（随景别连续变化）。
     // 台上有伴随身体时让位 —— 站位归 lineup；两个都是弹簧，加起来是连续的
@@ -1424,9 +1427,9 @@ async function boot(): Promise<void> {
     // 左下角那块读数。放在这里而不是上面 `preview?.update()` 旁边，是因为它要的
     // `lastFeatures` 是这一帧**刚算出来**的那一份 —— 放在前面就永远晚一帧，
     // 而"晚一帧"在一块 4Hz 刷新的读数上看不出来，正是 P21 说的那种坏法。
-    // `raw` 和小屏幕吃的是同一份（滤波之前），理由也同：读数要说实话。
+    // `measured` 和小屏幕吃的是同一份（滤波之前），理由也同：读数要说实话。
     // 调速器放下最后一级（UI）时读数停刷：它不驱动身体。小屏幕不停 —— 它回答的是「它有没有看见我」
-    if (!uiShed) readout?.update(live, lastFeatures, capture.fps, dt, sourceAspect);
+    if (!uiShed) readout?.update(measured, lastFeatures, capture.fps, dt, sourceAspect);
 
     if (hud) {
       // 多人取证（docs/50 §10）：这一帧**真的交给身体的**骨架和站位。只在 `?debug=1` 下写，

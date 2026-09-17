@@ -83,11 +83,11 @@ test('capture aspect 接线：分类、横向、身份、站位、小屏与读�
   assert.match(webcam, /get frameAspect\(\): number \| null/);
   assert.match(main, /const sourceAspect = captureAspect\(capture\)/);
   assert.match(main, /tracker\.update\([^;]*inference\.dt, sourceAspect\)/);
-  assert.match(main, /framer\.update\(live, dt, \{ cameraFraming: camFraming, aspect: sourceAspect \}\)/);
-  assert.match(main, /preview\?\.update\(live, dt, sourceAspect\)/);
+  assert.match(main, /framer\.update\(measured, dt, \{ cameraFraming: camFraming, aspect: sourceAspect \}\)/);
+  assert.match(main, /preview\?\.update\(measured, dt, sourceAspect\)/);
   assert.match(main, /aspect: sourceAspect/);
   assert.match(main, /lateralEvidence\(raw, sourceAspect\)/);
-  assert.match(main, /readout\?\.update\(live, lastFeatures, capture\.fps, dt, sourceAspect\)/);
+  assert.match(main, /readout\?\.update\(measured, lastFeatures, capture\.fps, dt, sourceAspect\)/);
   assert.match(preview, /lateralEvidence\(pose, input\.aspect\)/);
   assert.match(readout, /lateralEvidence\(pose, input\.aspect\)/);
   assert.match(companions, /classifier\.update\(raw, dt, \{ aspect: ctx\.aspect \}\)/);
