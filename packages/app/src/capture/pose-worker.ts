@@ -21,6 +21,9 @@
 import { ImageSegmenter, PoseLandmarker } from '@mediapipe/tasks-vision';
 import { describe, overallScore, toLandmark, type PoseIn, type PoseOut } from './pose-protocol.ts';
 
+type ReconfigureRequest = Omit<Extract<PoseIn, { type: 'options' }>, 'type'>;
+type ReconfigureResult = Omit<Extract<PoseOut, { type: 'options-result' }>, 'type'>;
+
 const ctx = self as unknown as {
   onmessage: ((e: MessageEvent<PoseIn>) => void) | null;
   postMessage(m: PoseOut, transfer?: Transferable[]): void;
@@ -51,26 +54,69 @@ async function restoreFactory(loaderPath: string): Promise<void> {
   if (mod.default && !g.ModuleFactory) g.ModuleFactory = mod.default;
 }
 
+/**
+ * `setOptions()` 会异步重建 MediaPipe 图，不能并发。正在重建时又来了多个
+ * 目标，中间值已经失去意义：明确回执“被取代”，然后只保留最新的一个。
+ * reply 也必须隔离错误：postMessage 失败不应该造成未处理的 Promise rejection。
+ */
+export function createReconfigureQueue(
+  apply: (numPoses: number) => Promise<void>,
+  reply: (result: ReconfigureResult) => void,
+): { submit(request: ReconfigureRequest): void; readonly busy: boolean } {
+  let running = false;
+  let pending: ReconfigureRequest | null = null;
+  const safeReply = (result: ReconfigureResult): void => {
+    try { reply(result); } catch { /* worker 被终止时回执失败，不再向外抛 */ }
+  };
+  const drain = async (): Promise<void> => {
+    if (running) return;
+    running = true;
+    try {
+      while (pending) {
+        const request = pending;
+        pending = null;
+        try {
+          await apply(request.numPoses);
+          safeReply({ ...request, ok: true });
+        } catch (error) {
+          safeReply({ ...request, ok: false, error: describe(error) });
+        }
+      }
+    } finally {
+      running = false;
+      // reply 中的同步代码也可能插入一个新请求。
+      if (pending) void drain();
+    }
+  };
+  return {
+    submit(request) {
+      if (pending) safeReply({ ...pending, ok: false, error: '已被更新的人数请求取代' });
+      pending = request;
+      void drain();
+    },
+    get busy() { return running; },
+  };
+}
+
 /** 图正在按新的 `numPoses` 重建：这期间来的帧回 `fail`（主线程清掉在途、下一帧再来） */
-let reconfiguring = false;
+const reconfigureQueue = createReconfigureQueue(
+  async (numPoses) => {
+    const lm = landmarker;
+    if (!lm) throw new Error('模型还没就位');
+    await lm.setOptions({ numPoses: posesOf(numPoses) });
+  },
+  (result) => ctx.postMessage({ type: 'options-result', ...result }),
+);
 
 ctx.onmessage = (ev) => {
   const m = ev.data;
   if (m.type === 'init') void init(m);
   else if (m.type === 'frame') onFrame(m);
-  else if (m.type === 'options') void reconfigure(m.numPoses);
+  else if (m.type === 'options') reconfigureQueue.submit({ requestId: m.requestId, numPoses: posesOf(m.numPoses) });
 };
 
 /** `numPoses` 只认 1..8 的整数；上限在主线程那一侧是 `PEOPLE.hardMax`，这里只防一个坏消息 */
 const posesOf = (n: unknown): number => (typeof n === 'number' && Number.isFinite(n) ? Math.max(1, Math.min(8, Math.round(n))) : 1);
-
-async function reconfigure(n: number): Promise<void> {
-  const lm = landmarker;
-  if (!lm) return;
-  reconfiguring = true;
-  try { await lm.setOptions({ numPoses: posesOf(n) }); } catch { /* 改不了就还是原来那个数：姿态照跑 */ }
-  finally { reconfiguring = false; }
-}
 
 async function init(m: Extract<PoseIn, { type: 'init' }>): Promise<void> {
   try {
@@ -135,7 +181,7 @@ function onFrame(m: Extract<PoseIn, { type: 'frame' }>): void {
   const src = m.frame;
   try {
     const lm = landmarker;
-    if (!lm || reconfiguring) {
+    if (!lm || reconfigureQueue.busy) {
       ctx.postMessage({ type: 'fail', stamp: m.stamp, error: lm ? '正在按新的人数重建' : '模型还没就位' });
       return;
     }

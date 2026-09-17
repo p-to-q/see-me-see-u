@@ -38,7 +38,7 @@
  */
 import type { ImageSegmenter, PoseLandmarker } from '@mediapipe/tasks-vision';
 import type { RawPose } from '../../../core/src/types.ts';
-import { CAPTURE } from '../../../core/src/tuning.ts';
+import { CAPTURE, PEOPLE } from '../../../core/src/tuning.ts';
 import { notePresence } from '../shell/idle.ts';
 import { readFlags, type PoseModel } from '../shell/kiosk.ts';
 import type { Capture, CaptureStep } from './capture.ts';
@@ -109,6 +109,8 @@ const WORKER_RETRIES = 2;
 
 // ── 姿态引擎（worker，整页常驻一个）──────────────────────────────────────────
 
+type PoseEngineEvent = Exclude<PoseOut, { type: 'options-result' }> | { type: 'options-fail'; error: string };
+
 interface PoseEngine {
   backend: 'GPU' | 'CPU';
   warning: string | null;
@@ -117,7 +119,9 @@ interface PoseEngine {
   /** 图此刻按几个人建的。整页共用一个 worker，所以换人数走 `options` 消息，不重新建 worker */
   numPoses: number;
   post(msg: PoseIn, transfer: Transferable[]): void;
-  listen(fn: ((m: PoseOut) => void) | null): void;
+  /** 目标值会串行发送；只有 worker 成功回执才会改 `numPoses` */
+  requestNumPoses(numPoses: number): void;
+  listen(fn: ((m: PoseEngineEvent) => void) | null): void;
 }
 
 let enginePromise: Promise<PoseEngine> | null = null;
@@ -162,8 +166,28 @@ async function createPoseEngine(model: PoseModel, forget: () => void): Promise<P
     resolveModel(MODELS.segmenter),
   ]);
   const worker = new Worker(new URL('./pose-worker.ts', import.meta.url), { type: 'module', name: 'sb-pose' });
-  let listener: ((m: PoseOut) => void) | null = null;
+  let listener: ((m: PoseEngineEvent) => void) | null = null;
   const numPoses = peopleCap();
+  let desiredNumPoses = numPoses;
+  let optionsRequest: Extract<PoseIn, { type: 'options' }> | null = null;
+  let optionsSequence = 0;
+  let failedNumPoses: number | null = null;
+
+  const pumpOptions = (): void => {
+    if (engine.dead || optionsRequest || desiredNumPoses === engine.numPoses || failedNumPoses === desiredNumPoses) return;
+    const request: Extract<PoseIn, { type: 'options' }> = {
+      type: 'options', requestId: ++optionsSequence, numPoses: desiredNumPoses,
+    };
+    optionsRequest = request;
+    try {
+      engine.post(request, []);
+    } catch (error) {
+      optionsRequest = null;
+      failedNumPoses = request.numPoses;
+      listener?.({ type: 'options-fail', error: `人数重配置发送失败：${describe(error)}` });
+    }
+  };
+
   const engine: PoseEngine = {
     backend: 'CPU',
     warning: null,
@@ -176,6 +200,12 @@ async function createPoseEngine(model: PoseModel, forget: () => void): Promise<P
         return;
       }
       worker.postMessage(msg, transfer);
+    },
+    requestNumPoses(value) {
+      desiredNumPoses = value;
+      // 显式再请求一次同值，就是对上次失败的重试。
+      if (failedNumPoses === value) failedNumPoses = null;
+      pumpOptions();
     },
     listen(fn) { listener = fn; },
   };
@@ -192,6 +222,24 @@ async function createPoseEngine(model: PoseModel, forget: () => void): Promise<P
     };
     worker.onmessage = (ev: MessageEvent<PoseOut>) => {
       const m = ev.data;
+      if (m.type === 'options-result') {
+        const current = optionsRequest;
+        // worker 重启/旧消息晚到时，不许它改写新一轮的 applied 值。
+        if (!current || m.requestId !== current.requestId) return;
+        optionsRequest = null;
+        if (m.ok && m.numPoses === current.numPoses) {
+          engine.numPoses = current.numPoses;
+          if (failedNumPoses === current.numPoses) failedNumPoses = null;
+        } else {
+          failedNumPoses = current.numPoses;
+          if (desiredNumPoses === current.numPoses) {
+            listener?.({ type: 'options-fail', error: `人数重配置失败：${m.error ?? '回执与请求不一致'}` });
+          }
+        }
+        // 在途期间改了几次也只发最后的目标；失败的同值等显式重试。
+        pumpOptions();
+        return;
+      }
       if (m.type === 'ready') {
         ready = true;
         engine.backend = m.backend;
@@ -265,6 +313,9 @@ export class WebcamCapture implements Capture {
   #firstResult: (() => void) | null = null;
   #retries = 0;
   #reacquiring = false;
+  /** 主线程降级路径的已生效值和唯一在途请求。 */
+  #mainPeopleApplied: number | null = null;
+  #mainPeopleRequest: { landmarker: PoseLandmarker; numPoses: number } | null = null;
   readonly #useWorker: boolean;
 
   /** 起来之后用的是哪条路，dev 页面拿来显示 */
@@ -339,16 +390,16 @@ export class WebcamCapture implements Capture {
   }
   /**
    * 运行中改人数上限（控件条）。worker 那条路发一次 `options`，在两帧之间重建图；主线程那条路直接 `setOptions`。
-   * 相同的数是 no-op。
+   * 已生效的相同值是 no-op；上次失败的同值会再试一次。
    */
   setPeople(n: number): void {
-    const v = Number.isFinite(n) ? Math.max(1, Math.round(n)) : 1;
-    if (v === this.#people) return;
+    const v = Number.isFinite(n) ? Math.max(1, Math.min(PEOPLE.hardMax, Math.round(n))) : 1;
     this.#people = v;
-    if (v === 1) this.#others = [];
+    // 收缩时先把旧结果截到新上限，不等下一次推理才少一具身体。
+    this.#others = this.#others.slice(0, Math.max(0, v - 1));
     const engine = this.#engine;
-    if (engine && !engine.dead && engine.numPoses !== v) { engine.numPoses = v; engine.post({ type: 'options', numPoses: v }, []); }
-    void this.#landmarker?.setOptions({ numPoses: v }).catch(() => { /* 改不了就还是原来那个数 */ });
+    if (engine && !engine.dead) engine.requestNumPoses(v);
+    this.#syncMainPeople();
   }
   latestMask(): ImageBitmap | null { return this.#mask; }
 
@@ -408,6 +459,9 @@ export class WebcamCapture implements Capture {
     this.#engine = null;
     this.#inFlight = false;
     this.#firstResult = null;
+    // 先让旧 setOptions 回调失效，再 close；否则它可能在下一次 start 后改新图的状态。
+    this.#mainPeopleRequest = null;
+    this.#mainPeopleApplied = null;
     try { this.#landmarker?.close(); } catch { /* 关闭失败不值得吵 */ }
     try { this.#segmenter?.close(); } catch { /* 同上 */ }
     this.#landmarker = null;
@@ -520,8 +574,8 @@ export class WebcamCapture implements Capture {
     if (engine.warning) this.#error = engine.warning;
     this.#inFlight = false;
     // worker 是整页共用的：上一个 capture 可能把它改成了别的人数
-    if (engine.numPoses !== this.#people) { engine.numPoses = this.#people; engine.post({ type: 'options', numPoses: this.#people }, []); }
     engine.listen((m) => this.#onEngine(m));
+    engine.requestNumPoses(this.#people);
   }
 
   #pump = (): void => {
@@ -577,7 +631,7 @@ export class WebcamCapture implements Capture {
     }).catch(() => { this.#inFlight = false; });
   }
 
-  #onEngine(m: PoseOut): void {
+  #onEngine(m: PoseEngineEvent): void {
     if (m.type === 'pose') {
       this.#inFlight = false;
       if (!(m.stamp > this.#accepted)) return;
@@ -601,6 +655,8 @@ export class WebcamCapture implements Capture {
       this.#mask = m.bitmap;
     } else if (m.type === 'fail') {
       this.#inFlight = false;
+      this.#error = m.error;
+    } else if (m.type === 'options-fail') {
       this.#error = m.error;
     }
   }
@@ -626,15 +682,19 @@ export class WebcamCapture implements Capture {
 
     // wasm：先本地，失败再 CDN
     let fileset: Awaited<ReturnType<typeof FilesetResolver.forVisionTasks>>;
+    let opened: { landmarker: PoseLandmarker; numPoses: number };
     try {
       fileset = { wasmLoaderPath: new URL(wasmLoaderUrl, location.href).href,
                   wasmBinaryPath: new URL(wasmBinaryUrl, location.href).href };
-      this.#landmarker = await this.#makeLandmarker(fileset, poseModel);
+      opened = await this.#makeLandmarker(fileset, poseModel);
     } catch (e) {
       this.#error = `本地 wasm 起不来，回落 CDN：${describe(e)}`;
       fileset = await FilesetResolver.forVisionTasks(CDN_WASM);
-      this.#landmarker = await this.#makeLandmarker(fileset, poseModel);
+      opened = await this.#makeLandmarker(fileset, poseModel);
     }
+    this.#landmarker = opened.landmarker;
+    this.#mainPeopleApplied = opened.numPoses;
+    this.#syncMainPeople();
     this.#step();
 
     // 抠图是慢回路的输入，起不来不该拖垮姿态
@@ -654,7 +714,7 @@ export class WebcamCapture implements Capture {
   async #makeLandmarker(
     fileset: { wasmLoaderPath: string; wasmBinaryPath: string },
     modelAssetPath: string,
-  ): Promise<PoseLandmarker> {
+  ): Promise<{ landmarker: PoseLandmarker; numPoses: number }> {
     const { PoseLandmarker } = await import('@mediapipe/tasks-vision');
     const opts = { runningMode: 'VIDEO' as const, numPoses: this.#people, outputSegmentationMasks: false };
     try {
@@ -662,7 +722,7 @@ export class WebcamCapture implements Capture {
         ...opts, baseOptions: { modelAssetPath, delegate: 'GPU' },
       });
       this.backend = 'GPU';
-      return lm;
+      return { landmarker: lm, numPoses: opts.numPoses };
     } catch (e) {
       // 没有 WebGL / 驱动挂了 → CPU 也能跑，只是慢
       this.#error = `GPU delegate 失败，回落 CPU：${describe(e)}`;
@@ -670,8 +730,38 @@ export class WebcamCapture implements Capture {
         ...opts, baseOptions: { modelAssetPath, delegate: 'CPU' },
       });
       this.backend = 'CPU';
-      return lm;
+      return { landmarker: lm, numPoses: opts.numPoses };
     }
+  }
+
+  /** 主线程降级路径也用同一条规矩：单在途、latest-wins，成功才更新 applied。 */
+  #syncMainPeople(): void {
+    const landmarker = this.#landmarker;
+    const numPoses = this.#people;
+    if (!landmarker || this.#mainPeopleRequest || this.#mainPeopleApplied === numPoses) return;
+    const request = { landmarker, numPoses };
+    this.#mainPeopleRequest = request;
+    let applying: Promise<unknown>;
+    try {
+      applying = Promise.resolve(landmarker.setOptions({ numPoses }));
+    } catch (error) {
+      this.#mainPeopleRequest = null;
+      this.#error = `人数重配置失败：${describe(error)}`;
+      return;
+    }
+    void applying.then(() => {
+      if (this.#mainPeopleRequest === request && this.#landmarker === landmarker) this.#mainPeopleApplied = numPoses;
+    }).catch((error) => {
+      if (this.#mainPeopleRequest === request && this.#landmarker === landmarker) {
+        this.#error = `人数重配置失败：${describe(error)}`;
+      }
+    }).finally(() => {
+      // stop() 或新一轮启动已经让这个请求失效。
+      if (this.#mainPeopleRequest !== request || this.#landmarker !== landmarker) return;
+      this.#mainPeopleRequest = null;
+      // 在途期间可能改了多次，只追最后的值；同值失败等下次显式 setPeople 再试。
+      if (this.#people !== numPoses) this.#syncMainPeople();
+    });
   }
 
   #loop = (): void => {

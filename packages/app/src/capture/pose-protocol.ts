@@ -22,8 +22,11 @@ export type PoseIn =
      */
     numPoses?: number;
   }
-  /** 运行中改人数上限（控件条）。worker 在两帧之间重建图，这期间来的帧回 `fail` */
-  | { type: 'options'; numPoses: number }
+  /**
+   * 运行中改人数上限（控件条）。worker 在两帧之间重建图，这期间来的帧回 `fail`。
+   * `requestId` 让主线程可以丢掉旧回执；只有匹配的成功回执才能改“已生效”人数。
+   */
+  | { type: 'options'; requestId: number; numPoses: number }
   | {
     type: 'frame';
     frame: VideoFrame | ImageBitmap;
@@ -49,6 +52,8 @@ export type PoseOut =
   }
   /** 这一帧推理抛了；worker 还活着 */
   | { type: 'fail'; stamp: number; error: string }
+  /** `setOptions()` 的显式结果；失败时不得把目标值当成已生效 */
+  | { type: 'options-result'; requestId: number; numPoses: number; ok: boolean; error?: string }
   | { type: 'mask'; bitmap: ImageBitmap };
 
 export function toLandmark(l: { x: number; y: number; z: number; visibility?: number }): Landmark {

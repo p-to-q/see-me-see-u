@@ -371,6 +371,7 @@ draw call：任何人数下 = 一具身体（共用桶，`people-budget.test.ts`
 | 取证脚本（raw CDP）与合成假摄像头 | `scripts/people/{measure.ts,figures.py}` | — |
 | **自动探测**（2026-09-15，§6.3 修订）：背景定期抬一档 `numPoses` 看一眼，稳稳地被选中够久才真的升档，没等到 / 久没人坐退回来；升档时小屏下面出提示，桶容量开机按 `hardMax` 留够 | `core/src/people-probe.ts`（纯状态机）；接线在 `main.ts` 的 `peopleProbe` / `peopleCap` / `liveCap`；`flags.peopleAuto` 在 `shell/kiosk.ts`；提示文案 `ui/i18n.ts` 的 `COPY.preview.peopleNoticed`，渲染在 `ui/preview.ts` | `core/test/people-probe.test.ts` 6 条（升档需要持续入选、擦肩不升档、顶格不再探、退档）；`app/test/people-flag.test.ts` 的 `peopleAuto` 一条；无头 Chrome `?demo=1`（不带 `?people=`）跑通一次真实升档，日志见下 |
 | **多人推理时钟**（2026-09-17）：tracker 的出生/丢失/换人和自动探测的确认只在 `inferredAt` 变大时推进；没有实现该字段的 Capture 退到 `RawPose.t`。主线每帧只读一次 `latest()`，避免同一 rAF 拿到不同快照 | `capture/inference-clock.ts`（纯函数）+ `main.ts`；相遇清零同时清 cursor | `app/test/people-inference.test.ts`：同一份结果在 120Hz 被读 3 秒，轨迹仍是 tentative、探测仍在 level 1；真实 30Hz 新结果才按 0.3s / 1.2s 门限推进；重复、倒退、NaN 时刻不 throw |
+| **运行中人数重配置**（2026-09-17）：`setOptions({ numPoses })` 只能串行，连续改目标时只追最后一个；不再在发送前乐观地把目标写成已生效，也不再吞掉失败 | `capture/pose-protocol.ts` 统一 request/ack；`pose-worker.ts` 串行队列；`webcam.ts` 的 worker 和主线程降级路径同样按 applied/desired/in-flight 分层 | `app/test/people-reconfigure.test.ts`：不并发重建、中间值被取代有回执、失败同值可重试、旧 ack 不覆盖新目标、stop 使旧回调失效；**真摄像头快速 1→3→1 未测** |
 
 **默认值本身：网页和现场都还是 1。** 推理那张表（§1.2）仍然没跑，按 §6.3 原来的裁定，证据之前不改
 ——自动探测改变的是**运行中**会不会升到 2、3，不是这个默认值。
