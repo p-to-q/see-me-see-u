@@ -1,6 +1,7 @@
 /**
  * 慢回路的 HTTP 外壳（connect 风格中间件）。
- * 挂载点在 packages/app/vite.config.ts 的 `/__slow`，**只在 dev server 上存在**。
+ * 挂载点在 packages/app/vite.config.ts 的 `/__slow`：dev 本机存在，现场 preview 只在
+ * `SLOW_ENABLE=1` 时存在；两者都拒绝非 loopback 请求。
  *
  * 为什么不把这段直接写进 vite.config.ts：那里没法被测试打到。
  * `/__curate` 已经立了同样的规矩 —— 中间件在 vite.config 里登记，逻辑在 factory 里。

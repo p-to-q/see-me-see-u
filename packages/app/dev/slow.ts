@@ -49,6 +49,7 @@ const slow = createSlowLoop({
   species: () => 'porcelain',
   loadGeometry: (url) => library.loadUrl(url),
   body: () => body,
+  newSessionId: () => globalThis.crypto?.randomUUID?.() ?? '',
 });
 
 const maskBitmap = await createImageBitmap(c);

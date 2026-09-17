@@ -310,7 +310,8 @@ async function boot(): Promise<void> {
   // 血统：前人留在这台机器上的件，有机会进下一个人的候选池（docs/17 §5）。
   // 这是「模型会被改变、会留下后果」的那一半 —— 没有它，慢回路只是一次性的礼物；
   // 有了它，这台机器上的物种池是被历任观众改写过的。
-  // 生产构建下这个端点是 404，`lineage()` 返回空数组，开场一点都不受影响。
+  // 公开 Web / 普通 preview 下这个端点是 404，`lineage()` 返回空数组；
+  // 只有现场的本机 production preview 显式开闸，开场两种情况都不被它挡住。
   /**
    * 慢回路为**这一个观众**生成、已经到货的件 —— 忒修斯借件的 d4 池（docs/44 §4）。
    * 空着就是没到货，d4 退回 d3。人一走清空（它属于这个人，不属于下一个）。
@@ -320,9 +321,12 @@ async function boot(): Promise<void> {
     mask: () => capture.latestMask(),
     species: () => theme ?? '',
     loadGeometry: (url) => library.loadUrl(url),
+    // id 只用来做人均预算闸，不落任何身份。随机源放在入口边界，
+    // slow 模块自己不读时钟也不摇骰子；极旧浏览器无 crypto 时留空，由服务端代生。
+    newSessionId: () => globalThis.crypto?.randomUUID?.() ?? '',
     // 团块身体没有槽位，也就没有"接一个零件上去"这回事 —— 它的表达是连续的。
     // 这不是缺陷，是 docs/18 里两种表达的分界；慢回路对它静默跳过。
-    body: () => (massBody ? null : {
+    body: () => (isMass || isSwarm ? null : {
       graft: (slot, meta, geometry) => { grown.push(meta); creature.graft(slot, meta, geometry); },
     }),
   });

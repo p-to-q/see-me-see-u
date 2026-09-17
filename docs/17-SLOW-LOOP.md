@@ -9,7 +9,7 @@ Rodin 的事实卡是 `docs/07-HYPER3D-API.md`（**不要凭记忆改客户端**
 
 ---
 
-## 1. 为什么是 dev server 中间件，不是 serverless
+## 1. 为什么是本机中间件，不是 serverless
 
 `packages/core/src/types.ts` 里 `SlowJob.url` 的注释写着「由 **localhost 代理**提供」。
 这不是将就：**装置跑在一台本地机器上，那台机器上就有 factory**。
@@ -19,17 +19,23 @@ key 只在 Node 侧（P8）、glb 落本地盘、规范化用的是 `normalize.t
 云函数版本要么把这三件事各抄一遍（三处会漂的地方），要么把带 meshoptimizer 的工具链塞进 lambda。
 
 代价说清楚：**线上 Web 版没有这条回路**，而且是如实标注的 ——
-`/__slow` 是 `apply: 'serve'`，生产构建里根本不存在，前端拿到 404 就静默关掉它（P3）。
+`/__slow` 的代码不进浏览器产物，也不进公开 Web 部署。它只由 Vite 的本机宿主
+挂载：dev server 直接有，现场用的 production preview 要显式 `SLOW_ENABLE=1`。其它
+preview 和线上 Web 版拿到 404，前端据此静默关掉它（P3）。
 
 | | 有慢回路吗 | 怎么起 |
 |---|---|---|
-| `npm run dev` / `npm run dev:slow` | **有** | dev server 中间件 |
-| `npm run kiosk`（build + preview） | 没有 | preview 上是干净的 404（见 §7） |
+| `npm run dev` | **有，真 Rodin** | dev server 中间件，只接 loopback |
+| `npm run dev:slow` | **有，fake** | 不花 credits，其余全链路照跑 |
+| 普通 `vite preview` | 没有 | 结构化 404；没写 `SLOW_ENABLE=1` 就不挂 |
+| `npm run kiosk`（build + preview） | **有，真 Rodin** | 命令显式开闸且把 server 绑到 `127.0.0.1` |
+| `npm run kiosk:fake` | **有，fake** | 生产产物 + preview 宿主的不花钱验收路 |
 | Vercel 线上版 | 没有 | 静态托管，真 404 |
 
-> ⚠️ 现场（kiosk）今天跑的是 `npm run kiosk` = 生产构建 = **没有慢回路**。
-> 要让这条回路在现场活着，现场那台机器得跑 `npm run dev`（或者由收口的人决定
-> 给 preview 也接一份 —— 那是一个产品判断，不是一个技术障碍）。这条写在 `docs/10` 的"还没接上"里。
+> ⚠️ `npm run kiosk` 现在是会花真 credits 的完整现场路。开门前先用 `npm run kiosk:fake`
+> 验同一份生产产物与宿主；真路仍受 §4 的人均 / 单次 / 当日 / 余额四道闸限制。
+> 无论 dev 还是 preview，非 loopback 请求都只得 404；花钱与写盘的口子不跟 Vite `--host`
+> 一起暴露到局域网。
 
 ## 2. 时序
 
@@ -96,7 +102,7 @@ key 只在 Node 侧（P8）、glb 落本地盘、规范化用的是 `normalize.t
 | `BUDGET_DAY` | 429 | 今天到 `maxCreditsPerDay` 了 |
 | `BUDGET_JOB` | 503 | 单次单价超过 `maxCreditsPerJob`（配置错了，不是观众的错） |
 | `NO_JOB` / `NO_PART` | 404 | 没有这个任务 / 这件 |
-| `DISABLED` | 503 / 404 | 模块没加载起来 / **生产构建里根本没有这条回路** |
+| `DISABLED` | 503 / 404 | 模块没加载起来 / 当前宿主未显式开慢回路（公开 Web 端始终没有） |
 | `INTERNAL` | 500 | 兜底。中间件里抛出去会把 dev server 的请求挂死，所以一律翻成 JSON |
 
 ## 4. 预算
@@ -185,12 +191,14 @@ assets/parts/lineage/
 | 减面兜不住 / 长度不是 1 / socketA 不在原点 | **当成失败**，不交出去 —— 挂上去是歪的，观众只会觉得作品坏了 | 分支已写，`Not run` |
 | 下载列表里没有 glb | `failed` +「生成完成但下载列表里没有 glb」 | 分支已写，`Not run` |
 | 超预算 | 提交**当场**被拒（`BUDGET_*`），一次生成都不会发起 | ✅ 两条 |
-| 生产构建 | `/__slow` 全线 404 | ✅ curl 打过 dist（见 §7） |
+| 普通 production preview | `/__slow` 全线结构化 404 | ✅ 2026-09-17 实测 |
+| `SLOW_ENABLE=1` 的本机 production preview | 挂同一 handler；非 loopback 仍 404 | ✅ fake 宿主 `lineage` 200 / 提交 GET 405；真 Rodin Not run |
 
 ## 7. 离线验证（不烧 credits）
 
 ```bash
 npm run dev:slow            # = SLOW_FAKE=1 npm run dev -w @smu/app
+npm run kiosk:fake          # build + production preview；同样 fake，且只绑 loopback
 ```
 
 `SLOW_FAKE=1` 时不调 Rodin：从 `assets/parts/` 里按 seed 挑一件同槽位的已有 glb 当"生成结果"，
@@ -198,11 +206,16 @@ npm run dev:slow            # = SLOW_FAKE=1 npm run dev -w @smu/app
 
 为什么必须有这条路：这条回路每验证一次就烧一次真钱，而需要被反复验证的恰恰是它**后面**的部分。
 
-自动化的那一份在 `packages/app/test/slow.test.ts`（随 `npm run check` 跑，47 条里有 8 条是它）：
-端到端 + HTTP 外壳 + 上面那张失败矩阵。测试写进临时目录，绝不碰真的 `assets/`。
+服务端自动化在 `packages/app/test/slow.test.ts`：端到端 + HTTP 外壳 + 上面那张
+失败矩阵。客户端观众归属在 `slow-client.test.ts`，宿主边界在 `slow-host.test.ts`。
+它们都随 `npm run check` 跑；涉及文件的测试只写临时目录，绝不碰真的 `assets/`。
 
 手工取证：`scratch/evidence/slow-loop-dev.log`（dev 端到端 + 全部拒绝路径）、
-`scratch/evidence/slow-loop-prod.log`（`vite preview` 打 dist，`/__slow` 全线 404）。
+`scratch/evidence/slow-loop-prod.log`（历史取证：普通 `vite preview` 打 dist，`/__slow` 全线 404）。
+
+2026-09-17 宿主复核（没有写新的 evidence 文件）：同一份 dist 上，不开闸的
+`GET /__slow/lineage` = 404 `DISABLED`；`SLOW_ENABLE=1 SLOW_FAKE=1` 时 = 200，而
+`GET /__slow` = 405 `METHOD`，证明拿到的是真 handler 而不是 SPA 回退。
 
 ## 8. 前端要调的接口
 
@@ -211,7 +224,7 @@ npm run dev:slow            # = SLOW_FAKE=1 npm run dev -w @smu/app
 const png: Blob = await maskToPng(capture.latest().mask);   // 白形黑底，docs/07 §4B
 const res = await fetch(`/__slow?slot=spine&session=${sessionId}&species=${theme}`,
                         { method: 'POST', body: png, signal: AbortSignal.timeout(SLOW_LOOP.requestTimeoutMs) });
-if (!res.ok) { slowLoop.disabled = true; return; }      // 404=生产构建没有这条回路；429=预算；一律静默关掉
+if (!res.ok) { slowLoop.disabled = true; return; }      // 404=当前宿主未开；429=预算；一律静默关掉
 const job: SlowJob = await res.json();
 
 // 2. 轮询（SLOW_LOOP.pollIntervalMs / maxPolls）
@@ -236,3 +249,8 @@ if (rng.next() < lin.chance && lin.parts.length) {
 2. **404 是正常答案**，不是错误 —— 线上 Web 版本来就没有这条回路。
 3. 慢回路的任何状态都不允许影响快回路的帧率或姿态。
 4. `session` 由前端生成并在本次会话里保持不变；它是匿名的，**不许**放进任何可以关联到人的东西。
+
+第 4 条里的“会话”=**一个观众**，不是这张页的寿命。`src/slow/slow.ts` 给每位观众
+换 session id 与 epoch；人离开会 abort 本地轮询，服务端已提交的任务可以继续并留进血统池，
+但它回来后绝不能 graft 到下一位观众身上。下载已经完成才发现过期时，几何当场
+`dispose()`。mass / swarm 没有可挂载槽位，在 PNG 编码和 POST 之前就静默关闭，不花 credit。

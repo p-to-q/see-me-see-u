@@ -314,7 +314,7 @@ dig +short u-see.me NS && curl -sI https://u-see.me | head -1
 | 检查 | 结果 |
 |---|---|
 | `RODIN_API_KEY` 出现在 dist 里 | **没有**（逐字符串 grep 过） |
-| `/__slow/*` 在生产下可达 | **404**，正确（`apply:'serve'` 的中间件不进产物） |
+| `/__slow/*` 在普通 production preview 可达 | **404**，正确；只有本机 `SLOW_ENABLE=1` 才挂宿主，线上静态部署仍无端点 |
 | `/__anchor` `/__curate` 返回 200 | 那是 **vite preview 的 SPA 兜底**，不是真端点。Vercel 上没有对应 rewrite，会是 404 |
 | `/`、`/about`、`/making.html`、`/passport.html` | 全部 200 |
 | dist 体积 | 23 MB |
@@ -322,4 +322,3 @@ dig +short u-see.me NS && curl -sI https://u-see.me | head -1
 **`/making` `/passport` 这种不带扩展名的地址只在 Vercel 上成立**（`cleanUrls: true`），
 本机 `vite preview` 不支持 —— 本机测要带 `.html`。这不是 bug，但每次都会让人愣一下，
 所以记在这里。
-
