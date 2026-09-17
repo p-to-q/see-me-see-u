@@ -22,12 +22,37 @@ test('主线：tracker 与自动探测都只在 fresh inference 上推进', () =
   assert.match(MAIN, /selectedCount:\s*visibleSelectedCount\(crowd\)/,
     '自动探测把 grace 里已经 missing 的 selected 轨迹也算成在场');
   assert.doesNotMatch(MAIN, /selectedCount:\s*crowd\?\.selected\.length/);
-  assert.match(MAIN, /trackerOwnsChannel[^]*trackedPrimaryOrSingleFallback\(crowd,\s*latest,\s*all\?\.length\s*\?\?\s*0,\s*peopleCap\)/,
+  assert.match(MAIN, /trackerOwnsChannel[^]*trackedPrimaryOrSingleFallback\(crowd,\s*latest,\s*detectedPeopleCount,\s*peopleCap\)/,
     '探测窗没有稳定主身份，或单人短暂失配时没有受限的 latest 回退');
   assert.match(MAIN, /createProbeState\(peopleCap,\s*peopleCap\)/,
     '探测没有记住场合起步下限，未来 kiosk 从 2 起步时会错误退到 1');
   assert.match(MAIN, /people:\s*flags\.peopleAuto\s*\?\s*'auto'\s*:\s*String\(flags\.people\)/,
     '控件没有显示真实策略，会把自动误报成固定人数');
+  assert.match(MAIN, /const inferredPeople = people && inference[^]*capture\.latestAll\?\.\(\)/,
+    '多人快照仍在每个渲染帧读取并创建数组，而不是只随新推理更新');
+  assert.doesNotMatch(MAIN, /let peoplePoses/,
+    '主线不该在人数上限收缩后仍持有旧多人姿态数组');
+  assert.match(MAIN, /detectedPeopleCount = Math\.min\(detectedPeopleCount, liveCap\)/,
+    '人数上限收缩后没有同步截断缓存人数');
+  assert.match(MAIN, /if \(people && crowdOut !== renderedCrowd\)/,
+    '稳定单人快路的同一个空结果仍被每帧重复写进渲染器');
+});
+
+test('120Hz 渲染只按 30Hz 新推理读取多人快照', () => {
+  let stamp = Number.NaN;
+  let reads = 0;
+  let cached: readonly number[] = [];
+  const capture = { latestAll: (): readonly number[] => [++reads] };
+  for (let frame = 0; frame < 360; frame++) {
+    const inferenceStamp = 1000 + Math.floor(frame / 4) * (1000 / 30);
+    const tick = freshInference(stamp, inferenceStamp, inferenceStamp, 1 / 120);
+    if (tick) {
+      stamp = tick.stamp;
+      cached = capture.latestAll();
+    }
+    assert.equal(cached[0], reads || undefined);
+  }
+  assert.equal(reads, 90, '三秒 120Hz 渲染把 30Hz 快照读了不止 90 次');
 });
 
 test('一份缓存结果在 120Hz 被读 3 秒：只算一次观测，不能把 tentative 轨迹催熟', () => {

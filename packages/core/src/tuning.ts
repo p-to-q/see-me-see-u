@@ -1501,6 +1501,10 @@ export const PEOPLE = {
   slotOmega: 4.0,
   /** 站位的死区（米）：人在原地晃，身体不跟着挪 */
   slotDeadZone: 0.05,
+  /** 多人回到单人中线时，距中线小于这个距离就精确归零（米）。 */
+  slotRestEpsilon: 0.001,
+  /** 归中同时还要低于这个速度才归零（米/秒），防止高速路过中线时急停。 */
+  slotRestSpeedEpsilon: 0.005,
 
   // ── 身体的差异 ──
   /**

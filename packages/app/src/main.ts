@@ -33,7 +33,7 @@ import type { Genome, MotionFeatures, PartMeta, Presence, Skeleton, SlotKey, Slo
 import { createCapture, startInitialCapture, type Capture, type StartedCapture } from './capture/capture.ts';
 import { createPartLibrary } from './assets/library.ts';
 import { createCreature } from './creature/creature.ts';
-import { createCompanions, createPipes } from './creature/companions.ts';
+import { createCompanions, createPipes, type CompanionResult } from './creature/companions.ts';
 import { bodyFill, planPeople } from './creature/people-budget.ts';
 import { makeTheseus, swapOneSlot } from './creature/theseus-wire.ts';
 import { resolveShading, type ShadingId } from './creature/shading.ts';
@@ -825,6 +825,10 @@ async function boot(): Promise<void> {
   } : null;
   /** 多人状态机最后真正消费的推理时刻；渲染重复读缓存不能推进它。 */
   let peopleInferenceAt = Number.NaN;
+  /** 最近一次**新推理**的人数；只保留数字，不让收缩上限后的旧多人快照滞留。 */
+  let detectedPeopleCount = 0;
+  /** 稳定单人快路返回同一个对象；渲染侧只需接一次空伴随结果。 */
+  let renderedCrowd: CompanionResult | null = null;
   const replanPeople = (): void => {
     if (!people) return;
     people.plan = planPeople(peopleCap, bodyFill(library.index, theme ?? '', shading, flags.theseus.on, library.rejected), shading);
@@ -919,6 +923,8 @@ async function boot(): Promise<void> {
       people.primary = null;
       people.frame = null;
       peopleInferenceAt = Number.NaN;
+      detectedPeopleCount = 0;
+      renderedCrowd = null;
       creature.setCompanions([]);
       stage.setGroup(0, 0);
     }
@@ -1012,14 +1018,19 @@ async function boot(): Promise<void> {
     // 多人（docs/50）：跟踪器给身份，"主身体"那个人的那一份才是 `live` —— 小屏、读数、取景、声音都跟着他。
     // 单人时 `people` 是 null，`live` 就是 `capture.latest()`，一个字都不变
     const latest = capture.latest();
-    const all = people ? (capture.latestAll?.() ?? (latest ? [latest] : [])) : null;
-    const poseAt = all?.[0]?.t;
+    const poseAt = latest?.t;
     const inference = people
       ? freshInference(peopleInferenceAt, capture.inferredAt, poseAt, dt)
       : null;
     if (inference) peopleInferenceAt = inference.stamp;
+    // 完整姿态数组只活一个新推理步；渲染帧只缓存后面单人回退需要的人数。
+    // 这样 `setPeople(1)` 截断 WebcamCapture 旧结果时，主线不会另外握着一份旧多人数组。
+    const inferredPeople = people && inference
+      ? (capture.latestAll?.() ?? (latest ? [latest] : []))
+      : null;
+    if (inferredPeople) detectedPeopleCount = inferredPeople.length;
     const crowd = people
-      ? (inference ? people.tracker.update(all ?? [], inference.dt) : people.tracker.current)
+      ? (inference ? people.tracker.update(inferredPeople ?? [], inference.dt) : people.tracker.current)
       : null;
     if (people) people.frame = crowd;
 
@@ -1053,6 +1064,7 @@ async function boot(): Promise<void> {
       // 好让 tracker **内部**确认第二、第三个人；这一步本身不会让任何一具身体被画出来（见下一段）。
       if (step.target !== liveCap) {
         liveCap = step.target;
+        detectedPeopleCount = Math.min(detectedPeopleCount, liveCap);
         people.tracker.setCap(liveCap);
         capture.setPeople?.(liveCap);
       }
@@ -1072,7 +1084,7 @@ async function boot(): Promise<void> {
     const trackerOwnsChannel = !!(people && crowd && (cameraOn || peopleCap > 1));
     const trackerHasPrimary = trackerOwnsChannel && crowd !== null && crowd.primary !== null;
     const live = trackerHasPrimary
-      ? trackedPrimaryOrSingleFallback(crowd, latest, all?.length ?? 0, peopleCap)
+      ? trackedPrimaryOrSingleFallback(crowd, latest, detectedPeopleCount, peopleCap)
       : latest;
     // 主身体的人丢了一阵又被认回来：姿态时钟和滤波器不许在"之前"和"之后"之间插值（docs/50 §2.4）——
     // 中间可能隔着一次换姿势，甚至是另一个人被认成了他。插过去的结果是一具摊在地上的星形（2026-09-14 无头取证撞到的）
@@ -1133,14 +1145,17 @@ async function boot(): Promise<void> {
     preview?.update(live, dt);
 
     // 伴随身体（docs/50 §4）：每个人各自的骨架、在场、站位。开场团块还没长出零件时（`emergence` 0）它们也不长
-    const crowdOut = people && crowd ? people.bodies.update(crowd, {
+    // 稳定单人先判：命中时连 `bodyAt()` / CompanionContext 都不构造。
+    const stableSingle = people && crowd ? people.bodies.stableSingle(crowd) : null;
+    const crowdOut = stableSingle ?? (people && crowd ? people.bodies.update(crowd, {
       dt, plan: activePlan(), drift: planDrift(), refineOn, vitalityOn,
       bodies: people.shed ? 1 : people.plan.bodies,
       scale: nascent ? nascent.stats.emergence : 1,
-    }) : null;
-    if (people) {
+    }) : null);
+    if (people && crowdOut !== renderedCrowd) {
       creature.setCompanions(crowdOut?.companions ?? []);
       stage.setGroup(crowdOut?.groupWidth ?? 0, crowdOut?.groupHeight ?? 0);
+      renderedCrowd = crowdOut;
     }
     // 横向根偏移：吃姿态时钟给身体的同一份连续流。模式分类 / 小屏仍吃 `live` 原话；
     // 这里若也吃原话，30Hz 的同一结果会在 120Hz 屏上变成「三帧不动、下一帧跳一下」。
