@@ -8,7 +8,7 @@
  *  - **原图**（没镜像）：33 个点（实心 = 可信）、小屏裁切的**目标窗口**（虚线）、窗口中心的**死区**（小方框）、**实际窗口**（实线）；
  *    从左右走出画时，出去的那条边加粗。
  *  - **舞台横向**（屏幕视角，镜像之后）：余量（浅色带）、目标（虚线刻度）、死区（身体两侧的细线）、身体此刻的位置。
- *  - **最近 20 秒**：模式色带 + 放大倍数 / 景别进度 / 横向偏移 / 腿的曲线。
+ *  - **最近 20 秒**：模式色带 + 放大倍数 / 景别进度与速度 / 横向偏移 / 腿的曲线。
  *
  * 默认播合成时间线（`core/test/framing-people.ts` 的 `SCRIPTS`，和 node 测试、`scripts/framing/trace.ts` 同一份），
  * 按「用摄像头」才请求权限 —— 和正式程序同一条规矩：不点就不问。
@@ -170,6 +170,7 @@ function drawPlot(trace: readonly SimFrame[]): void {
   const lines: Array<[string, (f: SimFrame) => number]> = [
     ['#ffffff', (f) => (f.crop.zoom - 1) / Math.max(1e-6, AUTOFRAME.previewZoom - 1)],
     ['#e8a33d', (f) => f.eased],
+    ['#d86fe8', (f) => 0.5 + f.velocity / (2 * AUTOFRAME.shotMaxSpeed)],
     ['#5aa9e6', (f) => 0.5 + f.lateral.x / 4],
     ['#7bc47f', (f) => f.legHold],
   ];
@@ -213,9 +214,9 @@ function frame(): void {
   for (const [text, bad] of [
     [a, false], [b, false],
     [`小屏：${f.see.state}/${f.see.reason}${f.see.side ? `（观众的${f.see.side === 'left' ? '左' : '右'}边）` : ''} · 裁切 ${f.crop.active ? '开' : '关'}${f.crop.snap ? ' · 诚实退回中' : ''} · zoom ${f.crop.zoom.toFixed(3)} · 中心 (${f.crop.cx.toFixed(3)}, ${f.crop.cy.toFixed(3)})`, false],
-    [`舞台：景别 ${f.shot} ${(f.eased * 100).toFixed(0)}% · fov ${f.fov.toFixed(2)}° · 移轴 ${f.panX.toFixed(3)}m · 腿 ${f.legHold.toFixed(2)}`, false],
+    [`舞台：景别 ${f.shot} ${(f.eased * 100).toFixed(0)}% · 速度 ${f.velocity >= 0 ? '+' : ''}${f.velocity.toFixed(2)}/s · fov ${f.fov.toFixed(2)}° · 移轴 ${f.panX.toFixed(3)}m · 腿 ${f.legHold.toFixed(2)}`, false],
     ...Object.entries(jumps).map(([k, v]) => [`每 16ms 最大 ${k}: ${v.value.toFixed(4)}（上限 ${M[k]}）@ ${v.t.toFixed(2)}s`, v.value > M[k] + 1e-9] as [string, boolean]),
-    ['曲线：白 = 放大倍数 · 琥珀 = 景别 · 蓝 = 横向偏移 · 绿 = 腿；顶上色带：灰 full / 琥珀 upper / 蓝 stepping-back', false],
+    ['曲线：白 = 放大倍数 · 琥珀 = 景别 · 紫 = 景别速度（中线为 0）· 蓝 = 横向偏移 · 绿 = 腿；顶上色带：灰 full / 琥珀 upper / 蓝 stepping-back', false],
   ] as Array<[string, boolean]>) {
     const el = document.createElement('div');
     el.textContent = text;

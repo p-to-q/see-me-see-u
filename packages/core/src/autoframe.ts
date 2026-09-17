@@ -335,7 +335,9 @@ export function createFramingClassifier(opts: ClassifierOptions = {}): FramingCl
         const appearing = !legsOut;
         const stepping = appearing || shrinking;
         toStep = leak(toStep, stepping, dt);
-        if (stepping && toStep >= T.stepBackConfirmSeconds && cooldown <= 0) go('stepping-back', appearing ? 'legs-appearing' : 'shrinking');
+        // 刚切进 upper 就开始退后，是上一判断需要立刻纠正，不该再等那次切换留下的全局冷却。
+        // 仍然必须攒满同一份连续证据；底边抖动的漏桶与当前帧守卫都没有放宽。
+        if (stepping && toStep >= T.stepBackConfirmSeconds) go('stepping-back', appearing ? 'legs-appearing' : 'shrinking');
       } else {
         toFull = leak(toFull, legsIn, dt);
         // 退后完成不等冷却：人已经退到位了，再让他等一秒是在惩罚照做的人
@@ -512,13 +514,15 @@ export const smoothstep = (x: number): number => {
 // ── 景别：中景的混合 + 跟随 ──────────────────────────────────────────────────
 
 export interface ShotState {
-  /** 0 = 全景，1 = 中景（线性进度，用的时候套 smoothstep） */
+  /** 0 = 全景，1 = 中景（进度用的时候套 smoothstep） */
   progress: number;
+  /** 景别进度速度（1/秒）。保留它，目标反向时才能先刹车、再回头。 */
+  velocity: number;
   fx: Follow;
   fy: Follow;
 }
 
-export const SHOT_REST: ShotState = { progress: 0, fx: { x: 0, v: 0 }, fy: { x: 0, v: 0 } };
+export const SHOT_REST: ShotState = { progress: 0, velocity: 0, fx: { x: 0, v: 0 }, fy: { x: 0, v: 0 } };
 
 export interface ShotInput {
   shot: Shot;
@@ -541,11 +545,46 @@ export interface ShotInput {
 export function stepShot(s: ShotState, input: ShotInput, dt: number): ShotState {
   const target = input.shot === 'upper' ? 1 : 0;
   const T = AUTOFRAME;
-  const secs = input.reduced ? T.shotSecondsReduced : T.shotSeconds;
-  const progress = stepToward(s.progress, target, dt, secs);
+  const t = Number.isFinite(dt) && dt > 0 ? dt : 0;
+  let progress: number;
+  let velocity: number;
+  if (input.reduced) {
+    progress = stepToward(s.progress, target, t, T.shotSecondsReduced);
+    velocity = 0;
+  } else {
+    // 闭式临界阻尼：不是逐帧欧拉积分，同一段时间在 15/30/60/120Hz 下走近同一条轨迹。
+    // 与旧的 stepToward 不同，速度属于状态；目标反向时先耗掉旧速度，不会当帧翻号。
+    const x0 = Math.min(1, Math.max(0, Number.isFinite(s.progress) ? s.progress : 0));
+    const rawVelocity = Number.isFinite(s.velocity) ? s.velocity : 0;
+    const v0 = Math.max(-T.shotMaxSpeed, Math.min(T.shotMaxSpeed, rawVelocity));
+    if (t <= 0) {
+      progress = x0;
+      velocity = v0;
+    } else {
+      const w = Math.max(1e-6, T.shotOmega);
+      const e0 = x0 - target;
+      const k = Math.exp(-w * t);
+      const c = v0 + w * e0;
+      progress = target + (e0 + c * t) * k;
+      velocity = (v0 - w * c * t) * k;
+
+      const limit = T.shotMaxSpeed * t;
+      if (progress - x0 > limit) { progress = x0 + limit; velocity = Math.min(velocity, T.shotMaxSpeed); }
+      else if (x0 - progress > limit) { progress = x0 - limit; velocity = Math.max(velocity, -T.shotMaxSpeed); }
+      velocity = Math.max(-T.shotMaxSpeed, Math.min(T.shotMaxSpeed, velocity));
+
+      if (progress >= 1) { progress = 1; velocity = Math.min(0, velocity); }
+      else if (progress <= 0) { progress = 0; velocity = Math.max(0, velocity); }
+      // 端点附近 smoothstep 已把剩余画面差压到不可见；精确收口，免得舞台永久为尾数重算。
+      if (Math.abs(target - progress) <= T.shotSettlePosition && Math.abs(velocity) <= T.shotSettleVelocity) {
+        progress = target;
+        velocity = 0;
+      }
+    }
+  }
   // 减少动态：中景不跟随，偏移收回 0（一个固定机位的中景）。写明的例外：这一下允许是一次切
-  if (input.reduced) return { progress, fx: { x: 0, v: 0 }, fy: { x: 0, v: 0 } };
-  if (input.hold) return { progress, fx: { ...s.fx, v: 0 }, fy: { ...s.fy, v: 0 } };
+  if (input.reduced) return { progress, velocity, fx: { x: 0, v: 0 }, fy: { x: 0, v: 0 } };
+  if (input.hold) return { progress, velocity, fx: { ...s.fx, v: 0 }, fy: { ...s.fy, v: 0 } };
   const follow = target === 1 && input.offset;
   const gx = follow ? input.offset!.x : 0;
   const gy = follow ? input.offset!.y : 0;
@@ -555,6 +594,7 @@ export function stepShot(s: ShotState, input: ShotInput, dt: number): ShotState 
     : { deadZone: 0, band: 1e-6, omega: T.followOmega, maxSpeed: T.followMaxSpeed };
   return {
     progress,
+    velocity,
     fx: stepFollow(s.fx, gx, dt, { ...base, range: T.followRangeX }),
     fy: stepFollow(s.fy, gy, dt, { ...base, range: T.followRangeY }),
   };

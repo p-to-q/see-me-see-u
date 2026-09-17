@@ -1249,8 +1249,13 @@ export const AUTOFRAME = {
   legBlendSeconds: 0.5,
 
   // ── 舞台相机（中景）──
-  /** 两种景别之间走多久（秒），smoothstep */
-  shotSeconds: 1.0,
+  /** 景别临界阻尼的角频率（1/秒）：配合下面的限速，约 1 秒到视觉端点；反向时保留速度、先刹再回头。 */
+  shotOmega: 6.0,
+  /** 景别进度最大速度（1/秒）。套 smoothstep 后峰值不超过旧轨迹的连续性上限。 */
+  shotMaxSpeed: 1.25,
+  /** 接近端点且速度足够低时精确吸附；此处的 5% 经 smoothstep 后只剩约 0.7% 画面差。 */
+  shotSettlePosition: 0.05,
+  shotSettleVelocity: 0.25,
   /** `prefers-reduced-motion` 时走多久。0.15 秒读作一次切，不是一段运镜 */
   shotSecondsReduced: 0.15,
   /**
@@ -1357,13 +1362,14 @@ export const AUTOFRAME = {
   /**
    * 每 16ms 最多变多少。**这是守卫，不是旋钮**：`core/test/autoframe-continuity.test.ts` 用随机决策序列逐帧核对，
    * 调快了某个弹簧、它红了，就是在说"这个变化读起来会是一次跳"。减少动态不受它约束（6.3 写明的例外）。
-   *  - `progress`：景别进度**缓动之后**（smoothstep 峰值斜率 1.5 × 16ms / `shotSeconds` = 0.024）
+   *  - `progress`：景别进度**缓动之后**
+   *  - `progressVelocity`：景别原始进度速度每 16ms 的最大变化；挡住目标反向时的速度瞬间翻号
    *  - `zoom` / `center`：小屏裁切的放大倍数 / 窗口中心（画面归一化）
    *  - `legHold`：腿混向站姿的权重（缓动之后）
    *  - `lateral`：身体的横向根偏移（米）
    *  - `fovDeg` / `pan`：舞台相机的竖直视角（度）/ 移轴平移（米）
    */
-  maxStep: { progress: 0.03, zoom: 0.03, center: 0.02, legHold: 0.06, lateral: 0.03, fovDeg: 1.5, pan: 0.012 },
+  maxStep: { progress: 0.03, progressVelocity: 0.65, zoom: 0.03, center: 0.02, legHold: 0.06, lateral: 0.03, fovDeg: 1.5, pan: 0.012 },
 };
 
 /**

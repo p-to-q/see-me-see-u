@@ -131,28 +131,45 @@ test('边界 · 冷却到期时腿已重新进画，不用过期的 legs-out 桶
   assert.equal(r.mode, 'full', '当前腿已进画，不许用过期桶值切到上半身');
 });
 
-test('边界 · 冷却到期时退后候选已消失，不用过期的 toStep 桶切到退后中', () => {
+test('边界 · 退后候选在确认帧消失，不用过期的 toStep 桶切到退后中', () => {
   const c = createFramingClassifier();
   let r = c.current;
   for (let i = 0; i < 11; i++) r = c.update(person(SEATED), DT);
   assert.equal(r.mode, 'upper', '测试前提：应先进入上半身');
-  assert.ok(r.cooldown > 0);
 
   // 只把腿点放回画内，头肩与躯干尺度不变：这是 legs-appearing，不是 shrinking。
   const appearing = person(SEATED);
   const appearingScreen = appearing.screen?.map((l, i) => i >= 25 ? { ...l, y: 0.9, visibility: 0.95 } : l);
   const legsAppearing = { ...appearing, screen: appearingScreen };
-  for (let i = 0; i < 60 && c.current.cooldown > DT + 1e-9; i++) {
+  for (let i = 0; i < Math.floor(AUTOFRAME.stepBackConfirmSeconds / DT) - 1; i++) {
     r = c.update(legsAppearing, DT);
-    assert.equal(r.mode, 'upper', '冷却期间不该切换');
+    assert.equal(r.mode, 'upper', '连续证据没攒满时不该切换');
   }
-  assert.ok(c.current.cooldown <= DT + 1e-9, '测试前提：冷却应已走到最后一帧');
 
   r = c.update(person(SEATED), DT);
-  assert.equal(r.cooldown, 0, '反证帧应恰好结束冷却');
   assert.equal(r.evidence?.legs, 0, '反证帧已不再是 legs-appearing');
   assert.ok(Math.abs(r.trend - 1) < 1e-12, `反证帧尺度没有缩小：trend=${r.trend}`);
   assert.equal(r.mode, 'upper', '当前没有腿出现或缩小，不许用过期桶值切到退后中');
+});
+
+test('边界 · 刚进入上半身就持续退后：只等退后证据，不再被上一次切换的冷却挡住', () => {
+  const c = createFramingClassifier();
+  let r = c.current;
+  for (let i = 0; i < 30 && r.mode !== 'upper'; i++) r = c.update(person(SEATED), DT);
+  assert.equal(r.mode, 'upper', '测试前提：应先进入上半身');
+  assert.ok(r.cooldown > AUTOFRAME.stepBackConfirmSeconds, '测试前提：全局冷却应仍在');
+
+  // 只把腿点放回画内，头肩与躯干尺度不变：连续的 legs-appearing 是明确的纠错方向。
+  const appearing = person(SEATED);
+  const screen = appearing.screen?.map((l, i) => i >= 25 ? { ...l, y: 0.9, visibility: 0.95 } : l);
+  const legsAppearing = { ...appearing, screen };
+  let elapsed = 0;
+  while (elapsed <= AUTOFRAME.stepBackConfirmSeconds + DT && r.mode === 'upper') {
+    r = c.update(legsAppearing, DT);
+    elapsed += DT;
+  }
+  assert.equal(r.mode, 'stepping-back', `持续退后 ${elapsed.toFixed(3)}s 仍被冷却挡住`);
+  assert.ok(elapsed <= AUTOFRAME.stepBackConfirmSeconds + DT + 1e-9, `退后确认花了 ${elapsed.toFixed(3)}s`);
 });
 
 test('边界 · 前倾（肩变宽、躯干透视变短）再坐直：不是退后', () => {
@@ -269,14 +286,44 @@ test('景别：正常 1 秒走完（0.9 秒时还没到）；减少动态 0.15 �
   const reduced = run(SHOT_REST, 5, { ...base, reduced: true });
   assert.equal(reduced.progress, 1);
   assert.equal(reduced.fx.x, 0, '减少动态时中景还在跟随');
-  const held = stepShot({ progress: 0, fx: { x: 0.05, v: 0.4 }, fy: { x: 0, v: 0 } }, { ...base, hold: true }, DT);
-  assert.ok(Math.abs(held.progress - DT / AUTOFRAME.shotSeconds) < 1e-9, `降级时景别一帧走了 ${held.progress} —— 那是一次切`);
+  const held = stepShot({ progress: 0, velocity: 0, fx: { x: 0.05, v: 0.4 }, fy: { x: 0, v: 0 } }, { ...base, hold: true }, DT);
+  assert.ok(held.progress > 0 && held.progress < 0.1, `降级时景别一帧走了 ${held.progress} —— 要么没走，要么是一次切`);
   assert.deepEqual([held.fx.x, held.fx.v], [0.05, 0], '降级时跟随还在动');
-  assert.equal(run({ progress: 0, fx: { x: 0.05, v: 0 }, fy: { x: 0, v: 0 } }, 31, { ...base, hold: true }).progress, 1, '降级时景别没有走完');
+  assert.equal(run({ progress: 0, velocity: 0, fx: { x: 0.05, v: 0 }, fy: { x: 0, v: 0 } }, 31, { ...base, hold: true }).progress, 1, '降级时景别没有走完');
   // 回到全景：偏移收回 0（等身机位是不动的）
   const back = run(done, 120, { ...base, shot: 'full' });
   assert.equal(back.progress, 0);
   assert.ok(Math.abs(back.fx.x) < 0.01);
+});
+
+test('景别：推到一半立即回全景，先减速再反向，不在一帧里把速度符号翻过去', () => {
+  const upper = { shot: 'upper' as const, offset: null, reduced: false, hold: false };
+  const moving = run(SHOT_REST, 15, upper);
+  assert.ok(Number.isFinite(moving.velocity) && moving.velocity > 0, `推近没有正速度：${moving.velocity}`);
+
+  const firstBack = stepShot(moving, { ...upper, shot: 'full' }, DT);
+  assert.ok(firstBack.velocity >= 0, `反向首帧速度从 ${moving.velocity} 瞬间翻成 ${firstBack.velocity}`);
+  assert.ok(firstBack.progress >= moving.progress, '反向首帧应该仍在刹车，不该立即倒走');
+
+  let s = firstBack;
+  let reversed = false;
+  for (let i = 0; i < 30; i++) {
+    const n = stepShot(s, { ...upper, shot: 'full' }, DT);
+    if (n.velocity < 0) reversed = true;
+    s = n;
+  }
+  assert.ok(reversed, '有限时间内没有平滑反向');
+  assert.ok(s.progress < moving.progress, '反向后没有朝全景收回');
+});
+
+test('景别：坏状态、坏 dt 与过大旧速度都被净化，永远留在有限范围内', () => {
+  const input = { shot: 'upper' as const, offset: null, reduced: false, hold: false };
+  const bad = stepShot({ progress: NaN, velocity: Infinity, fx: { x: 0, v: 0 }, fy: { x: 0, v: 0 } }, input, NaN);
+  assert.deepEqual([bad.progress, bad.velocity], [0, 0], '坏 dt 不该推进，坏状态必须退回有限静止值');
+
+  const limited = stepShot({ progress: 0.5, velocity: 1e6, fx: { x: 0, v: 0 }, fy: { x: 0, v: 0 } }, input, DT);
+  assert.ok(Number.isFinite(limited.progress) && limited.progress >= 0 && limited.progress <= 1);
+  assert.ok(Number.isFinite(limited.velocity) && Math.abs(limited.velocity) <= AUTOFRAME.shotMaxSpeed + 1e-12);
 });
 
 test('小屏裁切：任何告警 0.2 秒内限速退回整幅（不是当帧）；正常时放大到上限、窗口永远不伸出画面', () => {

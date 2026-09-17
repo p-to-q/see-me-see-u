@@ -24,6 +24,7 @@ import {
 import { mulberry32 } from '../../core/src/rng.ts';
 import { AUTOFRAME, STAGE } from '../../core/src/tuning.ts';
 import { person, SEATED, WHOLE } from '../../core/test/framing-people.ts';
+import { createSim, maxJumps } from '../dev/framing-sim.ts';
 
 const at = (cx: number) => person({ ...WHOLE, cx });
 
@@ -119,6 +120,18 @@ test('连续性：任意景别 / hold 序列下，舞台相机的视角、移轴
   assert.ok(wf <= AUTOFRAME.maxStep.fovDeg + 1e-9, `视角一帧变了 ${wf.toFixed(3)}°/16ms（上限 ${AUTOFRAME.maxStep.fovDeg}）`);
   assert.ok(wp <= AUTOFRAME.maxStep.pan + 1e-9, `移轴一帧挪了 ${wp.toFixed(4)}m/16ms（上限 ${AUTOFRAME.maxStep.pan}）`);
   assert.ok(smoothstep(1) === 1);
+});
+
+test('工作台：逐帧暴露景别速度，并把速度变化纳入同一份连续性读数', () => {
+  const sim = createSim();
+  const velocities: number[] = [];
+  for (let i = 0; i < 15; i++) velocities.push(sim.step({ pose: person(SEATED), dt: 1 / 30, policy: 'upper' }).velocity);
+  for (let i = 0; i < 30; i++) velocities.push(sim.step({ pose: person(SEATED), dt: 1 / 30, policy: 'full' }).velocity);
+  assert.ok(velocities.some((v) => v > 0) && velocities.some((v) => v < 0), '工作台没有看见先推近、再拉远的速度');
+  const jumps = maxJumps(sim.trace);
+  assert.ok(Number.isFinite(jumps.progressVelocity.value));
+  assert.ok(jumps.progressVelocity.value <= AUTOFRAME.maxStep.progressVelocity + 1e-9,
+    `工作台量到景别速度跳变 ${jumps.progressVelocity.value}`);
 });
 
 test('横向接线：30Hz 推理先过姿态时钟，再喂 120Hz 跟随；分类器与小屏只吃未停滞原话', () => {

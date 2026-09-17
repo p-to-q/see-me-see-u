@@ -33,8 +33,9 @@ export interface SimFrame {
   mode: FramingMode;
   why: FramingWhy;
   shot: Shot;
-  /** 景别线性进度与缓动后的进度 */
+  /** 景别进度、速度与缓动后的进度 */
   progress: number;
+  velocity: number;
   eased: number;
   /** 舞台相机：竖直视角（度）、移轴（米）、横向余量（米） */
   fov: number;
@@ -88,7 +89,7 @@ export function createSim(opts: { kiosk?: boolean; keep?: number } = {}): Sim {
       const target = active && !snap ? cropTarget(s, AUTOFRAME.previewZoom) : null;
       const frame: SimFrame = {
         t, dt, mode: r.mode, why: r.why, shot: d.shot,
-        progress: shot.progress, eased: smoothstep(shot.progress),
+        progress: shot.progress, velocity: shot.velocity, eased: smoothstep(shot.progress),
         fov: c.fov, panX: c.panX, room: c.room, legHold: smoothstep(legHold),
         see: { state: seen.state, reason: seen.reason, side: seen.side ?? null },
         crop: { zoom: crop.zoom, cx: crop.cx.x, cy: crop.cy.x, active, snap, tx: target?.x ?? null, ty: target?.y ?? null },
@@ -108,16 +109,17 @@ export function createSim(opts: { kiosk?: boolean; keep?: number } = {}): Sim {
 }
 
 /** 一段逐帧读数里，每一路**折到 16ms** 的最大变化量与它发生的时刻 */
-export type Jumps = Record<'progress' | 'zoom' | 'center' | 'legHold' | 'lateral' | 'fovDeg' | 'pan', { value: number; t: number }>;
+export type Jumps = Record<'progress' | 'progressVelocity' | 'zoom' | 'center' | 'legHold' | 'lateral' | 'fovDeg' | 'pan', { value: number; t: number }>;
 
 export function maxJumps(trace: readonly SimFrame[]): Jumps {
   const out = {} as Jumps;
   const put = (k: keyof Jumps, v: number, t: number) => { if (!out[k] || v > out[k].value) out[k] = { value: v, t }; };
-  for (const k of ['progress', 'zoom', 'center', 'legHold', 'lateral', 'fovDeg', 'pan'] as const) out[k] = { value: 0, t: 0 };
+  for (const k of ['progress', 'progressVelocity', 'zoom', 'center', 'legHold', 'lateral', 'fovDeg', 'pan'] as const) out[k] = { value: 0, t: 0 };
   for (let i = 1; i < trace.length; i++) {
     const a = trace[i - 1], b = trace[i];
     const k = 0.016 / b.dt;
     put('progress', Math.abs(b.eased - a.eased) * k, b.t);
+    put('progressVelocity', Math.abs(b.velocity - a.velocity) * k, b.t);
     put('zoom', Math.abs(b.crop.zoom - a.crop.zoom) * k, b.t);
     put('center', Math.hypot(b.crop.cx - a.crop.cx, b.crop.cy - a.crop.cy) * k, b.t);
     put('legHold', Math.abs(b.legHold - a.legHold) * k, b.t);
