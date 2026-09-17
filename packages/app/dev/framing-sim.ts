@@ -43,7 +43,7 @@ export interface SimFrame {
   legHold: number;
   see: { state: SeeState; reason: SeeReason; side: string | null };
   crop: { zoom: number; cx: number; cy: number; active: boolean; snap: boolean; tx: number | null; ty: number | null };
-  lateral: { x: number; target: number; why: LateralWhy; side: string | null };
+  lateral: { x: number; target: number; deadZone: number; why: LateralWhy; side: string | null };
 }
 
 export interface Sim {
@@ -92,7 +92,7 @@ export function createSim(opts: { kiosk?: boolean; keep?: number } = {}): Sim {
         fov: c.fov, panX: c.panX, room: c.room, legHold: smoothstep(legHold),
         see: { state: seen.state, reason: seen.reason, side: seen.side ?? null },
         crop: { zoom: crop.zoom, cx: crop.cx.x, cy: crop.cy.x, active, snap, tx: target?.x ?? null, ty: target?.y ?? null },
-        lateral: { x: lateral.x.x, target: lateral.target, why: lateral.why, side: lateral.side },
+        lateral: { x: lateral.x.x, target: lateral.target, deadZone: lateral.deadZone, why: lateral.why, side: lateral.side },
       };
       trace.push(frame);
       if (trace.length > keep) trace.shift();

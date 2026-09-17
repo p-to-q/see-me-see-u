@@ -156,7 +156,7 @@ test('横向接线：30Hz 推理先过姿态时钟，再喂 120Hz 跟随；分�
   assert.equal(at60.length, at120.length);
   const worst = Math.max(...at60.map((x, i) => Math.abs(x - at120[i])));
   // 连续时间弹簧在不同积分步长下不可能逐位相等；把差异压在 5mm 内，
-  // 仍只是横向死区（50mm）的十分之一，不会变成可见的模式分歧。
+  // 仍低于 5mm，不会变成可见的模式分歧；横向响应门槛现已改为与距离无关的画面空间死区。
   assert.ok(worst < 0.005, `同一 30Hz 输入在 60/120Hz 上横向轨迹漂了 ${worst.toFixed(5)}m`);
 });
 

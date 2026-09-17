@@ -1305,26 +1305,34 @@ export const AUTOFRAME = {
   previewMinSourcePerDisplayPx: 1.0,
 
   // ── 身体的横向根偏移（docs/49 §6.3 二）──
-  /** 死区 / 过渡带（米）。5cm 以内的晃身体不动 */
-  lateralDeadZone: 0.05,
-  lateralBand: 0.08,
+  /**
+   * 横向死区 / 过渡带（画面高度单位；16:9 下 0.006 ≈ 画面宽的 0.34%）。
+   * 必须在除以躯干尺度**之前**判断：用米制死区时，同样 1% 的画面移动在近处会被吞掉、
+   * 在远处却会被放大十倍。投影后的米制死区由 `stepLateral()` 每帧推导，不再另调一份。
+   */
+  lateralDeadZoneImage: 0.006,
+  lateralBandImage: 0.02,
   /** 弹簧角频率（1/秒）与限速（米/秒）。镜子不能太迟钝：1 米的一步大约 0.8 秒跟到 */
   lateralOmega: 3.5,
   lateralMaxSpeed: 1.5,
   /**
-   * 上半身（中景）专用的死区与角频率——比全景更小、更快（作品负责人 2026-09-15 追加要求）。
+   * 上半身（中景）专用的画面死区与角频率——比全景更小、更快（作品负责人 2026-09-15 追加要求）。
    * 全景那一档的迟钝是故意的：`stage/framing.ts` 头一条主张是"等身 + 相机距离不动"，
    * 横向根偏移已经是那条主张里**唯一**的让步，不该再让它抢戏。中景不受那条主张约束——
    * 进中景本身就已经是自适应取景（画面高 × 0.64、放大 2.2 倍），旁边没有巨题、没有站位线替它撑住，
    * 笔记本观众也几乎只用得到这一档。**未接过真人摄像头**（docs/49 §6.8 第 2 条同一个未验证）。
    */
-  lateralDeadZoneUpper: 0.02,
+  lateralDeadZoneUpperImage: 0.003,
   lateralOmegaUpper: 5.5,
   /** 速度前馈（秒）与上限（米）：横穿时少落后一截；停下时最多冲过这么多 */
   lateralLead: 0.12,
   lateralLeadMax: 0.1,
-  /** 目标去抖（One Euro，米） */
-  lateralJitter: { minCutoff: 1.2, beta: 1.5 },
+  /**
+   * 中心与尺度各自在画面空间去抖，再做 `center / scale` 的透视投影。
+   * 尺度用低截止、零速度增益：远处尺度噪声最容易被除法放大；真实前后移动慢一个量级，0.3Hz 仍跟得上。
+   */
+  lateralCenterJitter: { minCutoff: 1.2, beta: 1.5 },
+  lateralScaleJitter: { minCutoff: 0.3, beta: 0 },
   /** 横向证据没了之后停多久（秒）才回中线 */
   lateralHoldSeconds: 1.0,
   /** 躯干宽度里有这么多越过了左 / 右边 = 那一侧出画（小屏说那一侧的话，身体停住） */
@@ -1333,6 +1341,11 @@ export const AUTOFRAME = {
   lateralMinTorsoWidth: 0.3,
   /** 根的画面 x 一帧跳过这么多（画面宽）= 换人，先停住 */
   lateralJump: 0.2,
+  /**
+   * 横向跟随的尺度换人还必须同时越过这个绝对差（画面高度单位）；相对差按两者较小值算，方向对称。远处 0.10 ↔ 0.14
+   * 虽有 40% 相对差，绝对只抖 0.04，不该把同一个人每隔一帧拦成换人；0.30 ↔ 0.80 仍会命中。
+   */
+  lateralIdentityJumpAbsolute: 0.05,
   /** 跳过去的新位置稳定这么久（秒）才跟过去 */
   lateralJumpConfirmSeconds: 0.5,
   /** 舞台余量里给身体边缘再留多少（米） */

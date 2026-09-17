@@ -95,6 +95,24 @@ export function imageToStageX(cx: number, scale: number, aspect = 16 / 9): numbe
   return MIRROR_X * (cx - 0.5) * aspect * (PEOPLE.torsoMeters / Math.max(PEOPLE.minScale, scale));
 }
 
+/** `imageToStageX()` 的逆变换：把当前舞台根位置投回摄像头画面，供画面空间死区比较。 */
+export function stageToImageX(x: number, scale: number, aspect = 16 / 9): number {
+  const a = Number.isFinite(aspect) && aspect > 0 ? aspect : 16 / 9;
+  return 0.5 + (MIRROR_X * x * Math.max(PEOPLE.minScale, scale)) / (a * PEOPLE.torsoMeters);
+}
+
+/**
+ * 尺度换人门：近处保留比例判据；远处还必须越过一个绝对画面尺度，免得 0.10 ↔ 0.14
+ * 这种只有 4% 画面高的检测波动因为比例大而把同一个人拦成 `hold-jump`。
+ */
+function lateralScaleJump(a: number, b: number): boolean {
+  if (!Number.isFinite(a) || !Number.isFinite(b)) return false;
+  const delta = Math.abs(a - b);
+  return delta > AUTOFRAME.lateralIdentityJumpAbsolute
+    // 身份分组必须是对称关系：a→b 与 b→a 不能一个算换人、另一个算同一人。
+    && delta / Math.max(PEOPLE.minScale, Math.min(Math.abs(a), Math.abs(b))) > AUTOFRAME.identityJump;
+}
+
 /** 一帧里分类器看到的全部东西。HUD 和工作台页直接显示它 */
 export interface FramingEvidence {
   /** 膝踝四点里可信且在画内的个数（没有 screen 时只看可信） */
@@ -707,6 +725,12 @@ export interface LateralState {
   pending: number;
   pendingScale: number;
   pendingFor: number;
+  /** 画面中心与躯干尺度各自的 One Euro 状态；先稳住它们，不能先做 `center / scale` 放大噪声 */
+  centerFilter?: OneEuroState;
+  scaleFilter?: OneEuroState;
+  /** 当前画面死区投影到舞台后的米数；给测试与取景靶场看，不是另一份调参 */
+  deadZone: number;
+  band: number;
   /** 没有横向证据多久了（秒） */
   lost: number;
   side: Side | null;
@@ -715,7 +739,8 @@ export interface LateralState {
 
 export const LATERAL_REST: LateralState = {
   x: { x: 0, v: 0 }, target: 0, accepted: NaN, scale: NaN,
-  pending: NaN, pendingScale: NaN, pendingFor: 0, lost: 0, side: null, why: 'center',
+  pending: NaN, pendingScale: NaN, pendingFor: 0, deadZone: 0, band: 0,
+  lost: 0, side: null, why: 'center',
 };
 
 export interface LateralInput {
@@ -729,7 +754,7 @@ export interface LateralInput {
   aspect?: number;
   /**
    * 此刻是不是中景（`FramingDecision.shot === 'upper'`）。中景死区更小、弹簧更快
-   * （`AUTOFRAME.lateralDeadZoneUpper` / `lateralOmegaUpper`）——全景那一档的迟钝
+   * （`AUTOFRAME.lateralDeadZoneUpperImage` / `lateralOmegaUpper`）——全景那一档的迟钝
    * 是为了不抢"等身 + 相机距离不动"这条主张的戏，中景本身已经是自适应取景，不受它约束。
    */
   upper?: boolean;
@@ -759,22 +784,27 @@ export function stepLateral(s: LateralState, input: LateralInput, dt: number): L
   const t = Number.isFinite(dt) && dt > 0 ? dt : 0;
   const ev = input.evidence;
   const aspect = input.aspect ?? 16 / 9;
-  let { target, accepted, scale, pending, pendingScale, pendingFor, lost } = s;
+  let { target, accepted, scale, pending, pendingScale, pendingFor, centerFilter, scaleFilter, lost } = s;
   let why: LateralWhy;
   let goal: number;
   if (!input.enabled) {
     target = 0; accepted = NaN; scale = NaN; pending = NaN; pendingScale = NaN; pendingFor = 0; lost = 0;
+    centerFilter = undefined; scaleFilter = undefined;
     why = 'yield'; goal = 0;
   } else if (!ev || (!ev.side && !ev.trusted)) {
     // 没有证据，或者位置全靠外推、又不在任何一边外（被桌子整个挡住）：跟丢
     lost += t;
     pending = NaN; pendingScale = NaN; pendingFor = 0;
-    if (lost >= T.lateralHoldSeconds) { target = 0; accepted = NaN; scale = NaN; why = 'center'; goal = 0; } else { why = 'hold-lost'; goal = NaN; }
+    if (lost >= T.lateralHoldSeconds) {
+      target = 0; accepted = NaN; scale = NaN; centerFilter = undefined; scaleFilter = undefined;
+      why = 'center'; goal = 0;
+    } else { why = 'hold-lost'; goal = NaN; }
   } else if (!ev.side && !ev.quality && input.cameraFraming) {
     // 判别条件 + 兜底：我们自己的质量读数不够，但摄像头确认在自己取景——
     // 信它更稳，回中线好过冻在一个低置信度的坐标上（见 LateralInput.cameraFraming 的注释）
     lost = 0;
     target = 0; accepted = NaN; scale = NaN; pending = NaN; pendingScale = NaN; pendingFor = 0; why = 'center'; goal = 0;
+    centerFilter = undefined; scaleFilter = undefined;
   } else if (ev.side || !ev.quality) {
     lost = 0;
     // 出画 / 坏光打断“同一组新身份连续稳定”的证据，回来后必须重新计时。
@@ -784,32 +814,49 @@ export function stepLateral(s: LateralState, input: LateralInput, dt: number): L
   } else {
     lost = 0;
     const jumped = Number.isFinite(accepted)
-      && (Math.abs(ev.x - accepted) > T.lateralJump || (Number.isFinite(scale) && Math.abs(ev.scale / scale - 1) > T.identityJump));
+      && (Math.abs(ev.x - accepted) > T.lateralJump || lateralScaleJump(ev.scale, scale));
     let accept = !jumped;
     if (jumped) {
       const samePending = Number.isFinite(pending) && Number.isFinite(pendingScale)
         && Math.abs(ev.x - pending) <= T.lateralJump
-        && Math.abs(ev.scale / Math.max(PEOPLE.minScale, pendingScale) - 1) <= T.identityJump;
+        && !lateralScaleJump(ev.scale, pendingScale);
       if (samePending) pendingFor += t;
       else { pending = ev.x; pendingScale = ev.scale; pendingFor = 0; }
       accept = pendingFor >= T.lateralJumpConfirmSeconds;
     }
     if (accept) {
+      // 中心和尺度必须先各自稳定，再做 `center / scale` 的透视投影。反过来会把远处的
+      // 两份小噪声相乘；米制死区还会让同样的画面移动近处不响应、远处过度响应。
+      const freshIdentity = !Number.isFinite(accepted) || jumped;
+      centerFilter = oneEuroStep(freshIdentity ? undefined : centerFilter, ev.x, t, T.lateralCenterJitter);
+      scaleFilter = oneEuroStep(freshIdentity ? undefined : scaleFilter, ev.scale, t, T.lateralScaleJitter);
       accepted = ev.x; scale = ev.scale; pending = NaN; pendingScale = NaN; pendingFor = 0;
-      target = imageToStageX(ev.x, ev.scale, aspect);
+      const currentImageX = stageToImageX(s.x.x, scaleFilter.x, aspect);
+      const imageError = (centerFilter.x - currentImageX) * aspect;
+      const imageDeadZone = input.upper ? T.lateralDeadZoneUpperImage : T.lateralDeadZoneImage;
+      const correctedImageX = currentImageX + deadZone(imageError, imageDeadZone, T.lateralBandImage) / aspect;
+      target = imageToStageX(correctedImageX, scaleFilter.x, aspect);
       why = 'follow'; goal = target;
     } else {
       why = 'hold-jump'; goal = NaN;
     }
   }
-  // 回中线 / 让位时不要死区：死区会让身体停在离中线还有 5cm 的地方（和景别回全景同一条理由）
+  // 回中线 / 让位时不要死区：死区会让身体停在中线旁边（和景别回全景同一条理由）
   const centering = why === 'center' || why === 'yield';
-  const deadZone = centering ? 0 : input.upper ? T.lateralDeadZoneUpper : T.lateralDeadZone;
+  const projectionScale = Math.max(PEOPLE.minScale, scaleFilter?.x ?? scale);
+  const metresPerImageHeight = PEOPLE.torsoMeters / projectionScale;
+  const deadZoneMetres = centering ? 0
+    : (input.upper ? T.lateralDeadZoneUpperImage : T.lateralDeadZoneImage) * metresPerImageHeight;
+  const band = centering ? 1e-6 : T.lateralBandImage * metresPerImageHeight;
   const omega = input.upper ? T.lateralOmegaUpper : T.lateralOmega;
   const x = stepFollow(s.x, goal, t, {
-    deadZone, band: centering ? 1e-6 : T.lateralBand, omega,
+    // 横向死区已经在画面空间处理；这里的弹簧只负责连续性、前馈、限速与舞台余量。
+    deadZone: 0, band: 1e-6, omega,
     range: Math.max(0, Number.isFinite(input.room) ? input.room : 0),
-    maxSpeed: T.lateralMaxSpeed, lead: T.lateralLead, leadMax: T.lateralLeadMax, jitter: T.lateralJitter,
+    maxSpeed: T.lateralMaxSpeed, lead: T.lateralLead, leadMax: T.lateralLeadMax,
   });
-  return { x, target, accepted, scale, pending, pendingScale, pendingFor, lost, side: ev?.side ?? null, why };
+  return {
+    x, target, accepted, scale, pending, pendingScale, pendingFor,
+    centerFilter, scaleFilter, deadZone: deadZoneMetres, band, lost, side: ev?.side ?? null, why,
+  };
 }

@@ -146,7 +146,7 @@ function drawStage(f: SimFrame): void {
   sctx.beginPath(); sctx.moveTo(X(tx), y - 34); sctx.lineTo(X(tx), y + 34); sctx.stroke();
   sctx.setLineDash([]);
   // 身体（0.5m 宽的一块）与它两侧的死区
-  const dz = AUTOFRAME.lateralDeadZone;
+  const dz = f.lateral.deadZone;
   sctx.fillStyle = f.lateral.why === 'follow' ? '#e6e6e6' : '#e8a33d';
   sctx.fillRect(X(f.lateral.x - 0.25), y - 16, X(f.lateral.x + 0.25) - X(f.lateral.x - 0.25), 32);
   sctx.strokeStyle = '#5aa9e6';
