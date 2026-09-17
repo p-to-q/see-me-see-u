@@ -3,7 +3,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { cadenceDue } from '../src/capture/cadence.ts';
+import { cadenceDue, mainThreadInferenceDue } from '../src/capture/cadence.ts';
 
 test('推理节拍：第一帧立即；没到间隔不跑；坏输入不放开无限推理', () => {
   assert.equal(cadenceDue(100, Number.NEGATIVE_INFINITY, 15), true);
@@ -15,6 +15,35 @@ test('推理节拍：第一帧立即；没到间隔不跑；坏输入不放开�
 
 test('webcam 的 worker 与主线程降级都经过同一个 cadenceDue', () => {
   const source = readFileSync(fileURLToPath(new URL('../src/capture/webcam.ts', import.meta.url)), 'utf8');
-  const calls = source.match(/cadenceDue\(/g) ?? [];
-  assert.equal(calls.length, 2, 'worker #send 与主线程 #infer 必须各有一处节拍闸');
+  assert.equal((source.match(/cadenceDue\(/g) ?? []).length, 1, 'worker #send 必须经过共享节拍闸');
+  assert.equal((source.match(/mainThreadInferenceDue\(/g) ?? []).length, 1,
+    '主线程 #infer 必须经过同时认图重建状态的节拍闸');
+  assert.match(source, /mainThreadInferenceDue\(this\.#mainPeopleRequest !== null,/,
+    '主线程必须把真实的 setOptions 在途状态接进互斥闸');
+});
+
+test('主线程图重建期间不 detect，成功或失败收口后下一份到期帧恢复', async () => {
+  let resolve!: () => void;
+  const gate = new Promise<void>((yes) => { resolve = yes; });
+  let reconfiguring = true;
+  const settled = gate.catch(() => {}).finally(() => { reconfiguring = false; });
+  let detects = 0;
+  const tryDetect = () => {
+    if (mainThreadInferenceDue(reconfiguring, 100, Number.NEGATIVE_INFINITY, 30)) detects += 1;
+  };
+
+  tryDetect();
+  tryDetect();
+  assert.equal(detects, 0, 'setOptions 未完成时仍进入 detectForVideo');
+  resolve();
+  await settled;
+  tryDetect();
+  assert.equal(detects, 1, 'setOptions 完成后没有恢复推理');
+
+  // 拒绝也必须释放闸；真实错误由 WebcamCapture 写进 lastError，而不是永久停推理。
+  reconfiguring = true;
+  const failed = Promise.reject(new Error('graph rebuild failed')).catch(() => {}).finally(() => { reconfiguring = false; });
+  await failed;
+  tryDetect();
+  assert.equal(detects, 2, 'setOptions 失败后把主线程推理永久锁死');
 });

@@ -162,6 +162,8 @@ worker（155KB）、`vision_bundle`（153KB）、两份 11.7MB 的 wasm 都不�
     `import()` 有缓存、不会再执行胶水层。无头 Chrome 当场撞到（抠图起不来），同一个坑也会让 GPU→CPU 回落起不来。
     修法是每次创建前从缓存的模块上把 `default` 装回去（`test/pose-worker-factory.test.ts`）。
 - 降级路径：worker 起不来 / `?worker=off` → 原来的主线程推理（MediaPipe 改成动态 import，worker 那条路上主线程一个字节都不下）。
+  运行中改 `numPoses` 时，`setOptions()` 异步重建图的窗口内不调用 `detectForVideo()`；成功或失败收口后，下一份到期视频帧恢复，
+  与 worker 的 `reconfigureQueue.busy` 互斥语义一致。
   worker 中途死了 → 重新拿（最多 2 次）；一帧 2 秒没回来 → 当它丢了。
 
 ### 3.2 回放一直驱动身体，直到第一次推理完成

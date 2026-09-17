@@ -9,3 +9,13 @@ export function cadenceDue(nowMs: number, lastMs: number, hz: number): boolean {
   const safeHz = Number.isFinite(hz) && hz > 0 ? hz : CAPTURE.targetHz;
   return nowMs - lastMs >= Math.max(0, 1000 / safeHz - CAPTURE.cadenceSlackMs);
 }
+
+/** 主线程降级还要避开 MediaPipe 异步重建图；worker 由自己的 busy queue 守同一条边界。 */
+export function mainThreadInferenceDue(
+  reconfiguring: boolean,
+  nowMs: number,
+  lastMs: number,
+  hz: number,
+): boolean {
+  return !reconfiguring && cadenceDue(nowMs, lastMs, hz);
+}

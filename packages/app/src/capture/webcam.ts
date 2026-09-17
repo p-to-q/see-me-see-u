@@ -48,7 +48,7 @@ import {
 } from './camera-select.ts';
 import { describe, overallScore, toLandmark, type PoseIn, type PoseOut } from './pose-protocol.ts';
 import { applyCamFraming, readCamFraming, type CamFramingFlag, type CamFramingStatus, type TrackLike } from './cam-framing.ts';
-import { cadenceDue } from './cadence.ts';
+import { cadenceDue, mainThreadInferenceDue } from './cadence.ts';
 
 // 本地 wasm：打包进产物，现场断网也能起（Vite 把它们当静态资源发出去）
 // 注意子路径没有 /wasm/：包的 exports 就是这么导出的
@@ -781,7 +781,9 @@ export class WebcamCapture implements Capture {
 
     // 主线程是降级路径，但仍必须服从调速器 / 自动人数探测的节拍；否则最贵的三人探测会在这里满速跑。
     const now = performance.now();
-    if (!cadenceDue(now, this.#lastSent, this.#cadence)) return;
+    // `setOptions()` 会异步重建 MediaPipe 图，不能与 detectForVideo 并发。worker 也在
+    // reconfigureQueue.busy 时拒绝帧；主线程降级必须保持同一份所有权语义。
+    if (!mainThreadInferenceDue(this.#mainPeopleRequest !== null, now, this.#lastSent, this.#cadence)) return;
 
     // 同一帧不重复推理；timestamp 必须严格递增，否则 MediaPipe 会抛
     const vt = this.video.currentTime;
