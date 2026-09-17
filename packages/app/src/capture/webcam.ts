@@ -48,6 +48,7 @@ import {
 } from './camera-select.ts';
 import { describe, overallScore, toLandmark, type PoseIn, type PoseOut } from './pose-protocol.ts';
 import { applyCamFraming, readCamFraming, type CamFramingFlag, type CamFramingStatus, type TrackLike } from './cam-framing.ts';
+import { cadenceDue } from './cadence.ts';
 
 // 本地 wasm：打包进产物，现场断网也能起（Vite 把它们当静态资源发出去）
 // 注意子路径没有 /wasm/：包的 exports 就是这么导出的
@@ -374,7 +375,7 @@ export class WebcamCapture implements Capture {
 
   /**
    * 推理频率上限（Hz）。帧调速器放下「推理」那一级时降到 `GOVERNOR.inferenceHzShed`（docs/48 §4）。
-   * 不高于 `CAPTURE.targetHz`。只影响 worker 那条路；主线程那一条本来就在降级路径上。
+   * 不高于 `CAPTURE.targetHz`。worker 与主线程降级路径共用同一条节拍闸。
    */
   setCadence(hz: number): void {
     if (Number.isFinite(hz) && hz > 0) this.#cadence = Math.min(CAPTURE.targetHz, hz);
@@ -600,8 +601,7 @@ export class WebcamCapture implements Capture {
       this.#inFlight = false;   // 那一帧丢了：不等了
     }
     if (this.video.readyState < 2) return;
-    // 节拍：留 2ms 容差，免得 30Hz 被 rAF 的抖动削成 20Hz
-    if (now - this.#lastSent < 1000 / this.#cadence - 2) return;
+    if (!cadenceDue(now, this.#lastSent, this.#cadence)) return;
     // 同一帧不重复推理
     const vt = this.video.currentTime;
     if (vt === this.#lastVideoTime) return;
@@ -779,13 +779,17 @@ export class WebcamCapture implements Capture {
     const lm = this.#landmarker;
     if (!lm || this.video.readyState < 2) return;
 
+    // 主线程是降级路径，但仍必须服从调速器 / 自动人数探测的节拍；否则最贵的三人探测会在这里满速跑。
+    const now = performance.now();
+    if (!cadenceDue(now, this.#lastSent, this.#cadence)) return;
+
     // 同一帧不重复推理；timestamp 必须严格递增，否则 MediaPipe 会抛
     const vt = this.video.currentTime;
     if (vt === this.#lastVideoTime) return;
     this.#lastVideoTime = vt;
-    const now = performance.now();
     const stamp = now <= this.#lastStamp ? this.#lastStamp + 1 : now;
     this.#lastStamp = stamp;
+    this.#lastSent = now;
 
     const res = lm.detectForVideo(this.video, stamp);
     const world = res.worldLandmarks?.[0];

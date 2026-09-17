@@ -55,6 +55,9 @@ import { createWarmPlan } from './stage/warm-plan.ts';
 import { createLongTaskCounter } from './shell/long-tasks.ts';
 import { createPoseClock } from './capture/pose-clock.ts';
 import { freshInference } from './capture/inference-clock.ts';
+import {
+  canRunPeopleProbe, peopleProbeCadence, trackedPrimaryOrSingleFallback, visibleSelectedCount,
+} from './capture/people-probe-runtime.ts';
 import { showBootError } from './shell/boot-error.ts';
 import { createSlowLoop } from './slow/slow.ts';
 import { createVisitReporter } from './archive/visit.ts';
@@ -526,7 +529,7 @@ async function boot(): Promise<void> {
   // 忒修斯开着时给替换空着一个交接名额：它当帧开始、不排队，名额满了就只能越过 draw call 预算叠上去
   // 多人（docs/50）只在刚体身体上开：团块 / 点场是另一种表达，没有桶可共用 —— 那两种物种上 `?people=` 按 1 走
   //
-  // 自动探测（docs/50 §6.3 修订）：`flags.peopleAuto` 时人数上限从 1 起步、探测把它往上抬，
+  // 自动探测（docs/50 §6.3）：`flags.peopleAuto` 时人数上限从场合默认起步、探测把它往上抬，
   // 但 companions 的桶容量必须在**这里**、开机那一刻就按 `PEOPLE.hardMax` 留够 —— 半路再挂
   // `instanceColor` 会换材质管线（`creature.ts` 那句注释），那正是"探测确认了却还要等一拍才有身体"
   // 的卡顿来源。桶留够之后单人这条路一个像素都不变（`companionsMax > 0` 时只是多出的实例格空着不用），
@@ -540,10 +543,10 @@ async function boot(): Promise<void> {
    * 起步，只在探测**真的**确认（或退档）时才改（下面的帧循环）；不开探测时永远是 `flags.people`，
    * 这一版之前的那条路一个字不变。
    */
-  let peopleCap = probeCapable ? PEOPLE.defaultCap : flags.people;
+  let peopleCap = flags.people;
   /**
-   * **活的**人数上限：tracker.cap / worker `numPoses` 这一帧真的在跑的值。探测窗口里它比
-   * `peopleCap` 高一档（先让 tracker 内部确认，不等于已经会画出一具身体，见帧循环那一段的注释）。
+   * **活的**人数上限：tracker.cap / worker `numPoses` 这一帧真的在跑的值。探测窗口里它临时到
+   * `PEOPLE.hardMax`（先让 tracker 内部确认，不等于已经会画出一具身体，见帧循环那一段的注释）。
    */
   let liveCap = peopleCap;
   // 团块 / 点场、以及还没探测到别人时：别让 worker 白白按几个人跑检测器（docs/50 §1.2）
@@ -831,16 +834,23 @@ async function boot(): Promise<void> {
   if (people) console.info(`[people] 上限 ${peopleCap} · 预算放得下 ${people.plan.bodies} 具 · 伴随身体在场时描边${people.plan.outlineWithCompanions ? '留着' : '让位'}（一具最坏 ${Math.round(people.plan.fill)} 面）`);
 
   /**
-   * 自动探测（`core/src/people-probe.ts`，docs/50 §6.3 修订）：`probeCapable` 时背景里定期
-   * 抬一档看看是不是真的来了第二、第三个人，看见了就把 `peopleCap` 往上抬，看错了退回来。
-   * 不开探测（现场、显式 `?people=`）时是 `null`：帧循环里这一整段是 no-op，一个字不变。
+   * 自动探测（`core/src/people-probe.ts`，docs/50 §6.3）：`probeCapable` 时先让单人路径稳定，
+   * 再在有性能余量时把人数临时抬到硬上限看一扇窗。显式固定 `?people=1|2|3` 时是 null。
    */
-  const peopleProbe = probeCapable ? { state: createProbeState(peopleCap) } : null;
-  /** 探测确认了第几个人，提示要说这一句（`state.hint` 秒数由 preview 自己数着收起） */
+  const peopleProbe = probeCapable ? { state: createProbeState(peopleCap, peopleCap) } : null;
+  /** 探测确认了第几个人，提示要说这一句；`stepProbe.uiDt` 用渲染时钟把它按时收起。 */
   const peopleHint = (): BiText | null => {
     const s = peopleProbe?.state;
     if (!s || s.hint <= 0) return null;
     return COPY.preview.peopleNoticed[s.hintLevel as 2 | 3] ?? null;
+  };
+  /** 正常单人优先；只有探测窗把推理降到轻量节拍。 */
+  const effectivePeopleCadence = (): number => peopleProbeCadence(
+    inferHz,
+    peopleProbe?.state.phase === 'probing',
+  );
+  const syncPeopleCadence = (): void => {
+    (capture as { setCadence?(hz: number): void }).setCadence?.(effectivePeopleCadence());
   };
 
   // ── 玩法扩展点（docs/16）。帧循环固定，玩法挂在旁边 ───────────────────────
@@ -913,11 +923,12 @@ async function boot(): Promise<void> {
       stage.setGroup(0, 0);
     }
     if (peopleProbe) {
-      peopleProbe.state = createProbeState(PEOPLE.defaultCap);
-      peopleCap = PEOPLE.defaultCap;
-      liveCap = PEOPLE.defaultCap;
+      peopleProbe.state = createProbeState(flags.people, flags.people);
+      peopleCap = flags.people;
+      liveCap = flags.people;
       people?.tracker.setCap(liveCap);
       capture.setPeople?.(liveCap);
+      syncPeopleCadence();
       replanPeople();
     }
 
@@ -951,7 +962,11 @@ async function boot(): Promise<void> {
   const applyGovernor = wireGovernor({
     ink: (shed) => stage.setInk(!shed),
     swaps: (shed) => { swapShed = shed; },
-    inference: (shed) => { inferHz = shed ? GOVERNOR.inferenceHzShed : CAPTURE.targetHz; (capture as { setCadence?(hz: number): void }).setCadence?.(inferHz); },
+    inference: (shed) => {
+      inferHz = shed ? GOVERNOR.inferenceHzShed : CAPTURE.targetHz;
+      // 保留调速器的显式开关契约；目标频率同时受后台人数探测的更低节拍约束。
+      (capture as { setCadence?(hz: number): void }).setCadence?.(effectivePeopleCadence());
+    },
     // 调速器只是短暂让后期让路：保留已编译的链，拿回来不在帧循环里重建。
     // 用户开关 / 永久降级仍走 setPost，负责真正释放显存。
     post: (shed) => stage.setPostSuspended(shed),
@@ -1008,19 +1023,34 @@ async function boot(): Promise<void> {
       : null;
     if (people) people.frame = crowd;
 
-    // 自动探测（docs/50 §6.3 修订）：喂这一帧真的选中了几个人，结果影响**下一帧**的
+    // 自动探测（docs/50 §6.3）：喂这一帧真的还在画里的已选轨迹，结果影响**下一帧**的
     // tracker.cap / worker numPoses —— 决策天然晚一帧，和调速器采样同一个节奏，不逼帧循环里 await 任何东西。
     //
-    // **只在真摄像头开着时探测**（`cameraOn`）。回放（`?demo=1`、按摄像头之前的默认展示、
+    // **只在真摄像头开着且机器有余量时探测**。回放（`?demo=1`、按摄像头之前的默认展示、
     // 摄像头丢了自动退回的那几秒）没有真人——`ReplayCapture.latestAll()` 在 `setPeople(n>1)`
     // 之后会**合成**另外几个人（`people-synth.ts`），那是给工作台 / 演示用的，不该在观众
     // 还没按「用我的摄像头」之前的默认画面里自己冒出来。这一条不加的话，展签之前的默认展示
     // 每隔 `probeIntervalSeconds` 就会凭空多出一两具合成的身体——2026-09-15 真人测出来的回归。
-    if (peopleProbe && people && cameraOn && inference) {
-      const step = stepProbe(peopleProbe.state, { dt: inference.dt, selectedCount: crowd?.selected.length ?? 0 });
+    if (peopleProbe && people) {
+      const previousPhase = peopleProbe.state.phase;
+      const step = stepProbe(peopleProbe.state, {
+        // 只有新推理能推进人数证据；渲染帧只负责提示倒计时和及时撤掉超预算窗口。
+        dt: inference?.dt ?? 0,
+        uiDt: dt,
+        selectedCount: visibleSelectedCount(crowd),
+        canProbe: canRunPeopleProbe({
+          active: cameraOn,
+          visible: document.visibilityState === 'visible',
+          throttled: loop.stats.throttled,
+          degraded: loop.stats.degraded !== null,
+          governorLevel: governor.level,
+          frameMs: loop.stats.frameMs,
+        }),
+      });
       peopleProbe.state = step.state;
-      // 活的上限（tracker.cap / numPoses）跟 target 走：探测窗口里它比 peopleCap 高一档，
-      // 好让 tracker **内部**确认第二个人；这一步本身不会让任何一具身体被画出来（见下一段）。
+      if (step.state.phase !== previousPhase) syncPeopleCadence();
+      // 活的上限（tracker.cap / numPoses）跟 target 走：探测窗口里它临时到 hardMax，
+      // 好让 tracker **内部**确认第二、第三个人；这一步本身不会让任何一具身体被画出来（见下一段）。
       if (step.target !== liveCap) {
         liveCap = step.target;
         people.tracker.setCap(liveCap);
@@ -1036,23 +1066,20 @@ async function boot(): Promise<void> {
       }
     }
 
-    // 只在真的确认了不止一个人（`peopleCap > 1`）时才信跟踪器给的"主身体"——
-    // `people.ts` 的 `observePerson()` 硬性要求 `pose.screen`（几何身份匹配靠它），
-    // 而回放录制的两条真实素材（`pose-jumpingjacks` / `pose-walkturn`）从来没有
-    // `screen`（`pose-synthetic` 才有，docs/49 §6.2 同一件事）。`peopleAuto` 默认把
-    // `multi` 打开之后，观众还没开摄像头的默认展示会被无差别地送进这条跟踪器——
-    // 跟踪器因为没有 `screen` 永远选不出主身体，`crowd.primary` 恒为 null，
-    // 身体因此永远不出场。单人（`peopleCap === 1`，探测还没真的确认第二个人）时
-    // 走原来那条路，一个字不变：直接信 `capture.latest()`，不需要几何身份。
-    const live = people && crowd && peopleCap > 1
-      ? (crowd.tracks.find((t) => t.id === crowd.primary && t.missing === 0)?.pose ?? null)
+    // 真摄像头的探测窗已经临时让 MediaPipe 输出多人，数组第 0 项不再有身份语义；即使第二人尚未
+    // 获得身体，主通道也必须跟 tracker 的稳定 id。回放自动单人仍走 latest：旧录制没有 screen，
+    // tracker 无法建立身份；显式多人回放由 synthPeople 补了 screen，可以照常走 tracker。
+    const trackerOwnsChannel = !!(people && crowd && (cameraOn || peopleCap > 1));
+    const trackerHasPrimary = trackerOwnsChannel && crowd !== null && crowd.primary !== null;
+    const live = trackerHasPrimary
+      ? trackedPrimaryOrSingleFallback(crowd, latest, all?.length ?? 0, peopleCap)
       : latest;
     // 主身体的人丢了一阵又被认回来：姿态时钟和滤波器不许在"之前"和"之后"之间插值（docs/50 §2.4）——
     // 中间可能隔着一次换姿势，甚至是另一个人被认成了他。插过去的结果是一具摊在地上的星形（2026-09-14 无头取证撞到的）
-    if (people && crowd?.tracks.some((t) => t.primary && t.reacquired)) {
+    if (trackerHasPrimary && crowd?.tracks.some((t) => t.primary && t.reacquired)) {
       poseClock.reset(); refiner?.reset(); stabilizer.reset(); vitality.reset();
     }
-    if (people && crowd && crowd.primary !== people.primary) {
+    if (people && crowd && trackerOwnsChannel && crowd.primary !== people.primary) {
       // 交接（docs/50 §3.3）：上一个主身体变成一具正在溶掉的伴随身体，停在他最后的样子和站位上；
       // 接班的人自己那一套滤波器换进主通道（他的身体已经在台上，不从零热身，也不吃上一个人的骨长）
       if (people.primary !== null && crowd.primary !== null) {
@@ -1461,7 +1488,7 @@ async function boot(): Promise<void> {
     // 控件显示用户的选择，不跟着调速器的短暂让路闪成「关」。实际渲染状态仍由 stage.post 给 warm-plan / HUD 读。
     post: postWanted,
     framing: framingPolicy,
-    people: String(flags.people),
+    people: flags.peopleAuto ? 'auto' : String(flags.people),
   });
 
   // ── 控件条（`ui/controls.ts`）──────────────────────────────────────────────
@@ -1555,7 +1582,7 @@ async function boot(): Promise<void> {
       // 新的一路已经成功启动才提交清零；创建 / 启动失败时旧 encounter 原样继续。
       if (kindChanged) resetEncounter('capture-change');
       else poseClock.reset();
-      (capture as { setCadence?(hz: number): void }).setCadence?.(inferHz);
+      syncPeopleCadence();
       // 团块 / 点场上多人不开：别让 worker 白白按三个人跑检测器（docs/50 §1.2）。
       // 用 `liveCap` 不用 `flags.people`：换 capture 的那一刻探测可能已经把它抬起来了，新的
       // capture 要接着用同一个数，不能因为换了一次摄像头 / 回放就悄悄把探出来的第二个人弄丢

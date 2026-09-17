@@ -120,8 +120,12 @@ test('重载只在叠加真的开着时写 act / plan；描边不带走（物种
 
 test('团块 / 点场身上没有描边；进出 B 档要重载，其余热切；换物种一律重载', () => {
   const outline = CONTROLS.find((c) => c.id === 'outline')!;
+  const people = CONTROLS.find((c) => c.id === 'people')!;
   for (const b of ['mass', 'swarm']) assert.equal(available(outline, { bootPlan: b, speciesPlan: b }), false);
+  for (const b of ['mass', 'swarm']) assert.equal(available(people, { bootPlan: b, speciesPlan: b }), false,
+    `${b} 主线固定单人，不应显示一个永远不生效的人数控件`);
   for (const a of ['rig', 'quadruped']) assert.equal(available(outline, { bootPlan: a, speciesPlan: a }), true);
+  for (const a of ['rig', 'quadruped']) assert.equal(available(people, { bootPlan: a, speciesPlan: a }), true);
   const form = CONTROLS.find((c) => c.id === 'form')!;
   const rigCtx = { bootPlan: 'rig', speciesPlan: 'rig' };
   const massCtx = { bootPlan: 'mass', speciesPlan: 'mass' };

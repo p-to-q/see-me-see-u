@@ -17,10 +17,17 @@ const MAIN = readFileSync(fileURLToPath(new URL('../src/main.ts', import.meta.ur
 test('主线：tracker 与自动探测都只在 fresh inference 上推进', () => {
   assert.match(MAIN, /freshInference\(/, '主线没有区分新推理与缓存结果');
   assert.doesNotMatch(MAIN, /tracker\.update\(capture\.latestAll/, 'tracker 仍在每个 rAF 重喂缓存结果');
-  assert.match(MAIN, /peopleProbe && people && cameraOn && inference/,
-    '自动探测仍会在没有新推理时累计确认时间');
-  assert.match(MAIN, /stepProbe\([^]*dt:\s*inference\.dt/,
+  assert.match(MAIN, /stepProbe\([^]*dt:\s*inference\?\.dt\s*\?\?\s*0/,
     '自动探测没有使用真实推理间隔');
+  assert.match(MAIN, /selectedCount:\s*visibleSelectedCount\(crowd\)/,
+    '自动探测把 grace 里已经 missing 的 selected 轨迹也算成在场');
+  assert.doesNotMatch(MAIN, /selectedCount:\s*crowd\?\.selected\.length/);
+  assert.match(MAIN, /trackerOwnsChannel[^]*trackedPrimaryOrSingleFallback\(crowd,\s*latest,\s*all\?\.length\s*\?\?\s*0,\s*peopleCap\)/,
+    '探测窗没有稳定主身份，或单人短暂失配时没有受限的 latest 回退');
+  assert.match(MAIN, /createProbeState\(peopleCap,\s*peopleCap\)/,
+    '探测没有记住场合起步下限，未来 kiosk 从 2 起步时会错误退到 1');
+  assert.match(MAIN, /people:\s*flags\.peopleAuto\s*\?\s*'auto'\s*:\s*String\(flags\.people\)/,
+    '控件没有显示真实策略，会把自动误报成固定人数');
 });
 
 test('一份缓存结果在 120Hz 被读 3 秒：只算一次观测，不能把 tentative 轨迹催熟', () => {
@@ -48,7 +55,8 @@ test('一份缓存结果在 120Hz 被读 3 秒：只算一次观测，不能把 
 
 test('自动人数确认：缓存 3 秒不累计；只有新推理连续够时才升档', () => {
   let state: ProbeState = {
-    level: 1, phase: 'probing', clock: 0, held: 0, idleHeld: 0, hint: 0, hintLevel: 0,
+    level: 1, floor: 1, phase: 'probing', clock: 0, held: 0, topHeld: 0,
+    idleHeld: 0, hint: 0, hintLevel: 0,
   };
   let stamp = Number.NaN;
   for (let frame = 0; frame < 360; frame++) {

@@ -28,6 +28,7 @@ import type {
   Genome, MaterialDef, MaterialRole, PartMeta, Presence, Skeleton, Slot, SlotKey, SlotPick, Tier,
 } from '../../../core/src/types.ts';
 import type { PartLibrary } from '../assets/library.ts';
+import { writeInstanceColor } from './instance-color.ts';
 import { assemble, partIdsOf, type PartInstance, type SlotRender } from './assemble.ts';
 import {
   createFillMaterial, createOutlineMaterial, DEFAULT_SHADING, disposeShading, outlineMetersFor,
@@ -179,6 +180,8 @@ interface MeshEntry {
   idleFrames: number;
   /** 预备桶在目标档位出现前不能被普通空桶回收；真正走到这档后恢复原来的 TTL */
   preparedUntilTier: Tier | null;
+  /** 这一帧是否真的改过实例颜色；稳定单人全白时必须一直为 false，避免重复 GPU 上传。 */
+  colorDirty: boolean;
   /**
    * 描边外壳（只在 `toon` 下存在）。**和填充共用同一个 `instanceMatrix`**：
    * 矩阵每帧只写一遍，外壳白拿 —— 这是这条路径几乎不吃 CPU 的原因。
@@ -416,7 +419,7 @@ export function createCreature(opt: CreatureOptions): Creature {
       const pos = geo.getAttribute('position');
       stats.buckets++;
       e = {
-        mesh, partId, materialId, capacity, idleFrames: 0, preparedUntilTier: null, outline,
+        mesh, partId, materialId, capacity, idleFrames: 0, preparedUntilTier: null, colorDirty: false, outline,
         trisPerInstance: Math.floor((idx ? idx.count : pos ? pos.count : 0) / 3),
       };
       meshes.set(key, e);
@@ -641,15 +644,17 @@ export function createCreature(opt: CreatureOptions): Creature {
         const col = e.mesh.instanceColor;
         if (col) {
           const c = k < primaryN ? null : tints[k - primaryN];
-          const a = col.array as Float32Array;
-          a[i * 3] = c ? c[0] : 1; a[i * 3 + 1] = c ? c[1] : 1; a[i * 3 + 2] = c ? c[2] : 1;
+          e.colorDirty = writeInstanceColor(col.array as Float32Array, i, c ?? null) || e.colorDirty;
         }
         cursor.set(key, i + 1);
       }
       for (const [key, e] of meshes) {
         if (!counts.has(key)) continue;
         e.mesh.instanceMatrix.needsUpdate = true;
-        if (e.mesh.instanceColor) e.mesh.instanceColor.needsUpdate = true;
+        if (e.mesh.instanceColor && e.colorDirty) {
+          e.mesh.instanceColor.needsUpdate = true;
+          e.colorDirty = false;
+        }
       }
 
       stats.instances = instances.length;

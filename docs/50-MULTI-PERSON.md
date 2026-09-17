@@ -1,4 +1,4 @@
-# 50 · 多人入镜 —— 两个人、三个人，每人一具身体
+# 50 · 多人入镜 —— 自动辨认两三个人，按预算分配身体
 
 > 2026-09-14。作品负责人："两个人、三个人……如果模型支持，两个、三个甚至更多人入镜都可以，但也可以之后硬限制人数避免复杂。
 > 我觉得支持两三个人就行。从我们的 CV 往回推，单独作为一条线。每一个入镜的人生成一个对应的机器人。"
@@ -7,7 +7,7 @@
 > 数值的唯一来源是 `packages/core/src/tuning.ts` 的 `PEOPLE` 块。
 
 ```
-Outcome:    两三个人同时站到摄像头前，每个人各有一具跟着自己动的身体；一个人走开，其余的人不受影响。
+Outcome:    两三个人同时站到摄像头前，系统自动辨认；预算允许的人各有一具跟着自己动的身体，一个人走开不影响其余人。
 Boundary:   capture（numPoses、worker 消息）→ core/people.ts（身份、谁拿到身体、站位）→ creature（共用桶的伴随身体）→ main.ts 接线；
             控件表一项、HUD 一行、一个工作台页。弧线、忒修斯、存档、读数的**逻辑**一行不改。
 Invariants: `?people=1` 是这一版之前的那条路，逐字相同（numPoses=1、没有 others、没有伴随身体）；
@@ -21,8 +21,8 @@ Non-goals:  外观重识别（embedding）、每人一条弧线、每人一个�
 
 ## 0 · 结论先说
 
-1. **CV 撑得住三个人，但代价不是线性的那一种。** `numPoses > 1` 时 MediaPipe 在"跟踪到的人数 < numPoses"的每一帧都重跑检测器
-   （§1.2）——**画面里只有一个人、却开着三人档，是最贵的那一种**。所以人数上限不是越大越好，默认值由实测定（§1.5）。
+1. **接口允许请求三个人，真人精度与代价还没有证明。** `numPoses > 1` 时 MediaPipe 在"跟踪到的人数 < numPoses"的每一帧都重跑检测器
+   （§1.2）——**画面里只有一个人、却开着三人档，是最贵的那一种**。所以人数上限不是越大越好，稳态起点仍等实测再定（§1.5）。
 2. **身份是我们自己跟出来的**：躯干中心的预测位置 + 尺度 + 姿态描述子，门限挡掉不可能的配对，在 ≤ 4×8 的矩阵上穷举最优配对。
    出生憋 0.3 秒、丢了 1 秒才死、死后 3 秒内在附近回来还是原来那个 id。没有外观特征（§2）。
 3. **一条弧线，不是每人一条。** 这件作品的命题是"一个自我住进很多具身体"，而忒修斯之船是**一条**船：
@@ -30,7 +30,7 @@ Non-goals:  外观重识别（embedding）、每人一条弧线、每人一个�
    主身体（最早拿到身体的那个人）驱动弧线、读数、声音、取景；**主身体走了不归零**，交给台上已经有身体的下一个人（§3）。
 4. **帧预算：两具放得下，第三具要等 LOD。** 所有身体共用同一组 `InstancedMesh` 桶（draw call 和一具时一模一样），
    差异色走 `instanceColor`。面数上，忒修斯的借件门保证一具身体最坏 125k 面 → **两具正好 250k，前提是伴随身体进场时主身体的描边让位**（§5）。
-5. **默认 `?people=1`，网页和现场都是**，直到 §10 的实测说可以改（§6.3 有裁定与理由）。
+5. **默认策略是 `auto`，网页和现场的初始确认档位都是 1**；显式 `?people=1` 才固定单人（§6.3）。
 
 ---
 
@@ -62,7 +62,7 @@ npm run build && (cd packages/app && npx vite preview --port 4777 --strictPort)
 for p in 1 2 3; do for n in 1 2 3; do node scripts/people/measure.ts infer http://localhost:4777 scratch/people/infer $p scratch/people/figures-$n.y4m 20; done; done
 ```
 
-**这张表是 `PEOPLE.defaultCap` 唯一的依据**（§6.3），所以默认值留在 1，直到它被跑出来。
+**这张表是 `PEOPLE.defaultCap` 稳态起点唯一的依据**（§6.3），所以起点留在 1，直到它被跑出来。
 
 ### 1.3 输出顺序
 
@@ -294,34 +294,37 @@ draw call：任何人数下 = 一具身体（共用桶，`people-budget.test.ts`
 
 ### 6.3 控件与默认值
 
-- `?people=1|2|3`；控件条「取景」那一组多一项「人数」· 快捷键 N。热切，不重载（worker 在两帧之间重建图）。
-- **网页默认 1、现场默认 1**（`PEOPLE.defaultCap` / `defaultCapKiosk`）。理由按顺序：
+- `?people=auto|1|2|3`；控件条「取景」那一组多一项「人数」· 快捷键 N。切换会重载，因为伴随身体的实例容量在建身体时预留。
+- **网页和现场都默认 `auto`，其稳态起点仍是 1**（`PEOPLE.defaultCap` / `defaultCapKiosk`）。保留 1 作为低成本稳态的理由：
   1. §1.2：开着多人档而画面里只有一个人，每帧多一次检测器。网页观众 **绝大多数**是笔记本前的一个人。
   2. 网页观众身后路过的人会拿到一具身体 —— 在一个人的桌面上，那读作"它认错了人"，不是"它认出了你们"。
-  3. 现场：装置的首要观众是站在站位线上的**一个**人（docs/49 §5.1）；多人是策展决定，`?kiosk=1&people=2` 一个参数就开。
-  4. §10 的实测如果显示两人档在一个人时代价可以忽略，第 3 条改成现场默认 2 —— 那一行实测是这个默认值唯一的依据。
+  3. §10 的实测如果显示两人档在一个人时代价可以忽略，可以把稳态起点改成 2；在此之前不用长期多付检测器成本。
 
-> **2026-09-15 修订：网页版加了一层背景自动探测，默认值本身不改。**
+> **2026-09-17 修订：网页和现场都由系统自动发现人数；数字只是显式固定覆盖。**
 >
 > 上面第 2 条的顾虑是真的，但"默认值焊死在 1"把它变成了另一个问题：真的有两个人一起站到
-> 摄像头前，除非有人知道要去按「人数」，身体永远只有一具。作品负责人的方向（2026-09-15）：
-> 网页版仍然从 1 起步（不回归"多数访客独自一人"这个常见情形，也不违反 §1.2 的推理成本），
-> 但 `flags.peopleAuto` 时（`?people=` 没写、且不是 `?kiosk=1`——显式选择和现场都不碰）
-> 背景里按 `PEOPLE.probeIntervalSeconds` 定期把 `numPoses` 抬一档看一眼：`core/src/people-probe.ts`
-> 的纯状态机 `stepProbe()` 决定要不要把这一档当真——见到的人要**稳稳地被跟踪器选中、连续在场
+> 摄像头前，除非有人知道要去按「人数」，身体永远只有一具。现在 `flags.peopleAuto` 在网页和
+> kiosk 上都默认开；只有显式 `?people=1|2|3` 才关闭它。真摄像头先给最常见的单人路径
+> `probeInitialDelaySeconds` 的稳定期；之后只在页面可见、调速器未降级且帧预算有余量时，降到
+> `probeInferenceHz` 并把 `numPoses` 临时抬到 `PEOPLE.hardMax`。稳态每隔 `probeIntervalSeconds`
+> 再开一扇满档窗；窗口中一旦卡顿立即回到已确认人数，并完整退避一轮。
+> `core/src/people-probe.ts` 的纯状态机 `stepProbe()` 决定要不要把这一档当真：见到的人要
+> **稳稳地被跟踪器选中、连续在场
 > 够久**（`PEOPLE.probeConfirmSeconds`，复用 `people.ts` 自己那套滞回/`leak()`，不是另一套置信度）
-> 才升档；没等到就退回原来那一档；升过档之后那具身体久没人坐（`PEOPLE.probeDeescalateSeconds`），
-> 也会退回去，不是"来过一次就永远多付一档的检测器成本"。
+> 才升档。二、三人证据分开积累：三人都稳定时一扇窗直接 1→3；第三人只闪过时到窗尾仍收下已确认的 2。
+> 升过档之后实际人数持续不足 `probeDeescalateSeconds`，会一次收回到已证明的人数；3 只剩 1
+> 不再经过两个 20 秒周期。退档永远不越过场合的起步下限。
 >
-> 第 2 条的顾虑因此被**正面处理**，不是回避：真正升档的那一刻，小屏下面出一句
+> 第 2 条的顾虑因此由确认滞回正面处理，不让擦肩者拿到身体；当 preview 已挂载时，真正升档的那一刻，小屏下面出一句
 > "看到了第二 / 三个人"（`COPY.preview.peopleNoticed`，`PEOPLE.probeHintSeconds` 之后自己收起）——
 > 读作"我们注意到了、这是有意的"，不是观众自己发现画面里凭空多出一具身体。
+> kiosk 默认不挂 preview，`?preview=off` 也没有这层文字反馈；现场需要它时显式用 `?preview=on`。
 > 桶容量（`creature.ts` 的 `companionsMax`）在探测打开的那一刻、开机时就按 `PEOPLE.hardMax`
 > 留够（docs/50 §5.1：桶本来就不分人，多留的实例格闲着不花代价）——这样探测真的确认时不用
 > 半路重建管线，`plan.bodies` 只是一个数字，重算是热的（`replanPeople()`）。
-> 试探窗口本身（tracker.cap 临时抬一档）不会让任何一具身体被画出来——`plan.bodies` 只在
+> 试探窗口本身（tracker.cap 临时到 `hardMax`）不会让任何一具身体被画出来——`plan.bodies` 只在
 > **确认**（或退档）那一刻才跟着改，一次擦肩而过因此看不见任何变化，不会有"先长出来又溶掉"
-> 的坏味道。现场（`?kiosk=1`）与显式 `?people=`（哪怕就是写 `1`）完全不受这一段影响。
+> 的坏味道。显式数字（哪怕就是 `1`）始终优先；控件里的「自动」和删掉 `people` 参数同义。
 > 落地细节见 §8.1，还没做的部分见 §8.2。
 
 ---
@@ -366,15 +369,15 @@ draw call：任何人数下 = 一具身体（共用桶，`people-budget.test.ts`
 | 预算：几具放得下、描边留不留 | `creature/people-budget.ts` | `test/people-budget.test.ts` |
 | 主线接线：主身体换成跟踪器的那个人；"有人"看任何一具身体；多具时全景、取景框住最宽的跨度与最高的那一具 | `main.ts`、`stage/stage.ts` 的 `setGroup(width, height)` | `npm run check` |
 | 调速器第 7 级 `people`：只留主身体 | `shell/governor.ts`、`governor-wire.ts` | `test/governor{,-wire}.test.ts` |
-| `?people=1\|2\|3`、控件「人数」· N（重载）、HUD 的 people 几行、小屏画其余的人 | `shell/kiosk.ts`、`ui/control-table.ts`、`ui/i18n.ts`、`shell/hud.ts`、`ui/preview.ts` | `people-flag` / `people-hud` / `control-table` |
+| `?people=auto\|1\|2\|3`、控件「人数」· N（重载）、HUD 的 people 几行、小屏画其余的人 | `shell/kiosk.ts`、`ui/control-table.ts`、`ui/i18n.ts`、`shell/hud.ts`、`ui/preview.ts` | `people-flag` / `people-hud` / `control-table` |
 | 工作台 `/dev/people.html`：六个合成场景、轨迹时间线、舞台俯视、门限 | `dev/people.{html,ts}`，目录里一行 | — |
 | 取证脚本（raw CDP）与合成假摄像头 | `scripts/people/{measure.ts,figures.py}` | — |
-| **自动探测**（2026-09-15，§6.3 修订）：背景定期抬一档 `numPoses` 看一眼，稳稳地被选中够久才真的升档，没等到 / 久没人坐退回来；升档时小屏下面出提示，桶容量开机按 `hardMax` 留够 | `core/src/people-probe.ts`（纯状态机）；接线在 `main.ts` 的 `peopleProbe` / `peopleCap` / `liveCap`；`flags.peopleAuto` 在 `shell/kiosk.ts`；提示文案 `ui/i18n.ts` 的 `COPY.preview.peopleNoticed`，渲染在 `ui/preview.ts` | `core/test/people-probe.test.ts` 6 条（升档需要持续入选、擦肩不升档、顶格不再探、退档）；`app/test/people-flag.test.ts` 的 `peopleAuto` 一条；无头 Chrome `?demo=1`（不带 `?people=`）跑通一次真实升档，日志见下 |
+| **自动探测**（2026-09-17）：网页 / kiosk 默认自动；真摄像头先保留单人稳定期，之后只在可见、未降级、帧预算有余量时降频并临时把 `numPoses` 抬到 `hardMax`；一扇窗可直接 1→3，卡顿就立即收回并退避；不稳定的人不入画，久不在场一次收回到已证明人数；显式 1/2/3 优先。单人快速横移让 tracker 短暂失配时，只有检测器仍确实只返回一人，主通道才受限地退回 `latest`，不冻结也不在多人间乱跳 | `core/src/people-probe.ts`（纯状态机）；`capture/people-probe-runtime.ts`（可见人数、稳定主身份、受限单人回退、预算与探测节拍）；`capture/cadence.ts`（worker / 主线程降级共用节拍）；`main.ts` 的 `peopleProbe` / `peopleCap` / `liveCap`；`flags.peopleAuto`；控件新增 `auto`；桶容量开机按 `hardMax` 留够 | `people-probe.test.ts` 12 条；`people-probe-runtime.test.ts` 5 条；`cadence.test.ts` 2 条钉住两条推理路径；URL / 控件 / 推理时钟另有守卫。确认到 3 不代表预算能画 3 具；**真摄像头未测** |
 | **多人推理时钟**（2026-09-17）：tracker 的出生/丢失/换人和自动探测的确认只在 `inferredAt` 变大时推进；没有实现该字段的 Capture 退到 `RawPose.t`。主线每帧只读一次 `latest()`，避免同一 rAF 拿到不同快照 | `capture/inference-clock.ts`（纯函数）+ `main.ts`；相遇清零同时清 cursor | `app/test/people-inference.test.ts`：同一份结果在 120Hz 被读 3 秒，轨迹仍是 tentative、探测仍在 level 1；真实 30Hz 新结果才按 0.3s / 1.2s 门限推进；重复、倒退、NaN 时刻不 throw |
 | **运行中人数重配置**（2026-09-17）：`setOptions({ numPoses })` 只能串行，连续改目标时只追最后一个；不再在发送前乐观地把目标写成已生效，也不再吞掉失败 | `capture/pose-protocol.ts` 统一 request/ack；`pose-worker.ts` 串行队列；`webcam.ts` 的 worker 和主线程降级路径同样按 applied/desired/in-flight 分层 | `app/test/people-reconfigure.test.ts`：不并发重建、中间值被取代有回执、失败同值可重试、旧 ack 不覆盖新目标、stop 使旧回调失效；**真摄像头快速 1→3→1 未测** |
 
-**默认值本身：网页和现场都还是 1。** 推理那张表（§1.2）仍然没跑，按 §6.3 原来的裁定，证据之前不改
-——自动探测改变的是**运行中**会不会升到 2、3，不是这个默认值。
+**自动是默认策略，1 是默认稳态起点。** 推理那张表（§1.2）仍然没跑，所以没有把
+`defaultCap` / `defaultCapKiosk` 直接改成长期 2 人档；而是用有界的满档发现窗来自动决定。
 
 **推理证据不能按渲染帧重复计时。** 2026-09-17 复核主线时发现，`latestAll()` 的缓存结果原来在
 每个 rAF 都会重喂 tracker，`stepProbe()` 也拿渲染 `dt` 累计；30Hz 推理放在 120Hz 屏上，出生和确认
@@ -383,13 +386,19 @@ draw call：任何人数下 = 一具身体（共用桶，`people-budget.test.ts`
 PEOPLE tuning，也没有改变正常 30Hz 下的证据时长。
 
 **探测常数怎么定的**（`tuning.ts` 的 `PEOPLE`，都没有实测支撑，是工程判断，不是量出来的数）：
-`probeIntervalSeconds=12`（稳态时多久探一次：太勤会撞上 §1.2 的检测器成本，太懒等于"过一会儿"变成"很久"）、
+`probeInitialDelaySeconds=3`（启动最重的几秒只跑单人档）、
+`probeIntervalSeconds=12`（第一扇只等上面的稳定期；稳态时多久再探一次，太勤会撞上 §1.2 的检测器成本）、
 `probeWindowSeconds=3.0`（一扇窗口要盖住"转正 0.3s + 持续入选 1.2s"再留抖动余量）、
+`probeInferenceHz=15`（窗口里把最贵的单人画面 + 三人档调用数减半，66.7ms 仍没有超过姿态插值 70ms 上限）、
 `probeConfirmSeconds=1.2`（转正之后还要连续拿到身体多久才算数，直接回应 §0 第 2 条"路人擦肩而过"的顾虑）、
-`probeDeescalateSeconds=20`（升过档之后，身体空着多久收回这一档）、`probeHintSeconds=4`（提示留多久）。
+`probeDeescalateSeconds=20`（升过档之后，实际人数持续不足多久就一次收回到已证明值）、`probeHintSeconds=4`（提示留多久）。
 这几个数没有跑过 §10 那种无头取证；如果现场观察到升档太勤/太懒，先调这几个数，不要改判据本身。
 
-**[实测]** `npm run build && npx vite preview`，`/?theme=porcelain&seed=7&debug=1&demo=1&loading=0`
+15Hz 不是只写在调度器里的愿望：`capture/cadence.ts` 同时卡 worker `#send()` 与主线程降级 `#infer()`；
+稳定单人虽为以后多人预留 `instanceColor`，但全白值不变时不再把颜色缓冲逐桶、逐帧重复上传（`instance-color.test.ts`）。
+
+**[历史取证；当前构建不应复现]** 2026-09-15 的旧实现曾用 `npm run build && npx vite preview`，打开
+`/?theme=porcelain&seed=7&debug=1&demo=1&loading=0`
 （不带 `?people=`，回放走 `pose-jumpingjacks` 默认片段）。约 12 秒后控制台打出
 `[people] 探测把上限确认到 2`，HUD 的 `people` 行从 `0/1 人 · 身体上限 1` 变成
 `2/2 人 · 身体上限 2 · 描边让位`，画面上主身体旁边长出一具更淡的伴随身体。
@@ -442,8 +451,8 @@ retreat 回放的那几秒）探测完全不动，`peopleCap` 停在探测开始
 7. **主身体交接时颜色一帧切**：接班的伴随身体从差异色一帧变回原色、拿回描边。
 8. `companions.ts` 没有 node 单测（它只依赖 core，测得起）：交接、`retire`、`reacquired` 清状态各一条。
 9. 舞台跟随 docs/52（拖动、转视角、拽零件）：计划写好了，一行没写。
-10. **自动探测的常数没有实测**（§6.3 修订）：`probeIntervalSeconds` / `probeWindowSeconds` /
-    `probeConfirmSeconds` / `probeDeescalateSeconds` 都是工程判断，不是像 §1.2 那样量出来的数；
+10. **自动探测的常数没有实测**（§6.3，2026-09-17）：`probeInitialDelaySeconds` / `probeIntervalSeconds` /
+    `probeWindowSeconds` / `probeInferenceHz` / `probeConfirmSeconds` / `probeDeescalateSeconds` 都是工程判断，不是像 §1.2 那样量出来的数；
     §1.2 的推理表如果跑出来，这几个数也该跟着重新过一遍（比如检测器代价如果比预想的高，
     `probeIntervalSeconds` 该更大）。
 11. **探测升到 3 不解除第 2 条那个 LOD 缺口**：`peopleCap` 可以被探测确认到 3，但
@@ -451,10 +460,10 @@ retreat 回放的那几秒）探测完全不动，`peopleCap` 停在探测开始
     "这一次是探测升上去的"而放宽。也就是说三个人一起站到摄像头前，网页版仍然可能只给两具身体
     （和 §5.3 表里"忒修斯开着 / 关着都放不下第三具"是同一条限制），第 2 条的 LOD 做完之前，
     这不是探测这条线能单独解决的事。
-12. **探测在真摄像头前的升档没有跑无头取证**：§6.3 修订那条 [实测] 用的是 `?demo=1` 的合成第二人
-    （回放调用 `capture.setPeople()` 会自己合成一个），验证的是"确认之后预算 / 桶 / 提示这条链接对了"；
-    真的有第二个人站到摄像头前、探测把 `numPoses` 抬高之后 MediaPipe 会不会在这台机器上按时给出
-    第二份姿态（§1.2 讨论的检测器重跑代价），这一版没有另开一次真人取证去量。
+12. **当前有预算闸的满档探测没有真摄像头验收**：上面的历史取证用的是 `?demo=1` 的合成人，后来也正是它
+    暴露了“回放不该参与自动探测”的回归；当前主线用 `cameraOn` 明确挡住回放，所以那次结果不能证明
+    现在的 1→2 / 1→3。真的有两、三个人站到摄像头前、`numPoses` 运行中切到 3 之后 MediaPipe 会不会
+    按时给出多份姿态，以及切回 1 的延迟和抖动，这一版都还没有真人取证。
 
 ## 9 · 先红后绿
 
@@ -479,8 +488,8 @@ retreat 回放的那几秒）探测完全不动，`peopleCap` 停在探测开始
 | M14 | 差异色永远不是白色 | 同上 | 差异色 | 绿 |
 | M15 | 两具时描边让位 | `creature/people-budget.ts` | 每个物种 × 忒修斯开关 × 人数不越预算；两具时描边一定让位 | 绿 |
 | M16 | 忒修斯开着取被保证的上界 | 同上 | 两具时描边一定让位 | 绿 |
-| M17 | `?people=` 只认 1..hardMax | `shell/kiosk.ts` | `?people=` 认字 | 绿 |
-| M18 | 控件默认值写成删除 | `ui/control-table.ts` | 控件「人数」读回 | 绿 |
+| M17 | `?people=` 只认 auto 或 1..hardMax；坏值告警后按 auto | `shell/kiosk.ts` | `?people=` 认字 | 绿 |
+| M18 | 只有 auto 写成删除；固定 1/2/3 全保留 | `ui/control-table.ts` | 控件「人数」读回 | 绿 |
 | M19 | 单人时 worker 消息没有 `others` | `capture/pose-worker.ts` | 单人那条路 | 绿 |
 | M20 | HUD：满员的理由 | `shell/hud.ts` | people 行 | 绿 |
 | M21 | 调速器阶梯末尾的 `people` | `shell/governor.ts` | 调速器接线（2 条）；阶梯顺序 | 绿 |

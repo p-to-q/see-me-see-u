@@ -715,13 +715,14 @@ export const COPY = {
     },
 
     /**
-     * 人数（docs/50）。和取景同一组。说明写的是**台上会发生什么**：
-     * 多一个人进画就多一具身体；超过的人没有身体。不写"预算"—— 那是我们的事。
+     * 人数（docs/50）。和取景同一组。说明只承诺会识别 / 跟踪到多少人；第三具身体仍受几何预算约束，
+     * 所以不能在这里写成“三个人、各一具”。
      */
     people: {
-      1: { name: bi('一个人', 'One'), note: bi('只跟着离得最近的那一个', 'Follows only the nearest one') },
+      auto: { name: bi('自动', 'Auto'), note: bi('自动识别一到三个人', 'Detects one to three people') },
+      1: { name: bi('一个人', 'One'), note: bi('只跟着检测到的一个人', 'Tracks one detected person') },
       2: { name: bi('两个人', 'Two'), note: bi('第二个人进画，就多一具身体', 'A second person gets a second body') },
-      3: { name: bi('三个人', 'Three'), note: bi('三个人，各一具', 'Three people, a body each') },
+      3: { name: bi('三个人', 'Three'), note: bi('最多跟着三个人', 'Tracks up to three people') },
     },
 
     /** 四个玩法（docs/16） */
@@ -773,7 +774,7 @@ export const COPY = {
       form: bi('下一个形体 · 回到弧线', 'Next form · back to arc'),
       scene: bi('下一套画面', 'Next scene'),
       framing: bi('取景：自动 · 全身 · 上半身', 'Framing: auto · full · upper'),
-      people: bi('人数：一 · 二 · 三', 'People: one · two · three'),
+      people: bi('人数：自动 · 一 · 二 · 三', 'People: auto · one · two · three'),
       act: bi('下一个玩法 · 回到弧线', 'Next act · back to arc'),
       vitality: bi('跟随延迟', 'Lag'),
       refine: bi('时域精化', 'Smoothing'),
