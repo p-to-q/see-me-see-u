@@ -65,6 +65,8 @@ export interface Entry {
   readonly started: Promise<void>;
   /** 展签真的立起来了。`?hall=1` 回来时是 false：选择页直接出现，但仍按"按过开始"那条路起步 */
   readonly shown: boolean;
+  /** PartLibrary 到货后填入物种数；null 保留未知短横。 */
+  setSpeciesCount(count: number | null): void;
 }
 
 /**
@@ -81,23 +83,6 @@ export function wantsEntry(flags: Flags): boolean {
  * 注意它**不阻塞 boot 的其余部分**：渲染器、资产、模型都在展签后面照常加载，
  * 所以按下「开始」时身体通常已经准备好了。await 的只有 `started`。
  */
-/**
- * 物种数是现读的。写死一个数迟早会漂 —— 海报那边已经因为这件事出过第 4 版
- * （`assets/brand/README.md` 的版次表）。读不到就不显示这一行：
- * 少一行元数据没人会注意，一个错的数字会。
- */
-let themeCount: number | null = null;
-fetch('/parts/parts.json')
-  .then((r) => (r.ok ? r.json() : null))
-  .then((j: { themes?: unknown[] } | null) => {
-    const n = Array.isArray(j?.themes) ? j.themes.length : 0;
-    if (!n) return;
-    themeCount = n;
-    const dd = document.querySelector('.sb-entry-meta [data-species]');
-    if (dd) dd.textContent = String(n);
-  })
-  .catch(() => { /* 拿不到就是不显示，不是错误 */ });
-
 /**
  * 巨题。按**空格**拆成两个 block，不靠 CSS 断行。
  *
@@ -135,7 +120,7 @@ export function mountEntry(flags: Flags): Entry | null {
   if (flags.hall) {
     const field = acquireRingField();
     field.play();
-    return { started: Promise.resolve(), shown: false };
+    return { started: Promise.resolve(), shown: false, setSpeciesCount() {} };
   }
 
   const layer = document.createElement('div');
@@ -180,6 +165,7 @@ export function mountEntry(flags: Flags): Entry | null {
    */
   const meta = document.createElement('dl');
   meta.className = 'sb-entry-meta';
+  let speciesValue: HTMLElement | null = null;
   const rows: [{ zh: string; en: string }, { zh: string; en: string } | 'species'][] = [
     [COPY.entry.metaYear, COPY.entry.metaYearV],
     [COPY.entry.metaForm, COPY.entry.metaFormV],
@@ -189,11 +175,12 @@ export function mountEntry(flags: Flags): Entry | null {
   for (const [k, v] of rows) {
     meta.append(biNode('dt', k, 'sb-label'));
     if (v === 'species') {
-      // 先占位，parts.json 到货再填（见文件顶部的 fetch）。
+      // 先占位，PartLibrary 到货后由 main.ts 填同一份索引里的数。
       // 占位是一条短横而不是 0 —— 0 是一个**错的数**，短横是"还不知道"。
       const dd = document.createElement('dd');
       dd.dataset.species = '';
-      dd.textContent = themeCount === null ? '—' : String(themeCount);
+      dd.textContent = '—';
+      speciesValue = dd;
       meta.append(dd);
     } else {
       meta.append(biNode('dd', v));
@@ -246,7 +233,14 @@ export function mountEntry(flags: Flags): Entry | null {
     }, { once: true });
   });
 
-  return { started, shown: true };
+  return {
+    started,
+    shown: true,
+    setSpeciesCount(count) {
+      if (speciesValue) speciesValue.textContent = typeof count === 'number' && Number.isInteger(count) && count > 0
+        ? String(count) : '—';
+    },
+  };
 }
 
 /**

@@ -44,6 +44,7 @@ import type { BodyInstance } from './creature/body.ts';
 import { createStage } from './stage/stage.ts';
 import { contactPoints, REFERENCE_POSE } from './stage/framing.ts';
 import { chooseTheme, themeFromUrl } from './choose/choose.ts';
+import { catalogFromIndex, catalogKnowsTheme } from './choose/catalog.ts';
 import { createFrameLoop } from './shell/safe-frame.ts';
 import { wireDegrade } from './shell/degrade-wire.ts';
 import { degradeTo, deviceLostAction, getDegradeState } from './shell/degrade.ts';
@@ -212,6 +213,10 @@ async function boot(): Promise<void> {
   // ── 3. 等资产（上面早就在跑了）──────────────────────────────────────────
   await libraryReady;
   if (library.usingFallback) console.warn('[main] 没有部件库，用程序化占位几何运行');
+  entry?.setSpeciesCount(library.usingFallback ? null : library.index.themes.length);
+  // PartLibrary 是这一页对 parts.json 的唯一所有者。选择页只拿这份轻量投影，
+  // 不再为条目 / 可穿戴计数重复下载、重复 JSON.parse。
+  const chooseCatalog = catalogFromIndex(library.index, !library.usingFallback);
 
   // ── 4. 采集与选主题**并行** ──────────────────────────────────────────────
   // 为什么并行：MediaPipe 的 wasm + 两个模型要好几秒。串行的话观众选完主题
@@ -250,13 +255,12 @@ async function boot(): Promise<void> {
   // 在这之前 `?theme=xenoo` 会直奔一个不存在的物种：没有名牌、没有自有件，
   // 画面上是一具借来的身体，而地址栏里写着那个拼错的名字（`?plan=quadrupd` 的同胞）。
   // 条目表读不到时**认**这个 id —— 和 `chooseTheme()` 同一条（没有资产也要能开发，ADR-4）。
-  const known = library.index.themes ?? [];
   if (theme && isVacantPosition(theme)) {
     // 只有现场会走到这里 —— 网页版在 boot 开头就送去护照那一枚章了。
     // 说法和下面那一条**必须不一样**：这一个不是"查无此人"，是"这里没有人"。
     console.warn(`[main] ?theme=${theme} 是一个故意空着的位置（docs/14 §2）—— 没有身体可装配，照常进选择页`);
     theme = null;
-  } else if (theme && known.length > 0 && !known.some((t) => t.id === theme)) {
+  } else if (theme && !catalogKnowsTheme(chooseCatalog, theme)) {
     console.warn(`[main] ?theme=${theme} 不在物种表里 —— 按没写过处理（进选择页）`);
     theme = null;
   }
@@ -276,6 +280,7 @@ async function boot(): Promise<void> {
     await new Promise<void>((done) => {
       void chooseTheme({
         onChoose: (id) => { theme = id; done(); },
+        catalog: chooseCatalog,
         seed: flags.seed ?? undefined,
         pose: waveOn ? () => captureForChoose?.latest() ?? null : undefined,
         onPass: () => cues.play('pass'),
