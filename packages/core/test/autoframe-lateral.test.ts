@@ -130,6 +130,31 @@ test('身后的人被认成主角（尺度一帧大 60%）：当成换人，停�
   assert.equal(last(s).why, 'follow', '新的人站稳之后没有跟过去');
 });
 
+test('远处检测尺度在两个身份之间来回跳：位置相同也不能攒满换人确认时间', () => {
+  const s0 = run(hold(3, () => at(0.5)));
+  const x0 = last(s0).x.x;
+  // x 故意相同：旧实现的 pending 只记 x，会把两种相差悬殊的尺度误认成
+  // “同一个新目标稳定了 0.5 秒”，随后在两个深度之间反复交接。
+  const s = run(hold(6, (i) => at(0.45, { s: i % 2 ? 0.3 : 0.8 })), {}, last(s0));
+  assert.ok(s.every((k) => k.why === 'hold-jump'),
+    `尺度仍在交替却发生了交接：${[...new Set(s.map((k) => k.why))]}`);
+  assert.ok(s.every((k) => Math.abs(k.x.x - x0) < 1e-6),
+    `尺度交替把身体从 ${x0.toFixed(3)} 拉到 ${Math.min(...s.map((k) => k.x.x)).toFixed(3)}`);
+});
+
+test('换人待确认期间一度出画或掉到低质量：回来后重新计满连续 0.5 秒', () => {
+  const s0 = run(hold(3, () => at(0.5)));
+  const candidate = () => at(0.45, { s: 0.8 });
+  const s = run([
+    ...hold(0.3, candidate),
+    ...hold(0.2, () => at(0.45, { s: 0.8, score: 0.58 })),
+    ...hold(0.3, candidate),
+  ], {}, last(s0));
+  assert.equal(last(s).why, 'hold-jump', '两段不足 0.5 秒的证据不该隔着坏帧相加');
+  const settled = run(hold(0.6, candidate), {}, last(s));
+  assert.equal(last(settled).why, 'follow', '回来后连续站稳 0.5 秒仍该正常交接');
+});
+
 test('跟丢：停 1 秒，然后回中线；人从另一边回来，全程每 16ms 的变化不超过上限', () => {
   const s = run([
     ...hold(2, () => at(0.3)),

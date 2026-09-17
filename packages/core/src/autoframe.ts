@@ -703,8 +703,9 @@ export interface LateralState {
   /** 最后一次被接受的根的画面横坐标与尺度（换人判断用）。NaN = 还没有 */
   accepted: number;
   scale: number;
-  /** 一帧跳得太远的那个新位置，和它稳定了多久 */
+  /** 一帧跳得太远的那个新位置与尺度，和这组身份证据稳定了多久 */
   pending: number;
+  pendingScale: number;
   pendingFor: number;
   /** 没有横向证据多久了（秒） */
   lost: number;
@@ -713,7 +714,8 @@ export interface LateralState {
 }
 
 export const LATERAL_REST: LateralState = {
-  x: { x: 0, v: 0 }, target: 0, accepted: NaN, scale: NaN, pending: NaN, pendingFor: 0, lost: 0, side: null, why: 'center',
+  x: { x: 0, v: 0 }, target: 0, accepted: NaN, scale: NaN,
+  pending: NaN, pendingScale: NaN, pendingFor: 0, lost: 0, side: null, why: 'center',
 };
 
 export interface LateralInput {
@@ -757,24 +759,26 @@ export function stepLateral(s: LateralState, input: LateralInput, dt: number): L
   const t = Number.isFinite(dt) && dt > 0 ? dt : 0;
   const ev = input.evidence;
   const aspect = input.aspect ?? 16 / 9;
-  let { target, accepted, scale, pending, pendingFor, lost } = s;
+  let { target, accepted, scale, pending, pendingScale, pendingFor, lost } = s;
   let why: LateralWhy;
   let goal: number;
   if (!input.enabled) {
-    target = 0; accepted = NaN; scale = NaN; pending = NaN; pendingFor = 0; lost = 0;
+    target = 0; accepted = NaN; scale = NaN; pending = NaN; pendingScale = NaN; pendingFor = 0; lost = 0;
     why = 'yield'; goal = 0;
   } else if (!ev || (!ev.side && !ev.trusted)) {
     // 没有证据，或者位置全靠外推、又不在任何一边外（被桌子整个挡住）：跟丢
     lost += t;
-    pending = NaN; pendingFor = 0;
+    pending = NaN; pendingScale = NaN; pendingFor = 0;
     if (lost >= T.lateralHoldSeconds) { target = 0; accepted = NaN; scale = NaN; why = 'center'; goal = 0; } else { why = 'hold-lost'; goal = NaN; }
   } else if (!ev.side && !ev.quality && input.cameraFraming) {
     // 判别条件 + 兜底：我们自己的质量读数不够，但摄像头确认在自己取景——
     // 信它更稳，回中线好过冻在一个低置信度的坐标上（见 LateralInput.cameraFraming 的注释）
     lost = 0;
-    target = 0; accepted = NaN; scale = NaN; why = 'center'; goal = 0;
+    target = 0; accepted = NaN; scale = NaN; pending = NaN; pendingScale = NaN; pendingFor = 0; why = 'center'; goal = 0;
   } else if (ev.side || !ev.quality) {
     lost = 0;
+    // 出画 / 坏光打断“同一组新身份连续稳定”的证据，回来后必须重新计时。
+    pending = NaN; pendingScale = NaN; pendingFor = 0;
     why = ev.side ? 'hold-edge' : 'hold-light';
     goal = NaN;
   } else {
@@ -783,12 +787,15 @@ export function stepLateral(s: LateralState, input: LateralInput, dt: number): L
       && (Math.abs(ev.x - accepted) > T.lateralJump || (Number.isFinite(scale) && Math.abs(ev.scale / scale - 1) > T.identityJump));
     let accept = !jumped;
     if (jumped) {
-      if (Number.isFinite(pending) && Math.abs(ev.x - pending) <= T.lateralJump) pendingFor += t;
-      else { pending = ev.x; pendingFor = 0; }
+      const samePending = Number.isFinite(pending) && Number.isFinite(pendingScale)
+        && Math.abs(ev.x - pending) <= T.lateralJump
+        && Math.abs(ev.scale / Math.max(PEOPLE.minScale, pendingScale) - 1) <= T.identityJump;
+      if (samePending) pendingFor += t;
+      else { pending = ev.x; pendingScale = ev.scale; pendingFor = 0; }
       accept = pendingFor >= T.lateralJumpConfirmSeconds;
     }
     if (accept) {
-      accepted = ev.x; scale = ev.scale; pending = NaN; pendingFor = 0;
+      accepted = ev.x; scale = ev.scale; pending = NaN; pendingScale = NaN; pendingFor = 0;
       target = imageToStageX(ev.x, ev.scale, aspect);
       why = 'follow'; goal = target;
     } else {
@@ -804,5 +811,5 @@ export function stepLateral(s: LateralState, input: LateralInput, dt: number): L
     range: Math.max(0, Number.isFinite(input.room) ? input.room : 0),
     maxSpeed: T.lateralMaxSpeed, lead: T.lateralLead, leadMax: T.lateralLeadMax, jitter: T.lateralJitter,
   });
-  return { x, target, accepted, scale, pending, pendingFor, lost, side: ev?.side ?? null, why };
+  return { x, target, accepted, scale, pending, pendingScale, pendingFor, lost, side: ev?.side ?? null, why };
 }
