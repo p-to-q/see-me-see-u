@@ -54,6 +54,7 @@ import { wireGovernor } from './shell/governor-wire.ts';
 import { createWarmPlan } from './stage/warm-plan.ts';
 import { createLongTaskCounter } from './shell/long-tasks.ts';
 import { createPoseClock } from './capture/pose-clock.ts';
+import { freshInference } from './capture/inference-clock.ts';
 import { showBootError } from './shell/boot-error.ts';
 import { createSlowLoop } from './slow/slow.ts';
 import { createVisitReporter } from './archive/visit.ts';
@@ -819,6 +820,8 @@ async function boot(): Promise<void> {
     shed: false,
     frame: null as PeopleFrame | null,
   } : null;
+  /** 多人状态机最后真正消费的推理时刻；渲染重复读缓存不能推进它。 */
+  let peopleInferenceAt = Number.NaN;
   const replanPeople = (): void => {
     if (!people) return;
     people.plan = planPeople(peopleCap, bodyFill(library.index, theme ?? '', shading, flags.theseus.on, library.rejected), shading);
@@ -905,6 +908,7 @@ async function boot(): Promise<void> {
       people.bodies.reset();
       people.primary = null;
       people.frame = null;
+      peopleInferenceAt = Number.NaN;
       creature.setCompanions([]);
       stage.setGroup(0, 0);
     }
@@ -992,7 +996,16 @@ async function boot(): Promise<void> {
     // 采集端手上最新的那一份 —— **原话**，小屏幕和读数吃它（它们的职责是说实话）
     // 多人（docs/50）：跟踪器给身份，"主身体"那个人的那一份才是 `live` —— 小屏、读数、取景、声音都跟着他。
     // 单人时 `people` 是 null，`live` 就是 `capture.latest()`，一个字都不变
-    const crowd = people ? people.tracker.update(capture.latestAll?.() ?? (capture.latest() ? [capture.latest()!] : []), dt) : null;
+    const latest = capture.latest();
+    const all = people ? (capture.latestAll?.() ?? (latest ? [latest] : [])) : null;
+    const poseAt = all?.[0]?.t;
+    const inference = people
+      ? freshInference(peopleInferenceAt, capture.inferredAt, poseAt, dt)
+      : null;
+    if (inference) peopleInferenceAt = inference.stamp;
+    const crowd = people
+      ? (inference ? people.tracker.update(all ?? [], inference.dt) : people.tracker.current)
+      : null;
     if (people) people.frame = crowd;
 
     // 自动探测（docs/50 §6.3 修订）：喂这一帧真的选中了几个人，结果影响**下一帧**的
@@ -1003,8 +1016,8 @@ async function boot(): Promise<void> {
     // 之后会**合成**另外几个人（`people-synth.ts`），那是给工作台 / 演示用的，不该在观众
     // 还没按「用我的摄像头」之前的默认画面里自己冒出来。这一条不加的话，展签之前的默认展示
     // 每隔 `probeIntervalSeconds` 就会凭空多出一两具合成的身体——2026-09-15 真人测出来的回归。
-    if (peopleProbe && people && cameraOn) {
-      const step = stepProbe(peopleProbe.state, { dt, selectedCount: crowd?.selected.length ?? 0 });
+    if (peopleProbe && people && cameraOn && inference) {
+      const step = stepProbe(peopleProbe.state, { dt: inference.dt, selectedCount: crowd?.selected.length ?? 0 });
       peopleProbe.state = step.state;
       // 活的上限（tracker.cap / numPoses）跟 target 走：探测窗口里它比 peopleCap 高一档，
       // 好让 tracker **内部**确认第二个人；这一步本身不会让任何一具身体被画出来（见下一段）。
@@ -1033,7 +1046,7 @@ async function boot(): Promise<void> {
     // 走原来那条路，一个字不变：直接信 `capture.latest()`，不需要几何身份。
     const live = people && crowd && peopleCap > 1
       ? (crowd.tracks.find((t) => t.id === crowd.primary && t.missing === 0)?.pose ?? null)
-      : capture.latest();
+      : latest;
     // 主身体的人丢了一阵又被认回来：姿态时钟和滤波器不许在"之前"和"之后"之间插值（docs/50 §2.4）——
     // 中间可能隔着一次换姿势，甚至是另一个人被认成了他。插过去的结果是一具摊在地上的星形（2026-09-14 无头取证撞到的）
     if (people && crowd?.tracks.some((t) => t.primary && t.reacquired)) {

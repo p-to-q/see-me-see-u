@@ -370,9 +370,16 @@ draw call：任何人数下 = 一具身体（共用桶，`people-budget.test.ts`
 | 工作台 `/dev/people.html`：六个合成场景、轨迹时间线、舞台俯视、门限 | `dev/people.{html,ts}`，目录里一行 | — |
 | 取证脚本（raw CDP）与合成假摄像头 | `scripts/people/{measure.ts,figures.py}` | — |
 | **自动探测**（2026-09-15，§6.3 修订）：背景定期抬一档 `numPoses` 看一眼，稳稳地被选中够久才真的升档，没等到 / 久没人坐退回来；升档时小屏下面出提示，桶容量开机按 `hardMax` 留够 | `core/src/people-probe.ts`（纯状态机）；接线在 `main.ts` 的 `peopleProbe` / `peopleCap` / `liveCap`；`flags.peopleAuto` 在 `shell/kiosk.ts`；提示文案 `ui/i18n.ts` 的 `COPY.preview.peopleNoticed`，渲染在 `ui/preview.ts` | `core/test/people-probe.test.ts` 6 条（升档需要持续入选、擦肩不升档、顶格不再探、退档）；`app/test/people-flag.test.ts` 的 `peopleAuto` 一条；无头 Chrome `?demo=1`（不带 `?people=`）跑通一次真实升档，日志见下 |
+| **多人推理时钟**（2026-09-17）：tracker 的出生/丢失/换人和自动探测的确认只在 `inferredAt` 变大时推进；没有实现该字段的 Capture 退到 `RawPose.t`。主线每帧只读一次 `latest()`，避免同一 rAF 拿到不同快照 | `capture/inference-clock.ts`（纯函数）+ `main.ts`；相遇清零同时清 cursor | `app/test/people-inference.test.ts`：同一份结果在 120Hz 被读 3 秒，轨迹仍是 tentative、探测仍在 level 1；真实 30Hz 新结果才按 0.3s / 1.2s 门限推进；重复、倒退、NaN 时刻不 throw |
 
 **默认值本身：网页和现场都还是 1。** 推理那张表（§1.2）仍然没跑，按 §6.3 原来的裁定，证据之前不改
 ——自动探测改变的是**运行中**会不会升到 2、3，不是这个默认值。
+
+**推理证据不能按渲染帧重复计时。** 2026-09-17 复核主线时发现，`latestAll()` 的缓存结果原来在
+每个 rAF 都会重喂 tracker，`stepProbe()` 也拿渲染 `dt` 累计；30Hz 推理放在 120Hz 屏上，出生和确认
+因此最多快四倍，推理停住时甚至能靠一份旧结果自己转正。现在两者共用采集端 `inferredAt` 判重并按相邻
+推理时刻算 `dt`；渲染仍然每帧读 tracker 的 `current`，所以画面刷新率不受影响。这个修复没有改任何
+PEOPLE tuning，也没有改变正常 30Hz 下的证据时长。
 
 **探测常数怎么定的**（`tuning.ts` 的 `PEOPLE`，都没有实测支撑，是工程判断，不是量出来的数）：
 `probeIntervalSeconds=12`（稳态时多久探一次：太勤会撞上 §1.2 的检测器成本，太懒等于"过一会儿"变成"很久"）、
