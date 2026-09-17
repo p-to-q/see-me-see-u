@@ -1,8 +1,10 @@
 /** 浏览器侧自动人数边界：稳定主身份、真实在场证据、性能预算与低频探测。 */
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { createPeopleTracker } from '../../core/src/people.ts';
-import { stepProbe, type ProbeState } from '../../core/src/people-probe.ts';
+import { createProbeState, stepProbe, type ProbeState } from '../../core/src/people-probe.ts';
 import { CAPTURE, PEOPLE } from '../../core/src/tuning.ts';
 import { person, WHOLE } from '../../core/test/framing-people.ts';
 import {
@@ -11,6 +13,7 @@ import {
 } from '../src/capture/people-probe-runtime.ts';
 
 const DT = 1 / 30;
+const MAIN = readFileSync(fileURLToPath(new URL('../src/main.ts', import.meta.url)), 'utf8');
 const probing = (): ProbeState => ({
   level: 1, floor: 1, phase: 'probing', clock: 0, held: 0, topHeld: 0,
   idleHeld: 0, hint: 0, hintLevel: 0,
@@ -91,6 +94,29 @@ test('单人优先预算：只有前台、无降级、无可见慢帧时才探�
   assert.equal(canRunPeopleProbe({ ...calm, governorLevel: 1 }), false);
   assert.equal(canRunPeopleProbe({ ...calm, frameMs: 30 }), false);
   assert.equal(canRunPeopleProbe({ ...calm, frameMs: Number.NaN }), false);
+});
+
+test('空场不开三人窗；首人稳定后才开始算低频发现倒计时', () => {
+  let state = createProbeState(1, 1);
+  const initialClock = state.clock;
+  for (let i = 0; i < Math.ceil(PEOPLE.probeIntervalSeconds * 2 / DT); i++) {
+    state = stepProbe(state, { dt: DT, selectedCount: 0, canProbe: false }).state;
+    assert.equal(state.phase, 'idle');
+    assert.equal(state.level, 1);
+  }
+  assert.equal(state.clock, initialClock, '没有人时不应在后台偷偷把倒计时走完');
+
+  let opened = false;
+  for (let i = 0; i < Math.ceil((PEOPLE.probeInitialDelaySeconds + 0.1) / DT); i++) {
+    const step = stepProbe(state, { dt: DT, selectedCount: 1, canProbe: true });
+    state = step.state;
+    opened ||= step.target === PEOPLE.hardMax;
+  }
+  assert.equal(opened, true, '首人稳定后仍要能发现后来的人');
+
+  assert.match(MAIN, /const visiblePeople = visibleSelectedCount\(crowd\)/);
+  assert.match(MAIN, /selectedCount:\s*visiblePeople/);
+  assert.match(MAIN, /active:\s*cameraOn\s*&&\s*visiblePeople\s*>\s*0/);
 });
 
 test('探测窗降频但不低于现有插值能平顺覆盖的频率', () => {

@@ -21,7 +21,7 @@ test('主线：tracker 与自动探测都只在 fresh inference 上推进', () =
   assert.doesNotMatch(MAIN, /tracker\.update\(capture\.latestAll/, 'tracker 仍在每个 rAF 重喂缓存结果');
   assert.match(MAIN, /stepProbe\([^]*dt:\s*inference\?\.dt\s*\?\?\s*0/,
     '自动探测没有使用真实推理间隔');
-  assert.match(MAIN, /selectedCount:\s*visibleSelectedCount\(crowd\)/,
+  assert.match(MAIN, /const visiblePeople = visibleSelectedCount\(crowd\)[^]*selectedCount:\s*visiblePeople/,
     '自动探测把 grace 里已经 missing 的 selected 轨迹也算成在场');
   assert.doesNotMatch(MAIN, /selectedCount:\s*crowd\?\.selected\.length/);
   assert.match(MAIN, /trackerOwnsChannel[^]*trackedPrimaryOrSingleFallback\(crowd,\s*latest,\s*detectedPeopleCount,\s*peopleCap\)/,

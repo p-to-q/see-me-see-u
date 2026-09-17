@@ -1047,13 +1047,15 @@ async function boot(): Promise<void> {
     // 每隔 `probeIntervalSeconds` 就会凭空多出一两具合成的身体——2026-09-15 真人测出来的回归。
     if (peopleProbe && people && shouldStepPeopleProbe(inference !== null, peopleProbe.state)) {
       const previousPhase = peopleProbe.state.phase;
+      // 空场已经用单人档做在场检测；没有任何可见已选轨迹时再开三人图，只会空烧重新检测的成本。
+      const visiblePeople = visibleSelectedCount(crowd);
       const step = stepProbe(peopleProbe.state, {
         // 只有新推理能推进人数证据；渲染帧只负责提示倒计时和及时撤掉超预算窗口。
         dt: inference?.dt ?? 0,
         uiDt: dt,
-        selectedCount: visibleSelectedCount(crowd),
+        selectedCount: visiblePeople,
         canProbe: canRunPeopleProbe({
-          active: cameraOn,
+          active: cameraOn && visiblePeople > 0,
           visible: document.visibilityState === 'visible',
           throttled: loop.stats.throttled,
           degraded: loop.stats.degraded !== null,
