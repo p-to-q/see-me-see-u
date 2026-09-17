@@ -49,6 +49,7 @@ import {
 import { describe, overallScore, toLandmark, type PoseIn, type PoseOut } from './pose-protocol.ts';
 import { applyCamFraming, readCamFraming, type CamFramingFlag, type CamFramingStatus, type TrackLike } from './cam-framing.ts';
 import { cadenceDue, mainThreadInferenceDue } from './cadence.ts';
+import { frameFlightTimedOut, ownsFrameFlight, settleFrameFlight, type FrameFlight } from './frame-flight.ts';
 import { createMaskDemand } from './mask-demand.ts';
 
 // 本地 wasm：打包进产物，现场断网也能起（Vite 把它们当静态资源发出去）
@@ -94,11 +95,6 @@ function poseModelSource(which: PoseModel): { local: string; cdn: string } {
   };
 }
 
-/**
- * 发出去的一帧这么久（毫秒）没回来 = 那一帧丢了（worker 被系统挂起、消息丢了）。
- * 不放 tuning.ts，理由同上：它是一道保险，不是一个观感旋钮。没有它，一次丢消息就是永久停滞。
- */
-const IN_FLIGHT_TIMEOUT_MS = 2000;
 /** worker 中途死了，最多重新拿几次。再死就是这台机器上 worker 不可靠：停在那儿，读数报停滞 */
 const WORKER_RETRIES = 2;
 
@@ -118,6 +114,8 @@ interface PoseEngine {
   requestNumPoses(numPoses: number): void;
   /** 首次慢回路需求才解析模型并建分割图；同一 worker 最多启动一次。 */
   requestSegmenter(): void;
+  /** 在途帧超时说明这个 worker 已不再可信；终止它，不往同一个堵塞队列继续塞帧。 */
+  retire(why: string): void;
   listen(fn: ((m: PoseEngineEvent) => void) | null): void;
 }
 
@@ -167,6 +165,7 @@ async function createPoseEngine(model: PoseModel, forget: () => void): Promise<P
   let optionsSequence = 0;
   let failedNumPoses: number | null = null;
   let segmenterRequested = false;
+  let retireEngine: (why: string) => void = () => {};
 
   const pumpOptions = (): void => {
     if (engine.dead || optionsRequest || desiredNumPoses === engine.numPoses || failedNumPoses === desiredNumPoses) return;
@@ -213,6 +212,7 @@ async function createPoseEngine(model: PoseModel, forget: () => void): Promise<P
         listener?.({ type: 'segmenter', ok: false, warning: `ImageSegmenter 未启用（慢回路会静默关掉）：${describe(error)}` });
       });
     },
+    retire(why) { retireEngine(why); },
     listen(fn) { listener = fn; },
   };
 
@@ -226,6 +226,7 @@ async function createPoseEngine(model: PoseModel, forget: () => void): Promise<P
       if (!ready) reject(new Error(why));
       else listener?.({ type: 'fail', stamp: Number.NaN, error: why });
     };
+    retireEngine = die;
     worker.onmessage = (ev: MessageEvent<PoseOut>) => {
       const m = ev.data;
       if (m.type === 'options-result') {
@@ -308,7 +309,7 @@ export class WebcamCapture implements Capture {
 
   // worker 那一条路的状态
   #engine: PoseEngine | null = null;
-  #inFlight = false;
+  #inFlight: FrameFlight = null;
   #sentAt = 0;
   #lastSent = -Infinity;
   #accepted = -Infinity;
@@ -479,7 +480,7 @@ export class WebcamCapture implements Capture {
     // worker 不关：它是整页共用的，下一次打开摄像头直接用（不再建图）。只是不再听它
     this.#engine?.listen(null);
     this.#engine = null;
-    this.#inFlight = false;
+    this.#inFlight = null;
     this.#firstResult = null;
     // 先让旧 setOptions 回调失效，再 close；否则它可能在下一次 start 后改新图的状态。
     this.#mainPeopleRequest = null;
@@ -594,7 +595,7 @@ export class WebcamCapture implements Capture {
     this.#engine = engine;
     this.backend = engine.backend;
     if (engine.warning) this.#error = engine.warning;
-    this.#inFlight = false;
+    this.#inFlight = null;
     // worker 是整页共用的：上一个 capture 可能把它改成了别的人数
     engine.listen((m) => this.#onEngine(m));
     engine.requestNumPoses(this.#people);
@@ -609,7 +610,6 @@ export class WebcamCapture implements Capture {
     } catch (e) {
       // 一帧炸了不许冒到帧循环外（AGENTS 不变量：帧循环里永不抛异常）
       this.#error = describe(e);
-      this.#inFlight = false;
     }
   };
 
@@ -618,9 +618,15 @@ export class WebcamCapture implements Capture {
     if (!engine) return;
     if (engine.dead) { this.#reacquire(); return; }
     const now = performance.now();
-    if (this.#inFlight) {
-      if (now - this.#sentAt < IN_FLIGHT_TIMEOUT_MS) return;
-      this.#inFlight = false;   // 那一帧丢了：不等了
+    if (this.#inFlight !== null) {
+      if (!frameFlightTimedOut(this.#inFlight, this.#sentAt, now, CAPTURE.workerFrameTimeoutMs)) return;
+      const timedOut = this.#inFlight;
+      this.#inFlight = null;
+      // detectForVideo 在 worker 里是同步的。向已经堵住的同一 worker 再发 B，
+      // A 若永远不回，就会每两秒多排一张 VideoFrame。退休整个引擎，走有上限的重拿。
+      engine.retire(`姿态 worker 帧 ${timedOut.toFixed(1)} 超时`);
+      this.#reacquire();
+      return;
     }
     if (this.video.readyState < 2) return;
     if (!cadenceDue(now, this.#lastSent, this.#cadence)) return;
@@ -638,36 +644,45 @@ export class WebcamCapture implements Capture {
       try { frame = new VideoFrame(this.video, { timestamp: Math.round(stamp * 1000) }); }
       catch { return; }   // 这一刻还拿不到一帧（尺寸为 0 之类）：下一帧再来
       const maskGeneration = this.#maskDemand.begin(engine.segmenterReady);
-      this.#inFlight = true;
+      this.#inFlight = stamp;
       this.#sentAt = now;
       try {
         engine.post({ type: 'frame', frame, stamp, aspect, maskGeneration }, [frame]);
       } catch (error) {
         try { frame.close(); } catch { /* 转移失败时所有权仍在主线程 */ }
         if (maskGeneration !== null) this.#maskDemand.settle(maskGeneration, false);
+        this.#inFlight = settleFrameFlight(this.#inFlight, stamp);
         throw error;
       }
       return;
     }
     // 没有 VideoFrame 的浏览器：ImageBitmap 也能转移，只是多一次异步
-    this.#inFlight = true;
+    this.#inFlight = stamp;
     this.#sentAt = now;
     void createImageBitmap(this.video).then((bmp) => {
-      if (!this.#running || this.#engine !== engine) { bmp.close(); this.#inFlight = false; return; }
+      if (!this.#running || this.#engine !== engine || !ownsFrameFlight(this.#inFlight, stamp)) {
+        bmp.close();
+        this.#inFlight = settleFrameFlight(this.#inFlight, stamp);
+        return;
+      }
       const maskGeneration = this.#maskDemand.begin(engine.segmenterReady);
       try {
         engine.post({ type: 'frame', frame: bmp, stamp, aspect, maskGeneration }, [bmp]);
       } catch (error) {
         try { bmp.close(); } catch { /* 转移失败时所有权仍在主线程 */ }
         if (maskGeneration !== null) this.#maskDemand.settle(maskGeneration, false);
+        this.#inFlight = settleFrameFlight(this.#inFlight, stamp);
         throw error;
       }
-    }).catch(() => { this.#inFlight = false; });
+    }).catch(() => { this.#inFlight = settleFrameFlight(this.#inFlight, stamp); });
   }
 
   #onEngine(m: PoseEngineEvent): void {
     if (m.type === 'pose') {
-      this.#inFlight = false;
+      // 超时后新帧已经在途时，旧帧的迟到回执既不能释放新帧，也不再写回旧姿态。
+      const owned = ownsFrameFlight(this.#inFlight, m.stamp);
+      this.#inFlight = settleFrameFlight(this.#inFlight, m.stamp);
+      if (!owned) return;
       if (!(m.stamp > this.#accepted)) return;
       this.#accepted = m.stamp;
       this.#frameAspect = cleanAspect(m.aspect);
@@ -695,7 +710,13 @@ export class WebcamCapture implements Capture {
     } else if (m.type === 'mask-fail') {
       this.#maskDemand.settle(m.generation, false);
     } else if (m.type === 'fail') {
-      this.#inFlight = false;
+      if (Number.isFinite(m.stamp)) {
+        if (!ownsFrameFlight(this.#inFlight, m.stamp)) return;
+        this.#inFlight = settleFrameFlight(this.#inFlight, m.stamp);
+      } else {
+        // worker 级别的死亡没有单帧 stamp；它已不可能再为当前帧回答。
+        this.#inFlight = null;
+      }
       this.#error = m.error;
     } else if (m.type === 'options-fail') {
       this.#error = m.error;
