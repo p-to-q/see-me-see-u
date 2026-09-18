@@ -482,14 +482,24 @@ export const THESEUS = {
    */
   coreHold: 0.6,
   /**
-   * 一场里那一次单手 release 的最远距离，按**当帧手骨长度**的倍数表达。
-   * 标准站姿手骨约 108mm，0.55 因而是约 59mm：足以看出手离开了腕部，
-   * 又不会像旧的 150mm 通用飞入那样把局部事件读成整条肢体散架。
-   *
-   * 用骨长比例而不是米：小孩、近处裁切回退和不同身材仍保持同一种语气；
-   * 0 = 只保留原位替换。时长不另立一个数，仍是 `MORPH.crossfade`。
+   * 可见脱离的完整产品预算。profile 只决定相对当前 socket 的附加位移，骨架本身仍逐帧实时；
+   * `unlockOverall` 按整条弧线比例表达，因此 90s / 180s 版本保留同一段落关系。
+   * 第一次脱离由策略固定为手；chance 只作用于这门语法已经建立之后的事件。
    */
-  handReleaseAlong: 0.55,
+  detachment: {
+    unlockOverall: { terminal: 0.11, segment: 0.28, core: 0.53 },
+    chance: { terminal: 0.5, segment: 0.32, core: 0.16 },
+    /** 两次脱离之间至少隔几次真正被接受的原位替换。 */
+    minAcceptedGap: 2,
+    /** 末端成本 1，肢段 / 核心成本 2；总预算 2，所以结构段与核心事件独占。 */
+    budget: 2,
+    /** 骨头件最远离开当帧骨长的比例；两端仍严格回到 socket。 */
+    along: { terminal: 0.55, segment: 0.30, core: 0.14 },
+    /** 世界 +Y 的小弧线，避免脚 / 小腿沿近水平骨轴贴地拖行；仍由逐件 floor clamp 兜底。 */
+    liftMeters: { terminal: 0.035, segment: 0.028, core: 0.018 },
+    /** 关节盖片没有单独骨长，沿“骨盆→该关节”方向最多移这么多米。 */
+    jointOffsetMeters: 0.05,
+  },
   /**
    * 人一走全部回到原件（§8）。false 之后第二个观众看到的是一具已经被换了一半的
    * 身体，而他没见过原件 —— 对他来说忒修斯之船从来没发生过，
@@ -512,8 +522,6 @@ export const MORPH = {
   crossfade: 1.2,
   /** 同时最多几个槽位在做换装动画，其余排队（避免"整个人炸开"） */
   maxConcurrentSwaps: 3,
-  /** 组装动画：新部件从骨头轴向外这么远吸附回位（米） */
-  assembleOffset: 0.15,
   /** 整具身体同 family 的概率 */
   sameFamilyChance: 0.8,
   /** tier 3 允许跨主题杂交的槽位数 */

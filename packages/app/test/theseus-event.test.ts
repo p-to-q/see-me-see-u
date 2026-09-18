@@ -13,10 +13,11 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import {
-  coreScale, envelope, graftCurve, handReleaseAlong, REPLACE_SECONDS, replaceMotionFor,
-  replaceRenders, shardAt, type ReplaceMotion,
+  coreScale, crossfadeRenders, detachmentDisplacement, detachmentEnvelope, envelope, graftCurve, REPLACE_SECONDS,
+  replaceRenders, resolveDetachmentPlan, shardAt,
 } from '../src/creature/replace-event.ts';
-import { assemble, type SlotRender } from '../src/creature/assemble.ts';
+import { IN_PLACE_DETACHMENT, type DetachmentPlan } from '../src/creature/detachment.ts';
+import { assemble, JOINT_CAPS, type SlotRender } from '../src/creature/assemble.ts';
 import { swapOneSlot } from '../src/creature/theseus-wire.ts';
 import { REFERENCE_POSE } from '../src/stage/framing.ts';
 import { ROSTER, isPublic } from '../../factory/recipes/roster.ts';
@@ -67,7 +68,7 @@ test('theseus 事件: 描边不断 —— 任何一刻都有一件 ≥ 0.8 倍�
   assert.equal(shards.length, THESEUS.shards, 't=0.25 时应当有墨屑正在散开');
 });
 
-test('theseus 事件: 缺省替换在插座上发生，坏进度也有限', () => {
+test('theseus 事件: 缺省替换与 remorph/graft 都在插座上发生，坏进度也有限', () => {
   const from = { partId: 'old', materialRole: 'secondary' as const };
   const to = { partId: 'new', materialRole: 'secondary' as const };
   for (const key of ['footL', 'handR', 'spine', 'joint'] as SlotKey[]) {
@@ -79,49 +80,79 @@ test('theseus 事件: 缺省替换在插座上发生，坏进度也有限', () =
       for (const r of incoming) {
         assert.equal(r.offset ?? 0, 0, `${key} t=${String(t)} 仍从插座外飞入`);
       }
+      for (const r of crossfadeRenders(key, from, to, t)) {
+        assert.equal(r.offset ?? 0, 0, `${key} remorph/graft t=${String(t)} 仍从插座外飞入`);
+      }
     }
   }
 });
 
-test('theseus 事件: 单手只离开再回接，非手请求在渲染边界降级', () => {
+test('theseus 事件: 全槽位 profile 只离开再回接，错误 profile 在渲染边界降级', () => {
   const from = { partId: 'old', materialRole: 'secondary' as const };
   const to = { partId: 'new', materialRole: 'secondary' as const };
-  const incoming = (key: SlotKey, t: number, motion: ReplaceMotion = 'hand-release') =>
-    replaceRenders(key, from, to, t, 1, motion).find((r) => r.partId === to.partId)!;
+  const terminal = { profile: 'terminal-release', result: 'transform' } as const;
+  const segment = { profile: 'segment-release', result: 'transform' } as const;
+  const core = { profile: 'core-release', result: 'transform' } as const;
+  const incoming = (key: SlotKey, t: number, plan: DetachmentPlan = terminal) =>
+    replaceRenders(key, from, to, t, 1, plan).find((r) => r.partId === to.partId)!;
 
-  assert.equal(incoming('handR', 0).along ?? 0, 0, '起点没有接在腕上');
-  assert.equal(incoming('handR', 1).along ?? 0, 0, '终点没有接回腕上');
-  assert.equal(incoming('handR', 0.5).along, handReleaseAlong(0.5), '中点没有走到最远');
-  assert.ok((incoming('handR', 0.5).along ?? 0) > 0, '手根本没有离开');
-  assert.equal(incoming('handL', 0.5, 'in-place').along ?? 0, 0, '原位手被 release 污染');
-  assert.equal(incoming('footL', 0.5).along ?? 0, 0, '脚接受了 release 请求');
-  assert.equal(incoming('spine', 0.5).along ?? 0, 0, '连接槽位接受了 release 请求');
-  assert.equal(replaceMotionFor('upperArmL', 'hand-release'), 'in-place', '整臂从渲染边界漏进来了');
+  for (const [key, plan] of [['handR', terminal], ['footL', terminal], ['foreArmL', segment], ['spine', core]] as const) {
+    assert.equal(incoming(key, 0, plan).along ?? 0, 0, `${key} 起点没有接在 socket`);
+    assert.equal(incoming(key, 1, plan).along ?? 0, 0, `${key} 终点没有接回 socket`);
+    assert.ok((incoming(key, 0.5, plan).along ?? 0) > 0, `${key} 根本没有离开`);
+    assert.ok((incoming(key, 0.5, plan).lift ?? 0) > 0, `${key} 没有离地弧线`);
+  }
+  assert.equal(incoming('handL', 0.5, IN_PLACE_DETACHMENT).along ?? 0, 0, '原位手被 release 污染');
+  assert.equal(resolveDetachmentPlan('spine', terminal).profile, 'in-place', '错误 profile 从渲染边界漏进来了');
+  assert.equal(resolveDetachmentPlan('joint', core).profile, 'in-place', '没有点名 cap 的 joint 计划漏进来了');
   const regular = replaceRenders('handR', from, to, 0.5);
-  const released = replaceRenders('handR', from, to, 0.5, 1, 'hand-release');
+  const released = replaceRenders('handR', from, to, 0.5, 1, terminal);
   assert.deepEqual(released.map((r) => r.partId), regular.map((r) => r.partId),
     'release 改了桶或实例集合，draw / 面数预算不再等价');
 
   for (const t of [Number.NaN, Infinity, -Infinity]) {
-    for (const r of replaceRenders('handR', from, to, t, 1, 'hand-release')) {
+    for (const r of replaceRenders('handR', from, to, t, 1, terminal)) {
       assert.ok(Number.isFinite(r.scale), `t=${String(t)} 产生非有限 scale`);
       assert.ok(Number.isFinite(r.along ?? 0), `t=${String(t)} 产生非有限 along`);
+      assert.ok(Number.isFinite(r.lift ?? 0), `t=${String(t)} 产生非有限 lift`);
     }
   }
 });
 
-test('theseus 事件: 单手 release 与既有 1.2 秒事件共用时钟，15/30/60/120Hz 都按时回接', () => {
+test('theseus 事件: 单个 joint cap 脱离，其余 12 处保持原位', () => {
+  const from = { partId: 'old', materialRole: 'secondary' as const };
+  const to = { partId: 'new', materialRole: 'secondary' as const };
+  const member = 'shoulderL';
+  const index = JOINT_CAPS.findIndex((cap) => cap.joint === member);
+  assert.ok(index >= 0);
+  const t = (index + THESEUS.jointWave / 2) / (JOINT_CAPS.length - 1 + THESEUS.jointWave);
+  const renders = replaceRenders('joint', from, to, t, 1, {
+    profile: 'segment-release', result: 'transform', member,
+  });
+  const moved = renders.filter((r) => (r.offset ?? 0) > 0 || (r.lift ?? 0) > 0);
+  assert.ok(moved.length > 0, '目标 cap 没有离开');
+  for (const r of moved) assert.deepEqual(r.caps, [index, index + 1], '别的 cap 跟着一起脱离');
+});
+
+test('theseus 事件: 全 profile 与既有 1.2 秒事件共用时钟，15/30/60/120Hz 都按时回接', () => {
   for (const hz of [15, 30, 60, 120]) {
     const frames = Math.ceil(REPLACE_SECONDS * hz);
     let peak = 0;
     for (let frame = 0; frame < frames; frame++) {
-      peak = Math.max(peak, handReleaseAlong(frame / (REPLACE_SECONDS * hz)));
+      peak = Math.max(peak, detachmentEnvelope(frame / (REPLACE_SECONDS * hz)));
     }
     const elapsed = frames / hz;
     assert.ok(elapsed >= REPLACE_SECONDS && elapsed < REPLACE_SECONDS + 1 / hz + 1e-12,
       `${hz}Hz 在 ${elapsed}s 才结束`);
-    assert.ok(Math.abs(peak - handReleaseAlong(0.5)) < 1e-12, `${hz}Hz 没走到同一个峰值`);
-    assert.equal(handReleaseAlong(frames / (REPLACE_SECONDS * hz)), 0, `${hz}Hz 结束时没接回去`);
+    assert.ok(Math.abs(peak - detachmentEnvelope(0.5)) < 1e-12, `${hz}Hz 没走到同一个峰值`);
+    assert.equal(detachmentEnvelope(frames / (REPLACE_SECONDS * hz)), 0, `${hz}Hz 结束时没接回去`);
+    for (const [key, plan] of [
+      ['handL', { profile: 'terminal-release', result: 'transform' }],
+      ['foreArmL', { profile: 'segment-release', result: 'transform' }],
+      ['spine', { profile: 'core-release', result: 'transform' }],
+    ] as const) {
+      assert.equal(detachmentDisplacement(key, frames / (REPLACE_SECONDS * hz), plan).along, 0, `${hz}Hz ${key} 没回 socket`);
+    }
   }
 });
 
@@ -210,7 +241,7 @@ test('theseus 借件（真数据）: 否掉的件、clearance 挡掉的家族一
 // ── 5 ────────────────────────────────────────────────────────────────────────
 test('theseus 事件: 碎开和替换音是同一帧 —— replace 当帧开始、不排队', () => {
   const main = read('../src/main.ts');
-  const block = main.slice(main.indexOf('swapped.set('), main.indexOf('── 分档'));
+  const block = main.slice(main.indexOf('const requested = planDetachment'), main.indexOf('── 分档'));
   const iReplace = block.indexOf('creature.replace(');
   const iSound = block.indexOf('sound.tierUp(');
   assert.ok(iReplace >= 0, '替换那一段不再调 creature.replace() —— 又退回交叉淡入了');

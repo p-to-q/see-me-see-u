@@ -54,6 +54,15 @@ export interface FrameFit {
   aimY: number;
 }
 
+export type ContactPoint = [x: number, z: number, lift: number];
+export type ContactBoneFilter = (bone: BoneId) => boolean;
+
+const sameSocket = (a: Vec3, b: Vec3): boolean => (
+  Math.abs(a[0] - b[0]) <= 1e-8
+  && Math.abs(a[1] - b[1]) <= 1e-8
+  && Math.abs(a[2] - b[2]) <= 1e-8
+);
+
 export const FRAMING = FRAMING_TUNING;
 
 
@@ -199,17 +208,25 @@ export function contactPoints(
   sk: Skeleton | null | undefined,
   n = 4,
   maxLift = 0.22,
-): Array<[number, number, number]> {
+  excludeBone?: ContactBoneFilter,
+): ContactPoint[] {
   if (!sk || !sk.bones?.length) return [];
+  // 一个 socket 同时是两根骨的端点。只跳过被脱离的 bone 不够：footL.p0 还会从 shinL.p1
+  // 重新混进来。先收集该可见件覆盖的端点，再从所有候选里按位置排除，另一只脚/其余支点照常保留。
+  const excluded: Vec3[] = [];
+  if (excludeBone) {
+    for (const b of sk.bones) if (b && excludeBone(b.id)) excluded.push(b.p0, b.p1);
+  }
   const pts: Vec3[] = [];
   for (const b of sk.bones) {
     for (const p of [b.p0, b.p1]) {
-      if (p && Number.isFinite(p[0]) && Number.isFinite(p[1]) && Number.isFinite(p[2])) pts.push(p);
+      if (p && Number.isFinite(p[0]) && Number.isFinite(p[1]) && Number.isFinite(p[2])
+        && !excluded.some((q) => sameSocket(p, q))) pts.push(p);
     }
   }
   if (pts.length < 4) return [];
   pts.sort((a, b) => a[1] - b[1]);
-  const out: Array<[number, number, number]> = [];
+  const out: ContactPoint[] = [];
   /**
    * "地面"取 **y = 0**，不取这具身体自己的最低点。
    *

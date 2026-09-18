@@ -23,7 +23,7 @@
 import * as THREE from 'three/webgpu';
 import { harmonize } from '../../../core/src/palette.ts';
 import { ALL_SLOT_KEYS } from '../../../core/src/slots.ts';
-import { BUDGET, MATERIAL, MORPH, TIME } from '../../../core/src/tuning.ts';
+import { BUDGET, MATERIAL, MORPH, THESEUS, TIME } from '../../../core/src/tuning.ts';
 import type {
   Genome, MaterialDef, MaterialRole, PartMeta, Presence, Skeleton, Slot, SlotKey, SlotPick, Tier,
 } from '../../../core/src/types.ts';
@@ -38,9 +38,12 @@ import {
 import { ARC_OFF, arcWeights, rgbToHsl, type ArcWeights } from '../stage/look.ts';
 import { surfaceFor, type SurfaceSpec } from './surface.ts';
 import {
-  crossfadeRenders, graftCurve, REPLACE_SECONDS, replaceMotionFor, replaceRenders,
-  type ReplaceMotion,
+  crossfadeRenders, graftCurve, REPLACE_SECONDS, replaceRenders, resolveDetachmentPlan,
 } from './replace-event.ts';
+import {
+  detachmentCost, IN_PLACE_DETACHMENT, sameDetachment,
+  type DetachmentPlan, type TransitionReceipt,
+} from './detachment.ts';
 import { passesOf, swapCeiling } from './swap-budget.ts';
 
 export interface CreatureStats {
@@ -75,7 +78,11 @@ export interface Creature {
    * **当帧就开始**，不排队 —— 替换音在同一帧响，排进队列就对不上了。
    * 形状全在 `replace-event.ts`，这里只管把它接进帧循环。
    */
-  replace(slot: SlotKey, pick: SlotPick, motion?: ReplaceMotion): ReplaceMotion | null;
+  replace(slot: SlotKey, pick: SlotPick, plan?: DetachmentPlan): TransitionReceipt | null;
+  /** 主身份换人时只撤掉旧人的位移；保留当前交接进度，不能从半空瞬间跳成满尺寸。 */
+  settleDetachment(): void;
+  /** 某个可见骨段正在离开 socket；舞台只收掉对应承重点，不殃及仍在承重的肢体。 */
+  isDetached(slot: SlotKey): boolean;
   /**
    * 换着色语言。控件条的「描边」那一项走这里 —— 它要重建全部材质与桶，
    * 所以只该被一次按键调用，不该每帧调。相同值是 no-op。
@@ -172,7 +179,7 @@ interface Swap {
   /** 'replace' = 忒修斯那一下（碎开 + 组装），缺省 = 交叉淡入 */
   kind?: 'replace';
   /** 只有主身体消费；伴随身体对同一替换始终保持原位。 */
-  motion?: ReplaceMotion;
+  detachment?: DetachmentPlan;
 }
 
 interface MeshEntry {
@@ -451,7 +458,34 @@ export function createCreature(opt: CreatureOptions): Creature {
     return false;
   }
 
+  function activeDetachmentCost(): number {
+    let cost = 0;
+    for (const s of active.values()) if (s.kind === 'replace' && s.detachment) cost += detachmentCost(s.detachment);
+    return cost;
+  }
+
+  function exclusiveDetachmentActive(): boolean {
+    for (const s of active.values()) {
+      const profile = s.kind === 'replace' ? s.detachment?.profile : undefined;
+      if (profile === 'segment-release' || profile === 'core-release') return true;
+    }
+    return false;
+  }
+
+  function detachmentConflicts(slot: SlotKey, plan: DetachmentPlan): boolean {
+    if (plan.profile === 'in-place') return false;
+    // 两只脚同时离开会把承重读法整个拿走；肢段/core 的全交接独占由上面的 owner 另守。
+    if (slot !== 'footL' && slot !== 'footR') return false;
+    for (const key of ['footL', 'footR'] as const) {
+      const current = active.get(key)?.detachment;
+      if (current && current.profile !== 'in-place') return true;
+    }
+    return false;
+  }
+
   function pumpQueue() {
+    // 肢段/核心是一次完整的构图标点，不只对其它 detachment 独占：在它回接前，普通 remorph/graft 也不抢读法。
+    if (exclusiveDetachmentActive()) return;
     // 没有替换在飞时给它空着一个名额；替换在飞时名额就是它自己占着的那一个
     const c = ceiling();
     const reserve = replacing() ? 0 : Math.min(c - 1, Math.max(0, Math.floor(opt.replaceSlots ?? 0)));
@@ -550,7 +584,7 @@ export function createCreature(opt: CreatureOptions): Creature {
         const waiting = s ? undefined : queuedSwap(key);
         const pick = waiting ? waiting.from : genome.slots?.[key];
         if (s?.kind === 'replace') {
-          render[key] = replaceRenders(key, s.from, s.to, s.t, pres, s.motion);
+          render[key] = replaceRenders(key, s.from, s.to, s.t, pres, s.detachment);
         } else if (s) {
           // 旧件缩没、新件走 graft 的组装曲线；关节那一格是一道波（`replace-event.ts`）
           render[key] = crossfadeRenders(key, s.from, s.to, s.t, pres);
@@ -736,36 +770,51 @@ export function createCreature(opt: CreatureOptions): Creature {
       enqueue({ key: slot, from: prev, to: pick, t: 0 }, true);
     },
 
-    replace(slot, pick, requested = 'in-place') {
+    replace(slot, pick, requested = IN_PLACE_DETACHMENT) {
       if (!genome?.slots || !pick?.partId) return null;
       const running = active.get(slot);
-      // 这一格正在交接：从**正在装上的那一件**碎起，不是从更早那一件
-      const from = running ? running.to : genome.slots[slot] ?? null;
+      // 旧人的脱离或上一件交接尚未结束时，不把它当场掐掉再从中间开一件。
+      if (running) return null;
+      const from = genome.slots[slot] ?? null;
       if (from?.partId === pick.partId) return null;
-      const motion = replaceMotionFor(slot, requested);
+      // 替换必须当帧开始才配得上同帧声音；没有名额时宁可明确拒绝，也不能驱逐半空中的旧事件。
+      if (active.size >= ceiling()) return null;
+      if (exclusiveDetachmentActive()) return null;
+
+      const validated = resolveDetachmentPlan(slot, requested);
+      let applied = validated;
+      let reason: TransitionReceipt['reason'] = sameDetachment(validated, requested) ? 'accepted' : 'invalid-profile';
+      const budget = Math.max(0, Math.floor(THESEUS.detachment.budget));
+      const structural = applied.profile === 'segment-release' || applied.profile === 'core-release';
+      if (structural && active.size > 0) {
+        applied = IN_PLACE_DETACHMENT;
+        reason = 'detachment-conflict';
+      } else if (detachmentCost(applied) + activeDetachmentCost() > budget) {
+        applied = IN_PLACE_DETACHMENT;
+        reason = 'detachment-budget';
+      } else if (detachmentConflicts(slot, applied)) {
+        applied = IN_PLACE_DETACHMENT;
+        reason = 'detachment-conflict';
+      }
       genome = { ...genome, slots: { ...genome.slots, [slot]: pick } };
       const i = queued.findIndex((q) => q.key === slot);
       if (i >= 0) queued.splice(i, 1);
-      // 不走 `enqueue`：队列满（升档那一批正在交叉淡入）时它会等，而替换音不等。
-      // 它的名额是 `replaceSlots` 事先空出来的，所以正常情况下这里不会满。
-      // 满了只可能是帧卡顿：排期器按弧线秒数发件，这里的动画吃的是被 `TIME.dtMax` 钳过的 dt，
-      // 上一件替换就还差一点没演完。那就让**最快演完的那一件**当帧收尾（先挑替换、再挑交叉淡入）——
-      // genome 里早就是它的新件，收尾只是少画最后几帧，而不是越过预算叠上去。
-      if (!running) {
-        while (active.size >= ceiling()) {
-          let victim: SlotKey | null = null;
-          let best = -Infinity;
-          for (const [k, s] of active) {
-            const score = (s.kind === 'replace' ? 2 : 0) + s.t;
-            if (score > best) { best = score; victim = k; }
-          }
-          if (victim === null) break;
-          active.delete(victim);
-        }
-      }
-      active.set(slot, { key: slot, from, to: pick, t: 0, kind: 'replace', motion });
+      active.set(slot, { key: slot, from, to: pick, t: 0, kind: 'replace', detachment: applied });
       void library.preload([pick.partId]);
-      return motion;
+      return { slot, requested, applied, degraded: !sameDetachment(requested, applied), reason };
+    },
+
+    settleDetachment() {
+      for (const s of active.values()) {
+        if (s.kind !== 'replace' || !s.detachment || s.detachment.profile === 'in-place') continue;
+        // 换主人的瞬间不能把半程事件删掉：那会让它从半空/半尺寸直接变成满尺寸目标件。
+        // 只撤可见位移，旧/新件仍按原来的 t 在 socket 上完成同一场交接。
+        s.detachment = IN_PLACE_DETACHMENT;
+      }
+    },
+    isDetached(slot) {
+      const plan = active.get(slot)?.detachment;
+      return plan !== undefined && plan.profile !== 'in-place';
     },
 
     setShading(id) {

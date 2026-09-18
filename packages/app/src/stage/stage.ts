@@ -47,7 +47,7 @@ import {
 } from './look.ts';
 import {
   boundsOfPlan, boundsOfSkeleton, contactPoints, lerpBounds, shotCamera, DEFAULT_BOUNDS,
-  type BodyBounds,
+  type BodyBounds, type ContactPoint,
 } from './framing.ts';
 import {
   resetShotIdentity as resetShotIdentityState, stepShot, SHOT_REST, type Shot, type ShotState, type VerticalMeasurement,
@@ -95,7 +95,8 @@ export interface Stage {
    * 不调也不会出画：换主题时舞台已经按该物种的 `bodyPlan` 摆好了取景，
    * 这个方法是用真人的高矮胖瘦去**细化**它。
    */
-  frame(skeleton: Skeleton | null): void;
+  /** 可传已过滤的落点；空数组只收掉接触 cue，取景仍照常读 skeleton。 */
+  frame(skeleton: Skeleton | null, contacts?: readonly ContactPoint[]): void;
   /**
    * 景别（docs/49 §落地）：全景（等身）或中景（上半身）。**每帧调都行**，同一个值不重启任何东西。
    * 走多久、跟不跟随由舞台自己按时间推（`core/src/autoframe.ts` 的 `stepShot`），不靠 CSS 或动画事件。
@@ -942,7 +943,7 @@ export function createStage(opt: StageOptions = {}): Stage {
       groupHeight = Number.isFinite(h) && h > 0 ? h : 0;
     },
 
-    frame(skeleton) {
+    frame(skeleton, contacts) {
       const b = boundsOfSkeleton(skeleton);
       // 多人（docs/50 §4.3）：画面至少框住整组身体 —— 最宽的跨度、最高的那一具（身体都站在 y = 0 上）。
       // 单人时两个数都是 0，这两行什么都不改
@@ -966,7 +967,7 @@ export function createStage(opt: StageOptions = {}): Stage {
       // 骨架本身不可信（b 为 null）才保持上一帧；骨架可信但**整具身体都离地**时
       // 必须把落点全部关掉 —— 那正好是"它跳起来了"，那一刻脚下就不该有接触阴影
       if (!b) return;
-      const feet = contactPoints(skeleton, STAGE.contactPoints, STAGE.contactLiftRange);
+      const feet = contacts ?? contactPoints(skeleton, STAGE.contactPoints, STAGE.contactLiftRange);
       let cx = 0;
       let cz = 0;
       for (let i = 0; i < uFeet.length; i++) {

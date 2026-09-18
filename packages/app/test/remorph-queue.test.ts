@@ -97,3 +97,78 @@ test('remorph 排队：未激活槽位保持旧件，不会新→旧→新闪回
   creature.dispose();
   library.dispose();
 });
+
+test('替换事务：容量满时不改 genome、不驱逐在途交接', { skip: !index }, () => {
+  const library = fakeLibrary(index!);
+  const creature = createCreature({ library, shading: 'toon', replaceSlots: 0 });
+  const from = makeGenome(11, 1 as Tier, index!, { theme: 'porcelain' });
+  const to = makeGenome(11, 2 as Tier, index!, { theme: 'porcelain' });
+  creature.remorph(from);
+  creature.pose(REFERENCE_POSE, ALIVE, 0);
+  creature.remorph(to);
+  creature.pose(REFERENCE_POSE, ALIVE, 0);
+  assert.equal(creature.stats.swapsActive, 2, '夹具没有填满描边交接容量');
+
+  const slot = 'handL' as const;
+  const before = creature.genome!.slots[slot];
+  const other = index!.parts.find((part) => part.slot === 'hand' && part.id !== before.partId)!;
+  const rejected = creature.replace(slot, { partId: other.id, materialRole: before.materialRole }, {
+    profile: 'terminal-release', result: 'transform',
+  });
+  assert.equal(rejected, null);
+  assert.deepEqual(creature.genome!.slots[slot], before, 'renderer 拒绝后 genome 已经偷偷提交');
+  assert.equal(creature.stats.swapsActive, 2, '新请求驱逐了原有 active swap');
+
+  creature.dispose();
+  library.dispose();
+});
+
+test('脱离事务：两脚不并发、结构段独占全部交接，主身份切换只撤位移不删事件', { skip: !index }, () => {
+  const library = fakeLibrary(index!);
+  const creature = createCreature({ library, shading: 'toon', replaceSlots: 1 });
+  const genome = makeGenome(11, 2 as Tier, index!, { theme: 'porcelain' });
+  creature.remorph(genome);
+  creature.pose(REFERENCE_POSE, ALIVE, 0);
+  const alternate = (slot: 'footL' | 'footR' | 'spine' | 'handL') => {
+    const current = creature.genome!.slots[slot];
+    const kind = slot.startsWith('foot') ? 'foot' : slot.startsWith('hand') ? 'hand' : 'spine';
+    const part = index!.parts.find((candidate) => candidate.slot === kind && candidate.id !== current.partId)!;
+    return { partId: part.id, materialRole: current.materialRole };
+  };
+  const terminal = { profile: 'terminal-release', result: 'transform' } as const;
+  const firstFoot = creature.replace('footL', alternate('footL'), terminal)!;
+  assert.equal(firstFoot.applied.profile, 'terminal-release');
+  assert.equal(creature.isDetached('footL'), true);
+  const secondFoot = creature.replace('footR', alternate('footR'), terminal)!;
+  assert.deepEqual([secondFoot.applied.profile, secondFoot.reason], ['in-place', 'detachment-conflict']);
+  const activeBeforeHandoff = creature.stats.swapsActive;
+  creature.settleDetachment();
+  assert.equal(creature.isDetached('footL'), false, '主身份交接后旧脚还在新人的 socket 上脱离');
+  assert.equal(creature.stats.swapsActive, activeBeforeHandoff,
+    '主身份交接直接删掉半程事件，会让零件从半空/半尺寸跳成满尺寸目标件');
+
+  for (let i = 0; i < 100; i++) creature.pose(REFERENCE_POSE, ALIVE, 1 / 60);
+
+  const plainHand = creature.replace('handL', alternate('handL'))!;
+  assert.equal(plainHand.applied.profile, 'in-place');
+  const blockedCore = creature.replace('spine', alternate('spine'), { profile: 'core-release', result: 'transform' })!;
+  assert.deepEqual([blockedCore.applied.profile, blockedCore.reason], ['in-place', 'detachment-conflict'],
+    '普通交接还在播时 core 仍然开始脱离');
+  for (let i = 0; i < 100; i++) creature.pose(REFERENCE_POSE, ALIVE, 1 / 60);
+
+  const core = creature.replace('spine', alternate('spine'), { profile: 'core-release', result: 'transform' })!;
+  assert.equal(core.applied.profile, 'core-release');
+  const handBefore = creature.genome!.slots.handL;
+  assert.equal(creature.replace('handL', alternate('handL'), terminal), null,
+    'core 回接前另一件仍能抢进同一构图');
+  assert.deepEqual(creature.genome!.slots.handL, handBefore, '被结构段拒绝的事件仍提前改了 genome');
+
+  const queuedTarget = makeGenome(29, 2 as Tier, index!, { theme: 'porcelain' });
+  creature.remorph(queuedTarget);
+  creature.pose(REFERENCE_POSE, ALIVE, 0);
+  assert.equal(creature.stats.swapsActive, 1, 'core 脱离期间 remorph 队列开始抢画面');
+  assert.ok(creature.stats.swapsQueued > 0, 'core 脱离期间普通交接没有留在队列');
+
+  creature.dispose();
+  library.dispose();
+});

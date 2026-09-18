@@ -29,14 +29,16 @@ import { mulberry32 } from '../../core/src/rng.ts';
 import { createPeopleTracker, isFreshReacquisition, shiftSkeleton, type PeopleFrame } from '../../core/src/people.ts';
 import { createProbeState, stepProbe } from '../../core/src/people-probe.ts';
 import { AUTOFRAME, BUDGET, CAPTURE, GOVERNOR, NASCENT, PEOPLE, REFINE, STAGE, WARM } from '../../core/src/tuning.ts';
-import type { Genome, MotionFeatures, PartMeta, Presence, Skeleton, SlotKey, SlotPick, Tier } from '../../core/src/types.ts';
+import type { BoneId, Genome, MotionFeatures, PartMeta, Presence, Skeleton, SlotKey, SlotPick, Tier } from '../../core/src/types.ts';
 
 import { captureAspect, createCapture, startInitialCapture, type Capture, type StartedCapture } from './capture/capture.ts';
 import { createPartLibrary } from './assets/library.ts';
 import { createCreature } from './creature/creature.ts';
 import { createCompanions, createPipes, type CompanionResult } from './creature/companions.ts';
 import { bodyFill, planPeople } from './creature/people-budget.ts';
-import { commitRelease, INITIAL_RELEASE_STATE, planRelease } from './creature/release-policy.ts';
+import {
+  commitDetachment, INITIAL_DETACHMENT_STATE, planDetachment,
+} from './creature/detachment-policy.ts';
 import { makeTheseus, swapOneSlot } from './creature/theseus-wire.ts';
 import { resolveShading, type ShadingId } from './creature/shading.ts';
 import { createMassBody } from './creature/mass.ts';
@@ -545,6 +547,8 @@ async function boot(): Promise<void> {
   const peopleCapacity = probeCapable ? PEOPLE.hardMax : flags.people;
   const multi = (flags.people > 1 || probeCapable) && !isMass && !isSwarm;
   const creature = createCreature({ library, shading, replaceSlots: flags.theseus.on ? 1 : 0, companions: multi ? peopleCapacity - 1 : 0 });
+  /** 稳定函数对象：接触点每帧会问，但不为此制造闭包；所有骨段都能成为非人形方案的支点。 */
+  const contactPartDetached = (bone: BoneId): boolean => creature.isDetached(bone);
   /**
    * **确认了的**人数上限：`plan.bodies` / 描边预算跟着它走。探测开着时从 `PEOPLE.defaultCap`
    * 起步，只在探测**真的**确认（或退档）时才改（下面的帧循环）；不开探测时永远是 `flags.people`，
@@ -647,6 +651,8 @@ async function boot(): Promise<void> {
   const nextEncounterSeed = (): number => flags.seed ?? Math.floor(encounterSeeds.next() * 0x100000000) >>> 0;
   let seed = nextEncounterSeed();
   let encounterRng = mulberry32(seed);
+  /** 脱离概率不能消费玩法 Rng 的调用序列；同一 encounter seed 派生一条独立、可复现的流。 */
+  let detachmentRng = mulberry32(seed ^ 0xd37ac4ed);
 
   // 声音（docs/29-SOUND.md）。四层各绑一个**已经算好的**信号，所以这里只是转手，
   // 不新增任何计算。它自己等第一次用户手势才建 AudioContext（浏览器自动播放策略），
@@ -724,8 +730,8 @@ async function boot(): Promise<void> {
    * **不取消** —— 那一声和那一下碎开被一起压、一起放，仍然是同一帧。
    */
   const swapGate = createDeferral<Fired>(GOVERNOR.swapDeferMax);
-  /** 单手脱离属于一场相遇，不属于一具 GPU 身体；先计划、实际开演后才提交。 */
-  let releaseState = INITIAL_RELEASE_STATE;
+  /** 脱离节奏属于一场相遇，不属于 GPU 身体；先计划、实际开演后才提交 receipt。 */
+  let detachmentState = INITIAL_DETACHMENT_STATE;
   /**
    * 已经被换掉的那些槽位。**升档重建 genome 时必须盖回去** ——
    * `morph()` 是拿 `seed` 从头抽一具身体，不盖的话每一次乐章交接都会把
@@ -898,6 +904,7 @@ async function boot(): Promise<void> {
     resetBucketWarm();
     seed = nextEncounterSeed();
     encounterRng = mulberry32(seed);
+    detachmentRng = mulberry32(seed ^ 0xd37ac4ed);
 
     // 检测、时间轴与输出侧取景必须一起归零。少任何一个，新输入的第一帧都会与旧时间线插值。
     director.resetTemporal();
@@ -920,7 +927,7 @@ async function boot(): Promise<void> {
     vitality.reset();
     groundSense.reset();
     swapGate.reset();
-    releaseState = INITIAL_RELEASE_STATE;
+    detachmentState = INITIAL_DETACHMENT_STATE;
 
     // 异步回路先换 epoch / abort，再清画面状态；旧结果晚回来也不能写到新观众头上。
     slow.reset();
@@ -979,6 +986,8 @@ async function boot(): Promise<void> {
    * 否则接班第一帧会继承上一人的动能、触地、腿部模式和取景速度。
    */
   const resetPrimaryTemporal = (resetPipes: boolean): void => {
+    // 可见脱离绑定的是旧主人的当帧 socket；交接后只撤位移、保留原 t/scale 在新 socket 完成。
+    creature.settleDetachment();
     director.resetTemporal();
     poseClock.reset();
     if (resetPipes) {
@@ -1219,6 +1228,7 @@ async function boot(): Promise<void> {
       cameraFraming: camFraming,
     }, dt);
     const shiftX = (crowdOut?.primaryX ?? 0) + lateral.x.x;
+    let groundSampleDue = false;
 
     if (raw) {
       // 运动特征算在**人的**骨架上：驱动演化的是观众实际动了多少，
@@ -1265,11 +1275,7 @@ async function boot(): Promise<void> {
       lastBase = lastSkeleton;
       lastShift = shiftX;
       lastSkeleton = shiftSkeleton(lastSkeleton, shiftX);
-      stage.frame(lastSkeleton);   // 取景按**重映射之后**的身体算：四足是横的矮的
-      // 那具身体的重量真的落在地上。判据和上面那行画的接触阴影共用同一批落点，
-      // 所以听到的那一下和看到的那一摊影子不可能对不上。dt 不吃 timeScale（同 sound.update）
-      const feet = contactPoints(lastSkeleton, STAGE.contactPoints, STAGE.contactLiftRange);
-      if (groundSense.update(feet, dt)) cues.play('ground');
+      groundSampleDue = true;
       const evo = evolution.update(lastFeatures, dt);
       // 团块的"沸腾"层由运动能量驱动 —— 动得越猛表面越沸（tuning 的 MASS.surface）
       massBody?.setEnergy(lastFeatures.energy);
@@ -1279,7 +1285,6 @@ async function boot(): Promise<void> {
       // 跟丢的这几帧没有新骨架，但横向根偏移还在走（先停住、再回中线）：身体和脚下的接触阴影一起挪
       lastShift = shiftX;
       lastSkeleton = shiftSkeleton(lastBase, shiftX);
-      stage.frame(lastSkeleton);
     }
 
     // ── 忒修斯之船：这一帧要不要换一件（docs/44 §2 / §3）────────────────────
@@ -1300,7 +1305,7 @@ async function boot(): Promise<void> {
       dt,
     );
     // 整体尺度（docs/44 §5 第 5 条）。`bodyRoot` 的原点就是地面，所以按它缩放
-    // **脚不会离地**；取景吃的是没缩放过的骨架（`stage.frame(lastSkeleton)`），
+    // **整体缩放本身不会让脚离地**；取景吃的是没缩放过的骨架（`stage.frame(lastSkeleton)`），
     // 所以这一下是真的在画面里长大/变小，而不是被相机跟着补偿掉。
     // `?theseus=off` 时 `step` 是 undefined，缩放回 1 —— 和这一版之前逐字相同。
     bodyRoot.scale.setScalar(step?.scale ?? 1);
@@ -1325,13 +1330,17 @@ async function boot(): Promise<void> {
       );
       // 借不到就是这一件不发生 —— 不抛、不等、不退化成"换了个一模一样的"（P3）。
       if (g) {
-        swapped.set(fired.slot, g.slots[fired.slot]);
         // 不是交叉淡入：旧件碎开、新件装上、描边不断（docs/44 §7，形状在 `creature/replace-event.ts`）。
         // 这一下当帧开始，所以下面那一声和画面上的碎开是同一帧
         const shown = getDegradeState().placeholder ? toPlaceholderGenome(g) : g;
-        const requested = planRelease(releaseState, fired.slot);
-        const accepted = creature.replace(fired.slot, shown.slots[fired.slot], requested);
-        releaseState = commitRelease(releaseState, accepted);
+        const requested = planDetachment(detachmentState, {
+          slot: fired.slot,
+          overall: arcState.overall,
+        }, detachmentRng);
+        const receipt = creature.replace(fired.slot, shown.slots[fired.slot], requested);
+        detachmentState = commitDetachment(detachmentState, receipt);
+        // 只有身体真的接纳，长期 genome 才记这件；预算拒绝不能让下一次 remorph 偷偷补演。
+        if (receipt) swapped.set(fired.slot, g.slots[fired.slot]);
         // docs/40 §5 第 3 条（2026-09-14 改的挂点）+ docs/44 §7：
         // 升档音原来挂在四个乐章的交接上，而 docs/44 §6 之后那四个点不再是事件 ——
         // 一个挂在不再发生的东西上的声音等于没有声音。挪到**每一次替换**上：
@@ -1339,8 +1348,17 @@ async function boot(): Promise<void> {
         // **不新造提示音**，用的就是已经存在的那一个（docs/29 §S5 的克制照旧）。
         // 现场如果听起来像钟表，docs/44 §7 给了退路：加一句 `step.borrowDistance >= 2`
         // 就只在借得远的时候响 —— 那个数这里已经拿在手上了。
-        if (accepted) sound.tierUp(tier);
+        if (receipt) sound.tierUp(tier);
       }
+    }
+
+    // 取景和接触 cue 必须在当帧脱离 receipt 之后取样：否则脚刚离开的第一帧仍会留下一帧假阴影。
+    // 只过滤正在脱离的骨段端点；另一只脚、四足的其余支点以及所有取景边界继续存在。
+    if (lastSkeleton) {
+      const contacts = contactPoints(lastSkeleton, STAGE.contactPoints, STAGE.contactLiftRange, contactPartDetached);
+      stage.frame(lastSkeleton, contacts);   // 取景仍按完整的重映射骨架算：四足是横的矮的
+      // 落脚声和接触阴影消费同一份数组；没有新姿态时只更新视觉，不重放声音状态机。
+      if (groundSampleDue && groundSense.update(contacts, dt)) cues.play('ground');
     }
 
     // ── 分档：**跟着弧线走，运动量只是加速项**（docs/40 §4 最后一段）───────────

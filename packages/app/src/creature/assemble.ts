@@ -48,6 +48,8 @@ export interface SlotRender {
   scale?: number;
   /** 沿骨头轴（关节盖片沿"离开骨盆"方向）外移多少米，用于组装动画 */
   offset?: number;
+  /** 短命效果额外沿世界 +Y 抬起多少米；只用于脱离层，不改骨架或挂载坐标系。 */
+  lift?: number;
   /**
    * 沿骨头轴再挪**骨长的几分之几**（关节盖片没有骨长，忽略）。
    * 忒修斯替换的墨屑用它沿骨头摆开（`replace-event.ts`）
@@ -353,6 +355,7 @@ function place(
       });
       translateInPlace(matrix, dir, finite(r.offset ?? 0, 0) + finite(r.along ?? 0, 0) * finite(bone.length, 0));
       lateralInPlace(matrix, dir, finite(r.lateral ?? 0, 0), finite(r.angle ?? 0, 0));
+      matrix[13] += finite(r.lift ?? 0, 0);
 
       out.push({
         key: bone.id,
@@ -402,6 +405,7 @@ function place(
       jointMatrix(p, (radiusMeters * s) / Math.max(1e-4, meta.localGirth), matrix);
       translateInPlace(matrix, dir, finite(r.offset ?? 0, 0));
       lateralInPlace(matrix, dir, finite(r.lateral ?? 0, 0), finite(r.angle ?? 0, 0));
+      matrix[13] += finite(r.lift ?? 0, 0);
 
       out.push({
         key: `joint:${capDef.joint}`,

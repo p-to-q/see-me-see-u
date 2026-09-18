@@ -14,7 +14,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { assemble } from '../src/creature/assemble.ts';
+import { assemble, JOINT_CAPS } from '../src/creature/assemble.ts';
+import { detachmentProfileFor, type DetachmentPlan } from '../src/creature/detachment.ts';
 import { crossfadeRenders, graftCurve, REPLACE_SECONDS, replaceRenders } from '../src/creature/replace-event.ts';
 import { REFERENCE_POSE } from '../src/stage/framing.ts';
 import { BODY_PLANS, remapSkeleton, type BodyPlanId } from '../../core/src/bodyplan.ts';
@@ -161,7 +162,7 @@ function headY(parts: ReturnType<typeof assemble>): number {
   return head.matrix[13];
 }
 
-test('落地：真实全槽位同件替换的芯 / 碎屑 / 飞入件不再让稳定部位泵动', { skip: !REAL_INDEX }, () => {
+test('落地：真实全槽位同件替换的芯 / 碎屑 / 短命件不再让稳定部位泵动', { skip: !REAL_INDEX }, () => {
   const genome = makeGenome(11, 2, REAL_INDEX!, { theme: 'porcelain' });
   const byId = new Map(REAL_INDEX!.parts.map((p) => [p.id, p]));
   const source = {
@@ -199,6 +200,43 @@ test('落地：真实全槽位同件替换的芯 / 碎屑 / 飞入件不再让�
             `${kind} ${key} t=${t.toFixed(2)} 把 ${probeKey} 矩阵[${n}] 搬了 ${delta}`);
         }
       }
+    }
+  }
+});
+
+test('落地：真实全槽位与每个 joint cap 的脱离效果不穿地、不搬主体', { skip: !REAL_INDEX }, () => {
+  const genome = makeGenome(11, 2, REAL_INDEX!, { theme: 'porcelain' });
+  const byId = new Map(REAL_INDEX!.parts.map((p) => [p.id, p]));
+  const source = { metaOf(id: string): PartMeta { return byId.get(id)!; } };
+  const baselineParts = assemble(genome, REFERENCE_POSE, source);
+  const cases: Array<{ key: SlotKey; plan: DetachmentPlan; label: string }> = [];
+  for (const key of ALL_BONE_IDS) cases.push({
+    key,
+    plan: { profile: detachmentProfileFor(key), result: 'transform' },
+    label: key,
+  });
+  for (const cap of JOINT_CAPS) cases.push({
+    key: 'joint',
+    plan: { profile: detachmentProfileFor('joint', cap.joint), result: 'transform', member: cap.joint },
+    label: `joint:${cap.joint}`,
+  });
+
+  for (const { key, plan, label } of cases) {
+    const pick = genome.slots[key];
+    const probeKey = key === 'head' ? 'spine' : 'head';
+    const baseline = baselineParts.find((p) => p.key === probeKey)!;
+    for (let i = 0; i <= 20; i++) {
+      const u = i / 20;
+      const parts = assemble(genome, REFERENCE_POSE, source, {
+        render: { [key]: replaceRenders(key, pick, pick, u, 1, plan) },
+        ground: { [key]: [{ partId: pick.partId, materialRole: pick.materialRole }] },
+      });
+      let lowest = Infinity;
+      for (const part of parts) lowest = Math.min(lowest, lowestOf(part.matrix, source.metaOf(part.partId).aabb));
+      assert.ok(lowest >= -1e-9, `${label} t=${u.toFixed(2)} 穿地 ${(lowest * 1000).toFixed(3)}mm`);
+      const probe = parts.find((p) => p.key === probeKey)!;
+      for (let n = 0; n < 16; n++) assert.ok(Math.abs(probe.matrix[n] - baseline.matrix[n]) < 1e-12,
+        `${label} t=${u.toFixed(2)} 搬动稳定主体矩阵[${n}]`);
     }
   }
 });
@@ -258,7 +296,7 @@ test('落地：真实脚部 old→new 的 AABB 基准走完整交接，不在最
   assert.ok(Number.isFinite(bad), '坏进度不能把帧循环送进 NaN');
 });
 
-test('落地：四足承重手的飞入与单手 release 都只修自己，不穿地也不抬主体', { skip: !REAL_INDEX }, (t) => {
+test('落地：四足承重手的原位换装与末端脱离都只修自己，不穿地也不抬主体', { skip: !REAL_INDEX }, (t) => {
   const fromGenome = makeGenome(92, 2, REAL_INDEX!, { theme: 'wheelleg' });
   const targetGenome = makeGenome(92, 3, REAL_INDEX!, { theme: 'wheelleg' });
   const key: SlotKey = 'handR';
@@ -281,8 +319,10 @@ test('落地：四足承重手的飞入与单手 release 都只修自己，不�
     partId: pick!.partId, materialRole: pick!.materialRole,
   }];
   for (const [name, render] of [
-    ['飞入', (u: number) => crossfadeRenders(key, from, to!, u)],
-    ['release', (u: number) => replaceRenders(key, from, to!, u, 1, 'hand-release')],
+    ['原位换装', (u: number) => crossfadeRenders(key, from, to!, u)],
+    ['末端脱离', (u: number) => replaceRenders(key, from, to!, u, 1, {
+      profile: 'terminal-release', result: 'transform',
+    })],
   ] as const) {
     let worst = Infinity;
     for (let frame = 0; frame <= 120; frame++) {
