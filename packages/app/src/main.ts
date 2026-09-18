@@ -45,6 +45,7 @@ import { createMassBody } from './creature/mass.ts';
 import { createNascent } from './creature/nascent.ts';
 import { createSwarmBody } from './creature/swarm.ts';
 import type { BodyInstance } from './creature/body.ts';
+import { createPresentedBody } from './creature/presented-body.ts';
 import { automaticBodyPlan, bodyPlanFor } from './creature/body-plan-policy.ts';
 import { createStage } from './stage/stage.ts';
 import { contactPoints, REFERENCE_POSE } from './stage/framing.ts';
@@ -641,6 +642,7 @@ async function boot(): Promise<void> {
     },
     dispose() { humanBody.dispose(); speciesBody.dispose(); },
   };
+  const presented = createPresentedBody(body);
   if (speciesBody) speciesBody.object.visible = intent.form !== undefined;
 
   // 页面只在入口边界向平台取一次熵；每一场的种子随后都由注入的 Rng 给出。
@@ -886,7 +888,7 @@ async function boot(): Promise<void> {
     get capture() { return capture; },
     // getter：按钮会把整份叠加换成新的一份（它是不可变的），导演每帧读到的必须是当前那一份
     get intent() { return intent; },
-    creature: body, stage, library, flags,
+    creature: presented.body, stage, library, flags,
     // getter 让换人后的玩法读到新 Rng；World 对象本身不重建，导演也不需要重新接线。
     get rng() { return encounterRng; },
     morph,
@@ -966,13 +968,13 @@ async function boot(): Promise<void> {
     tier = (flags.tier ?? 0) as Tier;
 
     // 身体实现各自清拖影 / 能量 / 在途交接，但保留 GPU 资源。新 seed 的形态随后直接落位。
-    body.reset?.();
+    presented.body.reset?.();
     bodyRoot.scale.setScalar(1);
     theseus?.reset(seed);
     morph(tier);
-    body.pose(REFERENCE_POSE, presence.current, 0);
+    presented.body.pose(REFERENCE_POSE, presence.current, 0);
     stage.setArc(0);
-    body.setArc?.(0);
+    presented.body.setArc?.(0);
 
     // 上一位可能把身体还回去了；下一位重新服从弧线。URL 写下的叠加仍是开机意图。
     if (director.forced && flags.act !== HANDED_BACK_ACT) director.release(world);
@@ -1144,7 +1146,7 @@ async function boot(): Promise<void> {
       // 接班的人自己那一套滤波器换进主通道（他的身体已经在台上，不从零热身，也不吃上一个人的骨长）
       if (people.primary !== null && crowd.primary !== null) {
         const theirs = people.bodies.takePipes(crowd.primary);
-        people.bodies.retire(people.primary, { refiner, stabilizer, vitality }, lastSkeleton, 0);
+        people.bodies.retire(people.primary, { refiner, stabilizer, vitality }, presented.skeleton, 0);
         const next = theirs ?? createPipes();
         refiner = next.refiner; stabilizer = next.stabilizer; vitality = next.vitality;
         if (hud) console.info(`[people] 主身体 #${people.primary} → #${crowd.primary}`);
@@ -1184,7 +1186,7 @@ async function boot(): Promise<void> {
     // 喂的是 `overall`（整条弧线 0..1），不是 `progress`（当前乐章内部的 0..1）：
     // 表面要的是"走到哪儿了"，不是"这一段走了多少"。
     stage.setArc(arcState.overall);
-    body.setArc?.(arcState.overall);
+    presented.body.setArc?.(arcState.overall);
 
     // 那块小屏幕吃的是 **measured，不是精化之后的 cooked**。
     // 精化器会在遮挡时保持最后一次可信位置最多 0.67 秒（`core/refine.ts`）——
@@ -1305,7 +1307,7 @@ async function boot(): Promise<void> {
       dt,
     );
     // 整体尺度（docs/44 §5 第 5 条）。`bodyRoot` 的原点就是地面，所以按它缩放
-    // **整体缩放本身不会让脚离地**；取景吃的是没缩放过的骨架（`stage.frame(lastSkeleton)`），
+    // **整体缩放本身不会让脚离地**；取景吃 Director 真正提交的、但没缩放过的骨架，
     // 所以这一下是真的在画面里长大/变小，而不是被相机跟着补偿掉。
     // `?theseus=off` 时 `step` 是 undefined，缩放回 1 —— 和这一版之前逐字相同。
     bodyRoot.scale.setScalar(step?.scale ?? 1);
@@ -1350,15 +1352,6 @@ async function boot(): Promise<void> {
         // 就只在借得远的时候响 —— 那个数这里已经拿在手上了。
         if (receipt) sound.tierUp(tier);
       }
-    }
-
-    // 取景和接触 cue 必须在当帧脱离 receipt 之后取样：否则脚刚离开的第一帧仍会留下一帧假阴影。
-    // 只过滤正在脱离的骨段端点；另一只脚、四足的其余支点以及所有取景边界继续存在。
-    if (lastSkeleton) {
-      const contacts = contactPoints(lastSkeleton, STAGE.contactPoints, STAGE.contactLiftRange, contactPartDetached);
-      stage.frame(lastSkeleton, contacts);   // 取景仍按完整的重映射骨架算：四足是横的矮的
-      // 落脚声和接触阴影消费同一份数组；没有新姿态时只更新视觉，不重放声音状态机。
-      if (groundSampleDue && groundSense.update(contacts, dt)) cues.play('ground');
     }
 
     // ── 分档：**跟着弧线走，运动量只是加速项**（docs/40 §4 最后一段）───────────
@@ -1426,6 +1419,17 @@ async function boot(): Promise<void> {
     // 物种身体的到场不用在这里写一行 —— `speciesArrived()` 读的就是
     // `arcState.movement`，弧线一归零它自己就退回人形。派生状态不该被复制两份。
     if (arcState.justReset) resetEncounter('absence');
+
+    // 舞台读取的是 Director 真正交给身体的那副骨架，不是变化前的人类输入。
+    // 放在当帧脱离 receipt、Director 和 encounter reset 之后：脚刚离开不留假阴影，
+    // facing / echo / resist 的接触点不与画面分裂，归零帧也只读重置后的参考姿态。
+    const shown = presented.skeleton;
+    if (shown) {
+      const contacts = contactPoints(shown, STAGE.contactPoints, STAGE.contactLiftRange, contactPartDetached);
+      stage.frame(shown, contacts);
+      // 落脚声和接触阴影消费同一份数组；没有新姿态时只更新视觉，不重放声音状态机。
+      if (groundSampleDue && groundSense.update(contacts, dt)) cues.play('ground');
+    }
 
     // 声音吃的是 **未经时间停滞缩放的 dt**：升档那 0.15 秒画面顿一下是设计，
     // 声音跟着顿会变成"卡带"。理由和状态机不吃 timeScale 是同一条。
@@ -1513,14 +1517,14 @@ async function boot(): Promise<void> {
         (globalThis as { __people?: unknown }).__people = {
           primary: crowd?.primary ?? null,
           primaryX: crowdOut?.primaryX ?? 0,
-          primarySkeleton: brief(lastSkeleton),
+          primarySkeleton: brief(shown),
           companions: (crowdOut?.companions ?? []).map((c) => ({
             dx: +c.dx.toFixed(3), dz: c.dz, scale: c.scale, presence: c.presence.state, ...brief(c.skeleton),
           })),
           tracks: (crowd?.tracks ?? []).map((t) => ({ id: t.id, cx: +t.cx.toFixed(3), scale: +t.scale.toFixed(3), missing: +t.missing.toFixed(2), selected: t.selected, primary: t.primary })),
         };
       }
-      const s = body.stats;
+      const s = presented.body.stats;
       hud.update(loop.stats, {
         instances: (s as { instances?: number }).instances ?? 0, triangles: s.triangles,
         drawCalls: s.drawCalls, inferenceHz: capture.fps,
