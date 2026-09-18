@@ -12,7 +12,7 @@
 
 | # | 现象 | 证据 | 下一步 | 现状 |
 |---|---|---|---|---|
-| Q20 | 变化后期会把承重链 / 脚画成脱离或拖地，部分身体入地；旧 echo 又给整副骨架增加 1.2s 延迟，削弱“它在当下回应我” | docs/54；[#18](https://github.com/p-to-q/see-me-see-u/issues/18) | 先给可见替换效果补自己的碰地 clamp / fade，再用现有第一段腿骨为 radial 做 hub tether；跑真人取证后再决定单手 release；补最终可见几何的全链扫描 | 短命效果已退出主体落地；新旧稳定代理已按每槽位的 `graftCurve` 连续插值，脚部实例的 45.29mm 终点跳变收成最坏 0.943mm/帧；旧 radial 已离开自动 / 控件 / 随机路径；实时载波 + 前臂 / 手方向余波已落地，live 路径自主关节呼吸已移除，200 秒 `vitality → Director` 静止为 0mm；sampler 已归每个 Director，整场 / 主身份 / untether 边界会清历史；身体方案漂移中间态与 vitality 后骨架统一收地；显式 radial 开发预览仍保留 |
+| Q20 | 变化后期会把承重链 / 脚画成脱离或拖地，部分身体入地；旧 echo 又给整副骨架增加 1.2s 延迟，削弱“它在当下回应我” | docs/54；[#18](https://github.com/p-to-q/see-me-see-u/issues/18) | 先给可见替换效果补自己的碰地 clamp / fade，再用现有第一段腿骨为 radial 做 hub tether；跑真人取证后再决定单手 release；补最终可见几何的全链扫描 | remorph 排队件已保持旧态到真正激活，不再新→旧→新闪回；短命效果已退出主体落地；新旧稳定代理已按每槽位的 `graftCurve` 连续插值，脚部实例的 45.29mm 终点跳变收成最坏 0.943mm/帧；旧 radial 已离开自动 / 控件 / 随机路径；实时载波 + 前臂 / 手方向余波已落地，live 路径自主关节呼吸已移除，200 秒 `vitality → Director` 静止为 0mm；sampler 已归每个 Director，整场 / 主身份 / untether 边界会清历史；身体方案漂移中间态与 vitality 后骨架统一收地；显式 radial 开发预览仍保留 |
 
 ## P1 · 体验与可信度
 

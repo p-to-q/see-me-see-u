@@ -466,6 +466,17 @@ export function createCreature(opt: CreatureOptions): Creature {
     pumpQueue();
   }
 
+  /**
+   * 还没拿到交接名额的槽位必须继续画 `from`。
+   * `genome` 记的是最终目标，不是每个槽位当下已经走到的画面状态；
+   * 把两者混在一起会让排队件先闪成新件，轮到它时又闪回旧件。
+   * 队列最长只有槽位数，线性查找不分配，也避免再维护一张会与队列漂移的镜像 Map。
+   */
+  function queuedSwap(key: SlotKey): Swap | undefined {
+    for (const swap of queued) if (swap.key === key) return swap;
+    return undefined;
+  }
+
   // ── 接口 ────────────────────────────────────────────────────────────────
   const creature: Creature = {
     reset() {
@@ -530,8 +541,9 @@ export function createCreature(opt: CreatureOptions): Creature {
 
       // 3. 这一帧每个槽位画什么
       for (const key of ALL_SLOT_KEYS) {
-        const pick = genome.slots?.[key];
         const s = active.get(key);
+        const waiting = s ? undefined : queuedSwap(key);
+        const pick = waiting ? waiting.from : genome.slots?.[key];
         if (s?.kind === 'replace') {
           render[key] = replaceRenders(key, s.from, s.to, s.t, pres);
         } else if (s) {
@@ -581,8 +593,9 @@ export function createCreature(opt: CreatureOptions): Creature {
         const cp = presenceScale(c.presence) * Math.max(0, Math.min(1, Number.isFinite(c.scale) ? c.scale! : 1));
         if (cp <= 1e-3 || !c.skeleton) continue;
         for (const key of ALL_SLOT_KEYS) {
-          const pick = genome.slots?.[key];
           const s = active.get(key);
+          const waiting = s ? undefined : queuedSwap(key);
+          const pick = waiting ? waiting.from : genome.slots?.[key];
           renderC[key] = s?.kind === 'replace' ? replaceRenders(key, s.from, s.to, s.t, cp)
             : s ? crossfadeRenders(key, s.from, s.to, s.t, cp)
               : pick ? [{ partId: pick.partId, materialRole: pick.materialRole, scale: cp }] : [];
