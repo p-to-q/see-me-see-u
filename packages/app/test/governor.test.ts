@@ -32,9 +32,9 @@ const HZ60 = () => 1000 / 60;
 /** 每 4 帧丢一次（50ms），= 25% 丢帧 */
 const OVERLOAD = (i: number) => (i % 4 === 3 ? 50 : 1000 / 60);
 
-test('调速器: 阶梯顺序 —— 先放下看不见的，再降代价，最后才停 UI', () => {
+test('调速器: 阶梯顺序 —— 先放下看不见的，再降代价，最后才减身体', () => {
   // `people`（docs/50 §5.4）排最后：放下一个人的身体是观众最看得出来的一件事
-  assert.deepEqual(GOVERNOR_LADDER, ['ink', 'swaps', 'inference', 'post', 'dpr', 'ui', 'people']);
+  assert.deepEqual(GOVERNOR_LADDER, ['ink', 'swaps', 'inference', 'dpr', 'post', 'ui', 'people']);
 });
 
 for (const hz of [30, 60, 120, 144]) {
@@ -61,7 +61,7 @@ test('调速器: 持续丢帧 —— 一级一级往下放，每级之间至少 
   }
   assert.ok(g.level <= GOVERNOR_LADDER.length);
   assert.equal(g.sheds('ink'), true);
-  assert.equal(g.sheds('ui'), g.level >= GOVERNOR_LADDER.length);
+  assert.equal(g.sheds('ui'), g.level >= GOVERNOR_LADDER.indexOf('ui') + 1);
 });
 
 test('调速器: 余量回来 —— 憋够 restoreAfter 才拿回，一次一级，最后回到 0', () => {

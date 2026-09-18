@@ -108,7 +108,7 @@ Blender 保留为人工修模的可选工具，不进流水线。
 function frame(t: number) {
   const dt = clampDt(t - last);                        // dt ∈ [1/240, 1/15]
   const raw = capture.latest();                        // 可能是 null
-  const detected = raw !== null && raw.score > 0.5;
+  const detected = posePresent(raw);                    // 整身平均或可靠躯干对
 
   presence.update(detected, dt);
 

@@ -127,15 +127,23 @@ export function createVisitReporter(opt: VisitOptions): VisitReporter {
       }
       // 所有地方都 404 = 这个部署上没有这条回路。和别的失败归成同一个出口：
       // 对观众来说它们是同一件事（什么都没发生），而这一页不需要知道是哪一种
-      // —— 但它**永久**关掉（`§7.1` 第 3 条），所以这一条跨场次照样算数
-      if (!res?.ok) { phase = 'off'; return; }
+      // —— 当前相遇仍有效时，它**永久**关掉（`§7.1` 第 3 条）；上一场迟到的
+      // 回执没有权替下一位关闸，下一位自己的请求若同样失败，仍会走这条终态
+      if (!res?.ok) {
+        if (current()) phase = 'off';
+        return;
+      }
       const j = (await res.json()) as { ok?: boolean; entry?: { n?: unknown } };
-      if (j?.ok !== true) { phase = 'off'; return; }
       if (!current()) return;
-      n = typeof j?.entry?.n === 'number' ? j.entry.n : null;
+      const serial = j?.entry?.n;
+      if (j?.ok !== true || typeof serial !== 'number' || !Number.isSafeInteger(serial) || serial <= 0) {
+        phase = 'off';
+        return;
+      }
+      n = serial;
       phase = 'kept';
     } catch {
-      phase = 'off';
+      if (current()) phase = 'off';
     } finally {
       clearTimeout(timer);
     }
@@ -150,7 +158,12 @@ export function createVisitReporter(opt: VisitOptions): VisitReporter {
       phase = 'writing';
       const species = opt.species as string;
       const mine = era;
-      idle(() => { void write(species, mine); });
+      try {
+        idle(() => { void write(species, mine); });
+      } catch {
+        // 平台调度器也是外部边界；即使它坏了也不能从帧循环里 throw。
+        phase = 'off';
+      }
     },
     reset() {
       // 换了一个人。写过的那一条不影响下一位 —— 装置那台机器一开就是一整天，

@@ -39,6 +39,13 @@ export interface BodyInstance {
   /** 帧循环调用：把骨架 + 在场状态变成这一帧的几何。不 throw、不 await */
   pose(sk: Skeleton, presence: Presence, dt: number): void;
   /**
+   * 换了一位观众：清掉只属于上一场的时间状态（拖影、能量、交接队列等）。
+   *
+   * 可选是为了让纯展示型 BodyInstance 仍然保持最小契约；有跨帧状态的实现必须提供。
+   * 这不是 dispose：GPU 对象与已编译管线都保留，下一位不为重建付延迟。
+   */
+  reset?(): void;
+  /**
    * 会话弧线走到哪儿了，0..1（`docs/40` 的 `overall`，不是乐章内部的进度）。
    *
    * **可选，而且是故意可选的。** 弧线作用在"表面"上（`docs/41-MATERIAL.md`：

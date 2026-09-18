@@ -1,21 +1,18 @@
 /**
- * 自动探测 —— 网页版默认 `?people=1` 起步，背景里定期抬一档 `numPoses` 看看是不是真的来了
- * 第二、第三个人。裁定与理由在 docs/50-MULTI-PERSON.md §6.3（修订）。纯函数：没有时钟、没有随机，
- * 时间全从 `dt` 来，state 在调用方手上一步步传（和 `people.ts` 的其余状态机同一个写法）。
+ * 自动人数探测。从场合默认人数起步，先让单人路径稳定，再用 `hardMax` 看一扇窗，之后在背景里
+ * 定期再看。一次就能分辨一、二、三个人，不用先 1→2、再等一轮 2→3。裁定与理由在
+ * docs/50-MULTI-PERSON.md §6.3。纯函数：没有时钟、没有随机，时间全从 `dt` 来。
  *
- * ## 为什么不能零成本地"偷看"
+ * ## 为什么不能零成本地“偷看”
  *
  * `numPoses` 是 worker 的参数：要看第二个人，就必须真的按更高的档跑一遍检测器
- * （docs/50 §1.2）。所以这里做的是"定期开一个短窗口、抬一档、看看有没有人稳稳地被选中，
- * 没有就退回去" —— 不是持续多付检测器的钱。
+ * （docs/50 §1.2）。所以这里定期开短窗、临时抬到硬上限；没有新人就收回实际档位，
+ * 而不是一直多付检测器成本。
  *
- * ## 为什么"稳稳地"不是另一套置信度
+ * ## 为什么“稳稳地”不是另一套置信度
  *
- * `createPeopleTracker()` 已经有一整套滞回：新轨迹要连续被看见 `PEOPLE.birthSeconds` 才转正，
- * 转正之后才有资格被 `select()` 选中、拿到身体。这里只是在"拿到身体"之上再加一段
- * `PEOPLE.probeConfirmSeconds` 的**持续**入选（同样的漏桶 `leak()`），挡掉一次路人擦肩而过 ——
- * docs/50 §0 第 2 条的顾虑正是"一个人的桌面上多出一具身体，读作认错了人，不是认出了你们"。
- * 不另起一套判据，因为两套置信度必然会漂（docs/50 §2.2 反对为多人识别再发明一套判据，同一条理由）。
+ * `createPeopleTracker()` 已经有出生滞回；轨迹转正之后才有资格被 `select()` 选中。这里只在
+ * “拿到身体”之上再加 `probeConfirmSeconds` 的持续证据（同一个 `leak()`），挡掉路人擦肩而过。
  */
 import { leak } from './people.ts';
 import { PEOPLE } from './tuning.ts';
@@ -23,93 +20,165 @@ import { PEOPLE } from './tuning.ts';
 export type ProbePhase = 'idle' | 'probing';
 
 export interface ProbeState {
-  /** 此刻当真在用的人数上限：喂给 `PeopleTracker.setCap()` 和 worker 的 `numPoses` 的稳态值 */
+  /** 此刻当真在用的人数上限 */
   readonly level: number;
+  /** 这个场合的起步下限；自动退档不得越过它 */
+  readonly floor: number;
   readonly phase: ProbePhase;
-  /** `idle` 时：距上一次探测过了多久；`probing` 时：这一扇窗口已经开了多久（秒） */
+  /** `idle`：距上次探测的秒数；`probing`：当前窗口的秒数 */
   readonly clock: number;
-  /** `probing` 时：多出来的那个人被连续选中攒了多少（秒，漏桶） */
+  /** 至少比 `level` 多一人的持续证据 */
   readonly held: number;
-  /** 已经升过档：多出来的身体没人坐攒了多久（秒，漏桶）；攒够 `probeDeescalateSeconds` 退一档 */
+  /** 从 1 起步时，至少比 `level` 多两人的持续证据 */
+  readonly topHeld: number;
+  /** 实际人数低于 `level` 的持续证据 */
   readonly idleHeld: number;
-  /** 提示文字还要留多久（秒），0 = 不显示 */
+  /** 提示文字还要留多久（秒） */
   readonly hint: number;
-  /** 提示该说"第几个人"：升档那一刻的新 `level`。`hint === 0` 时无意义 */
+  /** 提示该说第几个人 */
   readonly hintLevel: number;
 }
 
-/** 开机状态：`idle`，没有提示，人数上限是给定的起步值（网页版通常是 `PEOPLE.defaultCap`） */
-export function createProbeState(level: number = PEOPLE.defaultCap): ProbeState {
+/**
+ * 未到顶格时先留一段单人稳定时间，再开第一扇探测窗。
+ * `floor` 单列出来，让以后现场默认改成 2 时不会被自动逻辑退回 1。
+ */
+export function createProbeState(level: number = PEOPLE.defaultCap, floor: number = PEOPLE.defaultCap): ProbeState {
   const v = Number.isFinite(level) ? Math.round(level) : PEOPLE.defaultCap;
-  return { level: Math.max(1, Math.min(PEOPLE.hardMax, v)), phase: 'idle', clock: 0, held: 0, idleHeld: 0, hint: 0, hintLevel: 0 };
+  const f = Number.isFinite(floor) ? Math.round(floor) : PEOPLE.defaultCap;
+  const safeLevel = Math.max(1, Math.min(PEOPLE.hardMax, v));
+  const safeFloor = Math.max(1, Math.min(safeLevel, f));
+  return {
+    level: safeLevel,
+    floor: safeFloor,
+    phase: 'idle',
+    // 后续窗口等完整 interval；第一扇只再等 initialDelay。
+    clock: safeLevel < PEOPLE.hardMax
+      ? Math.max(0, PEOPLE.probeIntervalSeconds - PEOPLE.probeInitialDelaySeconds)
+      : 0,
+    held: 0,
+    topHeld: 0,
+    idleHeld: 0,
+    hint: 0,
+    hintLevel: 0,
+  };
 }
 
 export interface ProbeInput {
+  /** 新推理之间的间隔；缓存结果传 0，不能推进任何人数证据 */
   dt: number;
-  /**
-   * 这一帧有几个人拿到了身体（`PeopleFrame.selected.length`），在**当前**这一档 `numPoses` 之下量的。
-   * `probing` 阶段这一档已经是 `level + 1`：如果它超过了窗口开始前的 `level`，
-   * 说明多出来的那个名额被一个真的、稳稳地被跟踪的人占住了。
-   */
+  /** 这一份新推理里被 tracker 选中的人数 */
   selectedCount: number;
+  /** 渲染时钟只负责把提示收起来，不参与人数确认 */
+  uiDt?: number;
+  /** 当前帧有性能余量做后台探测；false 会立即收回正在开的窗口 */
+  canProbe?: boolean;
 }
 
 export interface ProbeStep {
   state: ProbeState;
-  /** 这一帧该让 worker（`capture.setPeople`）和跟踪器（`tracker.setCap`）用的人数上限 */
+  /** 这一帧 worker 和 tracker 该用的人数上限 */
   target: number;
-  /** 这一帧刚确认了一个新人，该出提示了（`state.hintLevel` 是提示该说第几个人） */
+  /** 这一帧刚确认了更多人 */
   justEscalated: boolean;
 }
 
-/**
- * 一步。`idle` 阶段：攒到 `probeIntervalSeconds` 就开一扇窗；已经升过档的话，
- * 同时检查多出来的身体是不是该退档了。`probing` 阶段：攒够 `probeConfirmSeconds`
- * 就当真升档，攒不够、窗口超过 `probeWindowSeconds` 就退回稳态。
- */
 export function stepProbe(state: ProbeState, input: ProbeInput): ProbeStep {
   const dt = Number.isFinite(input.dt) && input.dt > 0 ? Math.min(input.dt, 0.25) : 0;
-  const selectedCount = Number.isFinite(input.selectedCount) ? Math.max(0, input.selectedCount) : 0;
-  let { level, phase, clock, held, idleHeld } = state;
-  const hint = Math.max(0, state.hint - dt);
-  let hintLevel = state.hint > 0 ? state.hintLevel : 0;
-  let justEscalated = false;
+  const rawUiDt = input.uiDt;
+  const uiDt = Number.isFinite(rawUiDt) && rawUiDt !== undefined && rawUiDt > 0
+    ? Math.min(rawUiDt, 0.25)
+    : dt;
+  const canProbe = input.canProbe ?? true;
+  const selectedCount = Number.isFinite(input.selectedCount)
+    ? Math.max(0, Math.min(PEOPLE.hardMax, Math.floor(input.selectedCount)))
+    : 0;
+  let { level, floor, phase, clock, held, topHeld, idleHeld } = state;
+  const hint = Math.max(0, state.hint - uiDt);
+  let hintLevel = hint > 0 ? state.hintLevel : 0;
 
   if (phase === 'idle') {
-    // 已经升过档：多出来的身体连续没人坐够久，退一档（这份名额此刻没人在用，先收回探测的成本）
-    if (level > PEOPLE.defaultCap) {
-      idleHeld = leak(idleHeld, selectedCount <= level - 1, dt);
+    if (level > floor) {
+      idleHeld = leak(idleHeld, selectedCount < level, dt);
       if (idleHeld >= PEOPLE.probeDeescalateSeconds) {
-        level -= 1; idleHeld = 0; clock = 0;   // 退档之后给一整个 interval 的缓冲，不立刻又去试探
+        // 经过整段缺席证据后，3 只剩 1 就直接回 1，不再白等另一个退档周期。
+        level = Math.max(floor, Math.min(level - 1, selectedCount));
+        idleHeld = 0;
+        clock = 0;
       }
     } else {
       idleHeld = 0;
     }
+
     if (level < PEOPLE.hardMax) {
-      clock += dt;
-      if (clock >= PEOPLE.probeIntervalSeconds) {
-        return { state: { level, phase: 'probing', clock: 0, held: 0, idleHeld, hint, hintLevel }, target: level + 1, justEscalated: false };
+      // 没有余量时暂停而不是清零：这样首帧还没量到 frameMs、切到后台、或偶发一帧卡顿，
+      // 都不会把“先稳 3 秒”悄悄改成“再等完整 12 秒”。已经打开的窗口仍在下方立即中止并退避。
+      if (canProbe) {
+        clock += dt;
+        if (clock >= PEOPLE.probeIntervalSeconds) {
+          return {
+            state: { level, floor, phase: 'probing', clock: 0, held: 0, topHeld: 0, idleHeld, hint, hintLevel },
+            target: PEOPLE.hardMax,
+            justEscalated: false,
+          };
+        }
       }
     } else {
-      clock = 0;   // 顶格了，不用再攒
+      clock = 0;
     }
-    return { state: { level, phase, clock, held, idleHeld, hint, hintLevel }, target: level, justEscalated: false };
+    return {
+      state: { level, floor, phase, clock, held, topHeld, idleHeld, hint, hintLevel },
+      target: level,
+      justEscalated: false,
+    };
   }
 
-  // ── probing：这一帧起 worker 已经按 level + 1 在跑 ──
-  const target = Math.min(PEOPLE.hardMax, level + 1);
+  // 探测是后台预算，不是作品主链：任何卡顿 / 降级迹象都立即回到已确认档位，之后完整退避一轮再试。
+  if (!canProbe) {
+    return {
+      state: { level, floor, phase: 'idle', clock: 0, held: 0, topHeld: 0, idleHeld, hint, hintLevel },
+      target: level,
+      justEscalated: false,
+    };
+  }
+
+  // 探测窗始终看到 hardMax，因此一扇窗就能从 1 直达 3。
+  const target = PEOPLE.hardMax;
   clock += dt;
-  held = leak(held, selectedCount > level, dt);
-  if (held >= PEOPLE.probeConfirmSeconds) {
-    level = target;
+  held = leak(held, selectedCount >= level + 1, dt);
+  topHeld = level + 2 <= PEOPLE.hardMax
+    ? leak(topHeld, selectedCount >= level + 2, dt)
+    : 0;
+
+  const nextConfirmed = held >= PEOPLE.probeConfirmSeconds ? Math.min(PEOPLE.hardMax, level + 1) : level;
+  const topConfirmed = topHeld >= PEOPLE.probeConfirmSeconds ? Math.min(PEOPLE.hardMax, level + 2) : level;
+  const confirmed = Math.max(nextConfirmed, topConfirmed);
+
+  // 第三个人已经露头时，给他到窗尾的机会。到期后仍会收下已确认的二人档，
+  // 不会因为第三人不稳而两手空空。
+  const waitingForTop = level + 2 <= PEOPLE.hardMax && topHeld > 0 && topConfirmed === level;
+  if (confirmed > level && (!waitingForTop || clock >= PEOPLE.probeWindowSeconds)) {
+    level = confirmed;
     hintLevel = level;
     return {
-      state: { level, phase: 'idle', clock: 0, held: 0, idleHeld: 0, hint: PEOPLE.probeHintSeconds, hintLevel },
-      target: level, justEscalated: true,
+      state: {
+        level, floor, phase: 'idle', clock: 0, held: 0, topHeld: 0, idleHeld: 0,
+        hint: PEOPLE.probeHintSeconds, hintLevel,
+      },
+      target: level,
+      justEscalated: true,
     };
   }
   if (clock >= PEOPLE.probeWindowSeconds) {
-    return { state: { level, phase: 'idle', clock: 0, held: 0, idleHeld, hint, hintLevel }, target: level, justEscalated: false };
+    return {
+      state: { level, floor, phase: 'idle', clock: 0, held: 0, topHeld: 0, idleHeld, hint, hintLevel },
+      target: level,
+      justEscalated: false,
+    };
   }
-  return { state: { level, phase, clock, held, idleHeld, hint, hintLevel }, target, justEscalated: false };
+  return {
+    state: { level, floor, phase, clock, held, topHeld, idleHeld, hint, hintLevel },
+    target,
+    justEscalated: false,
+  };
 }

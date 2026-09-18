@@ -15,8 +15,9 @@ import assert from 'node:assert/strict';
 import { deriveLook, luminance, NEUTRAL_LOOK } from '../src/stage/look.ts';
 import { applyScene, isSceneId, pickScene, SCENES, SCENE_IDS } from '../src/stage/scenes.ts';
 import { contactPoints, DEFAULT_BOUNDS, REFERENCE_POSE } from '../src/stage/framing.ts';
+import { remapSkeleton } from '../../core/src/bodyplan.ts';
 import { STAGE } from '../../core/src/tuning.ts';
-import type { ThemeDef } from '../../core/src/types.ts';
+import type { BoneId, ThemeDef } from '../../core/src/types.ts';
 
 const base = deriveLook(null, []);
 
@@ -219,6 +220,22 @@ test('framing: 落地点一只脚一个；抬起的脚和手尖都不该占名�
   const f2 = contactPoints(lifted, 4, 0.22);
   assert.equal(f2.length, 1, '抬起 0.3m 的那只脚不该再有接触阴影');
   assert.ok(f2[0][0] < 0, '留下的该是没抬起的那只（右脚，x<0）');
+
+  // 可见脚件脱离时只收掉它覆盖的 socket；另一只脚仍在承重，不能让整具身体短暂浮起来。
+  const onlyLeftDetached = contactPoints(REFERENCE_POSE, 4, 0.22, (id: BoneId) => id === 'footL');
+  assert.equal(onlyLeftDetached.length, 1, '单脚脱离把另一只脚的接触也一起关掉了');
+  assert.ok(onlyLeftDetached[0][0] < 0, '左脚脱离后该保留右脚落点');
+  assert.deepEqual(
+    contactPoints(REFERENCE_POSE, 4, 0.22, (id: BoneId) => id === 'footL' || id === 'footR'),
+    [],
+    '两只脚都排除后仍从相邻小腿端点复活了假接触',
+  );
+
+  const quadruped = remapSkeleton(REFERENCE_POSE, 'quadruped');
+  const quadrupedContacts = contactPoints(quadruped, 4, 0.22);
+  const withoutFrontLeft = contactPoints(quadruped, 4, 0.22, (id: BoneId) => id === 'handL');
+  assert.deepEqual([quadrupedContacts.length, withoutFrontLeft.length], [4, 3],
+    '四足一条承重手脱离时没有只从 4 个支点收掉对应的 1 个');
 
   // 手尖离地 0.73m，在 xz 上离脚很远 —— 去重挡不住它，只有离地上限挡得住
   assert.ok(contactPoints(REFERENCE_POSE, 4, 0.22).every(([, , l]) => l <= 0.22));

@@ -94,12 +94,16 @@ export interface Exits {
 }
 
 /** 一行：名字（中英并置）+ 右边的状态词。没有图标，没有圆角 */
-function row(name: BiText, state: BiText | null): {
+type ExitAction = 'hall' | 'give' | 'camera';
+
+function row(action: ExitAction, name: BiText, state: BiText | null): {
   el: HTMLButtonElement; setState(t: BiText): void;
 } {
   const el = document.createElement('button');
   el.type = 'button';
   el.className = 'sb-exit';
+  // 给键盘、测试和现场探针一个不随文案 / 排序变的名字。不参与样式。
+  el.dataset.action = action;
 
   const label = document.createElement('span');
   label.className = 'sb-exit-name';
@@ -125,18 +129,18 @@ export function mountExits(options: ExitsOptions): Exits | null {
 
   // ── 1. 回到大厅 ───────────────────────────────────────────────────────────
   // 放第一行是刻意的：它是**离开**这一屏的唯一一条路，而下面两行都是留在这一屏里改点什么。
-  const hall = row(C.hall, null);
+  const hall = row('hall', C.hall, null);
   hall.el.addEventListener('click', () => {
     location.assign(`${location.pathname}?${hallSearch(location.search, host.state())}`);
   });
 
   // ── 2. 把身体还回去 ───────────────────────────────────────────────────────
-  const give = row(C.give, C.giveOff);
+  const give = row('give', C.give, C.giveOff);
   give.el.addEventListener('click', () => { host.setHandedBack(!host.handedBack()); sync(); });
 
   // ── 3. 摄像头 ─────────────────────────────────────────────────────────────
   // 这一行**同时是一个状态显示**：观众任何时候看一眼都该知道它现在有没有在看着自己。
-  const cam = row(C.camera, C.cameraOff);
+  const cam = row('camera', C.camera, C.cameraOff);
   cam.el.addEventListener('click', () => {
     cam.el.disabled = true;
     const done = host.setCamera(!host.cameraOn());

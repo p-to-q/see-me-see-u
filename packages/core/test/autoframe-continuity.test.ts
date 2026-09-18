@@ -66,18 +66,48 @@ function chaos(seed: number, seconds: number) {
 test('连续性：景别（缓动后的进度、跟随偏移）在任何决策序列下每 16ms 的变化不超过上限 —— 降级 hold 也不许一帧切', () => {
   for (const seed of [1, 2, 3, 7, 42]) {
     let s: ShotState = SHOT_REST;
-    const wp = worst(), wf = worst();
+    const wp = worst(), wv = worst(), wf = worst();
     let t = 0;
     for (const f of chaos(seed, 60)) {
-      const n = stepShot(s, { shot: f.shot, offset: f.offset, reduced: false, hold: f.hold }, f.dt);
+      const n = stepShot(s, {
+        shot: f.shot,
+        offset: f.offset,
+        vertical: f.present ? {
+          y: 0.5 + (f.offset?.y ?? 0), anchor: 'pelvis', scale: 0.5, quality: true,
+          worldY: 1, accepted: true, cameraFraming: false,
+        } : null,
+        reduced: false,
+        hold: f.hold,
+      }, f.dt);
       t += f.dt;
       const at = `seed ${seed} t=${t.toFixed(2)}s shot=${f.shot} hold=${f.hold}`;
       note(wp, per16(smoothstep(n.progress) - smoothstep(s.progress), f.dt), at);
+      note(wv, per16(n.velocity - s.velocity, f.dt), at);
       note(wf, per16(Math.hypot(n.fx.x * smoothstep(n.progress) - s.fx.x * smoothstep(s.progress), n.fy.x * smoothstep(n.progress) - s.fy.x * smoothstep(s.progress)), f.dt), at);
       s = n;
     }
     assert.ok(wp.value <= M.progress + 1e-9, `景别进度一帧跳了 ${wp.value.toFixed(3)}/16ms（上限 ${M.progress}）@ ${wp.at}`);
+    assert.ok(wv.value <= M.progressVelocity + 1e-9, `景别速度一帧变了 ${wv.value.toFixed(3)}/16ms（上限 ${M.progressVelocity}）@ ${wv.at}`);
     assert.ok(wf.value <= M.pan + 1e-9, `中景跟随一帧挪了 ${wf.value.toFixed(4)}m/16ms（上限 ${M.pan}）@ ${wf.at}`);
+  }
+});
+
+test('连续性：景别二阶轨迹在 15/30/60/120Hz 的共同时间点近似一致', () => {
+  const sample = (hz: number, seconds: number): ShotState => {
+    let s: ShotState = SHOT_REST;
+    for (let i = 0; i < Math.round(hz * seconds); i++) {
+      s = stepShot(s, { shot: 'upper', offset: null, reduced: false, hold: false }, 1 / hz);
+    }
+    return s;
+  };
+  for (const seconds of [0.4, 0.8, 1.0]) {
+    const states = [15, 30, 60, 120].map((hz) => sample(hz, seconds));
+    const progress = states.map((s) => s.progress);
+    const velocity = states.map((s) => s.velocity);
+    assert.ok(Math.max(...progress) - Math.min(...progress) < 0.005,
+      `${seconds}s 的景别进度随帧率漂了：${progress.join(', ')}`);
+    assert.ok(Math.max(...velocity) - Math.min(...velocity) < 0.01,
+      `${seconds}s 的景别速度随帧率漂了：${velocity.join(', ')}`);
   }
 });
 

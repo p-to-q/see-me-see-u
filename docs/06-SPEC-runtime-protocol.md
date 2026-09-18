@@ -8,7 +8,7 @@
 frame(tMs: number):
   dt = clamp((tMs - last)/1000, 1/240, 1/15)   // 必须 clamp：切标签页回来会给出 3 秒的 dt
   raw       = capture.latest()                  // 非阻塞，可能是 null（推理比渲染慢）
-  detected  = raw != null && raw.score > 0.5
+  detected  = posePresent(raw)                    // 整身平均或可靠躯干对；score 仍是整身质量
   presence  = presenceMachine.update(detected, dt)
   if raw:
     skeleton = stabilizer.apply(buildSkeleton(mediapipeToWorld(raw)), dt)
@@ -24,6 +24,9 @@ frame(tMs: number):
 **推理与渲染解耦**：MediaPipe 在自己的节奏上跑（≥30Hz），渲染 60fps。
 渲染永远用"最新可得"的 pose，绝不等推理。姿态滤波吸收两者的速率差。
 
+`RawPose.score` 是 33 点 visibility 的平均，表达整身完整度，不是唯一的 presence 判据。
+近距离裁掉下肢时，`posePresent()` 允许成对肩 / 胯达到现有质量线；精修降速、置信读数和告警仍使用原始 score。
+
 ## 2. Capture 接口
 
 ```ts
@@ -31,8 +34,12 @@ interface Capture {
   start(): Promise<void>;
   /** 最近一次成功的姿态；没有人/还没就绪时返回 null。绝不抛异常 */
   latest(): RawPose | null;
-  /** 最近一帧的人像 mask（慢回路用），可能为 null */
-  latestMask(): ImageBitmap | null;
+  /** 取走一张人像 mask；调用方取得所有权并负责 close，可能为 null */
+  takeMask(): ImageBitmap | null;
+  /** 慢回路开/撤一张 mask 的需求；回放可不实现 */
+  setMaskDemand?(wanted: boolean): void;
+  /** `latest()` 姿态所属输入帧的宽高比；未就绪 / 无元数据时可为 null */
+  readonly frameAspect?: number | null;
   readonly fps: number;
   readonly lastError: string | null;
   stop(): void;
@@ -40,6 +47,14 @@ interface Capture {
 ```
 实现两个：`WebcamCapture`（MediaPipe）与 `ReplayCapture`（读 `/demo/pose-*.json`，`?demo=1` 时启用）。
 **两者必须可互换**，这是 P3 降级路径与现场 plan B 的基础。
+消费者统一通过 `captureAspect()` 读取画幅：只接受有限正数，回放没有
+`screen` 元数据或驱动尚未报尺寸时回落 16:9。Webcam 的值必须绑定到已接受的
+那次推理输入帧，不能在 worker 回执时重读可能已换分辨率的 `<video>`。
+
+mask 不是快回路的持续输出。普通启动只建姿态图；慢回路武装后才请求
+ImageSegmenter，并且每位观众只接收一张。请求与 worker 回执携带同一个
+generation，离场后迟到的旧图必须关闭而不能交给下一位。主线程姿态降级
+（`?worker=off`）不再建第二张 MediaPipe 图：没有 mask 时慢回路静默等待，姿态优先。
 
 ## 3. PartLibrary 接口
 

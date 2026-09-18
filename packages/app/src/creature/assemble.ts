@@ -9,7 +9,7 @@
  * 它必须能在没有 GPU 的地方被读、被 diff、被单测。
  */
 import { attachMatrix, jointMatrix } from '../../../core/src/attach.ts';
-import { groundLift, liftMatrixInPlace, type PlacedExtent } from '../../../core/src/ground.ts';
+import { groundLift, liftMatrixInPlace, lowestPointOf, MAX_LIFT, type PlacedExtent } from '../../../core/src/ground.ts';
 import { IS_LEFT, SLOT_OF_BONE } from '../../../core/src/slots.ts';
 import { FOOT, MORPH, SKELETON, SLOT_FIT, SLOT_WIDTH } from '../../../core/src/tuning.ts';
 import { BONES } from '../../../core/src/skeleton.ts';
@@ -33,6 +33,11 @@ export interface PartInstance {
   mirrored: boolean;
   /** 列主序 4x4，与 three.js Matrix4.elements 一致 */
   matrix: Mat4;
+  /**
+   * 这件是稳定身体的一部分，可以决定主体贴地量。
+   * 替换中的碎屑、芯和飞入件仍然正常绘制，但不能拖着其他部位上下移动。
+   */
+  groundsBody: boolean;
 }
 
 /** 一个槽位这一帧要画成什么样。换装动画期间一个槽位会有两条（旧的缩小 / 新的长回来） */
@@ -43,6 +48,8 @@ export interface SlotRender {
   scale?: number;
   /** 沿骨头轴（关节盖片沿"离开骨盆"方向）外移多少米，用于组装动画 */
   offset?: number;
+  /** 短命效果额外沿世界 +Y 抬起多少米；只用于脱离层，不改骨架或挂载坐标系。 */
+  lift?: number;
   /**
    * 沿骨头轴再挪**骨长的几分之几**（关节盖片没有骨长，忽略）。
    * 忒修斯替换的墨屑用它沿骨头摆开（`replace-event.ts`）
@@ -57,6 +64,11 @@ export interface SlotRender {
    * 同时交接会把那一格的实例和面数一起乘上去（`replace-event.ts` 的 `waveRenders`）。
    */
   caps?: readonly [number, number];
+  /**
+   * 是否参与主体落地计算。缺省 true；只有短命的替换效果几何设为 false。
+   * 这不影响该实例是否绘制。
+   */
+  groundsBody?: boolean;
 }
 
 /** 垂直于 `dir` 的一个方向，绕轴转 `angle`。退化（dir 贴着 Z）时换一根参考轴 */
@@ -77,6 +89,19 @@ function lateralInPlace(m: Mat4, dir: Vec3, dist: number, angle: number): void {
 export interface AssembleOptions {
   /** 覆盖某些槽位的渲染内容；没给的槽位按 genome 原样画 */
   render?: Partial<Record<SlotKey, SlotRender[]>>;
+  /**
+   * 交接中槽位的稳定落地代理；只参与 lift，不返回给渲染端。
+   * 这里的件必须是满尺寸、在插座上的稳定几何，不能带碎屑 / offset / 事件 scale。
+   * 未列出的槽位不会在这里重复装配：它们已由正常 render 实例参与落地。
+   */
+  ground?: Partial<Record<SlotKey, SlotRender[]>>;
+  /**
+   * 交接目标的稳定落地代理。和 `ground` 成对使用，按 `groundProgress[key]` 插值两件代理的
+   * **世界最低点**，而不是把旧 AABB 用到最后一帧再突然换成新 AABB。
+   * 未列出或量不到一端时退回可测量的一端；坏进度按 0，帧循环不抛。
+   */
+  groundTo?: Partial<Record<SlotKey, SlotRender[]>>;
+  groundProgress?: Partial<Record<SlotKey, number>>;
   /** 实例总数上限（docs/02 P5）。超了就丢弃多余的，绝不越预算 */
   maxInstances?: number;
 }
@@ -177,24 +202,89 @@ function translateInPlace(m: Mat4, dir: Vec3, dist: number): void {
  * 真正被缓存下来、不必每帧重算的是**局部包围盒本身** —— 它从 `PartMeta` 直接读，
  * 不分配、不遍历顶点。
  */
-function groundToFloor(out: PartInstance[], lib: MetaSource): void {
+function floorBySlot(parts: PartInstance[], lib: MetaSource, floors: Map<SlotKey, number>): void {
+  floors.clear();
+  for (const i of parts) {
+    scratch.matrix = i.matrix;
+    scratch.aabb = lib.metaOf(i.partId)?.aabb ?? null;
+    scratch.mirrored = i.mirrored;
+    const y = lowestPointOf(scratch);
+    if (y === null) continue;
+    const before = floors.get(i.slotKey);
+    if (before === undefined || y < before) floors.set(i.slotKey, y);
+  }
+}
+
+function groundToFloor(
+  out: PartInstance[], stable: PartInstance[], stableTo: PartInstance[],
+  progress: AssembleOptions['groundProgress'], lib: MetaSource,
+): void {
   if (!out.length) return;                        // mass 那一档一个部件都不实例化
+  const blend = !!progress && (stable.length > 0 || stableTo.length > 0);
+  if (blend) {
+    floorBySlot(stable, lib, fromFloors);
+    floorBySlot(stableTo, lib, toFloors);
+  }
   // 复用同一个对象喂给 groundLift：这条路在帧循环里，每帧 new 64 个临时对象
   // 就是每分钟给 GC 送 230k 个短命对象（P5：帧里不分配）
   const lift = groundLift((function* () {
     for (const i of out) {
+      if (!i.groundsBody) continue;
       scratch.matrix = i.matrix;
       scratch.aabb = lib.metaOf(i.partId)?.aabb ?? null;
       scratch.mirrored = i.mirrored;
       yield scratch;
     }
+    if (!blend) {
+      for (const i of stable) {
+        scratch.matrix = i.matrix;
+        scratch.aabb = lib.metaOf(i.partId)?.aabb ?? null;
+        scratch.mirrored = i.mirrored;
+        yield scratch;
+      }
+      return;
+    }
+    // 每个交接槽位只贡献一个连续的最低点。全身仍取所有槽位的最小值，
+    // 所以多个同时交接的部位也各走自己的 t，不需要捏造一个全局进度。
+    for (const [key, from] of fromFloors) {
+      const to = toFloors.get(key) ?? from;
+      const raw = progress?.[key];
+      const t = Number.isFinite(raw) ? Math.max(0, Math.min(1, raw!)) : 0;
+      floorMatrix[13] = from + (to - from) * t;
+      yield floorPoint;
+    }
+    // 从空槽 graft 时生产接线会把 from=to；这里仍给独立调用者一个安全退路。
+    for (const [key, to] of toFloors) {
+      if (fromFloors.has(key)) continue;
+      floorMatrix[13] = to;
+      yield floorPoint;
+    }
   })());
-  if (!lift) return;
-  for (const i of out) liftMatrixInPlace(i.matrix, lift);
+  if (lift) for (const i of out) liftMatrixInPlace(i.matrix, lift);
+
+  // 短命效果不能决定主体 lift，但它自己也不能穿地。
+  // 主体完成稳定落地后再逐件只往 +Y 补：一片墨屑碰地只停住自己，
+  // 绝不反向搬动头、躯干或别的人。量不到就不动，荒谬 AABB 沿用 MAX_LIFT 安全阀。
+  for (const i of out) {
+    if (i.groundsBody) continue;
+    scratch.matrix = i.matrix;
+    scratch.aabb = lib.metaOf(i.partId)?.aabb ?? null;
+    scratch.mirrored = i.mirrored;
+    const y = lowestPointOf(scratch);
+    if (y !== null && y < 0) liftMatrixInPlace(i.matrix, Math.min(-y, MAX_LIFT));
+  }
 }
 
 /** `groundToFloor` 的复用槽。单线程、同步遍历，不会有第二个使用者同时持有它 */
 const scratch: PlacedExtent = { matrix: [], aabb: null, mirrored: false };
+const fromFloors = new Map<SlotKey, number>();
+const toFloors = new Map<SlotKey, number>();
+const floorMatrix: Mat4 = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+const floorPoint: PlacedExtent = {
+  matrix: floorMatrix,
+  aabb: { min: [0, 0, 0], max: [0, 0, 0] },
+  mirrored: false,
+};
 
 export function assemble(
   genome: Genome,
@@ -203,7 +293,10 @@ export function assemble(
   opt: AssembleOptions = {},
 ): PartInstance[] {
   const out = place(genome, skeleton, lib, opt);
-  groundToFloor(out, lib);
+  // 代理只装配 opt.ground 明确列出的槽位，不把整具身体在帧里再算一遍。
+  const stable = opt.ground ? place(genome, skeleton, lib, { render: opt.ground }, true) : [];
+  const stableTo = opt.groundTo ? place(genome, skeleton, lib, { render: opt.groundTo }, true) : [];
+  groundToFloor(out, stable, stableTo, opt.groundProgress, lib);
   return out;
 }
 
@@ -213,6 +306,7 @@ function place(
   skeleton: Skeleton,
   lib: MetaSource,
   opt: AssembleOptions,
+  onlyRenderOverrides = false,
 ): PartInstance[] {
   const out: PartInstance[] = [];
   const cap = finite(opt.maxInstances ?? Infinity, Infinity);
@@ -232,7 +326,7 @@ function place(
     const slot = SLOT_OF_BONE[bone.id];
     if (!slot) continue;
 
-    const renders = opt.render?.[bone.id] ?? defaultRender(genome, bone.id);
+    const renders = opt.render?.[bone.id] ?? (onlyRenderOverrides ? [] : defaultRender(genome, bone.id));
     const mode = SLOT_FIT[slot];
     const dir = dirOf(bone.p0, bone.p1);
 
@@ -261,6 +355,7 @@ function place(
       });
       translateInPlace(matrix, dir, finite(r.offset ?? 0, 0) + finite(r.along ?? 0, 0) * finite(bone.length, 0));
       lateralInPlace(matrix, dir, finite(r.lateral ?? 0, 0), finite(r.angle ?? 0, 0));
+      matrix[13] += finite(r.lift ?? 0, 0);
 
       out.push({
         key: bone.id,
@@ -270,6 +365,7 @@ function place(
         materialRole: r.materialRole,
         mirrored,
         matrix,
+        groundsBody: r.groundsBody !== false,
       });
     }
   }
@@ -277,7 +373,7 @@ function place(
   // ── 2. 关节盖片（docs/05 §4） ──────────────────────────────────────────
   const joints = skeleton.joints ?? {};
   const pelvis = joints['pelvis'] ?? [0, 0, 0];
-  const jointRenders = opt.render?.['joint'] ?? defaultRender(genome, 'joint');
+  const jointRenders = opt.render?.['joint'] ?? (onlyRenderOverrides ? [] : defaultRender(genome, 'joint'));
 
   for (let ci = 0; ci < JOINT_CAPS.length; ci++) {
     const capDef = JOINT_CAPS[ci];
@@ -309,6 +405,7 @@ function place(
       jointMatrix(p, (radiusMeters * s) / Math.max(1e-4, meta.localGirth), matrix);
       translateInPlace(matrix, dir, finite(r.offset ?? 0, 0));
       lateralInPlace(matrix, dir, finite(r.lateral ?? 0, 0), finite(r.angle ?? 0, 0));
+      matrix[13] += finite(r.lift ?? 0, 0);
 
       out.push({
         key: `joint:${capDef.joint}`,
@@ -318,6 +415,7 @@ function place(
         materialRole: r.materialRole,
         mirrored: false,
         matrix,
+        groundsBody: r.groundsBody !== false,
       });
     }
   }

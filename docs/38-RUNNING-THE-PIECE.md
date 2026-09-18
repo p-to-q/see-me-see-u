@@ -55,9 +55,10 @@ four that decide whether a given camera is fine:
 Two further thresholds worth knowing before you aim the camera, both from
 `CAPTURE`:
 
-- `minScore: 0.5` — below this average landmark visibility, the piece considers
-  the room **empty**. This is what drives entering, leaving, and the idle
-  frame-rate throttle.
+- `minScore: 0.5` — an average landmark visibility above this proves presence.
+  A close visitor can also prove presence with a reliable shoulder or hip pair,
+  so cropped legs no longer make the room look empty. The original average still
+  drives whole-body quality readouts and warnings.
 - `minJointConfidence: 0.4` — a single joint below this drops out of the motion
   statistics, which is what drives evolution. A visitor half behind a pillar
   grows more slowly, and that is the mechanism, not a bug.
@@ -77,12 +78,18 @@ from another machine on the LAN, you need `https`.
 npm install
 npm run doctor          # machine self-check; changes nothing, prints no keys
 npm run kiosk           # build + preview + opens /?kiosk=1&preview=on
+npm run kiosk:fake      # same production path, but no Rodin credits
 ```
 
 `npm run kiosk` (root `package.json`) builds and serves the production bundle,
-then opens **`http://localhost:4173/?kiosk=1&preview=on`**. That is the URL the installation
-runs on. Nobody types a second command afterwards — that is P10, and it is why
+then opens **`http://localhost:4173/?kiosk=1&preview=on`**. It also enables the local slow-loop
+host and binds Vite to `127.0.0.1`; the credit-spending endpoint is therefore not reachable
+from the venue LAN. That is the URL the installation runs on. Nobody types a second command afterwards — that is P10, and it is why
 every on-site adjustment in §3 is a URL parameter rather than a rebuild.
+
+Before using real generation, run `npm run kiosk:fake` once. It serves the same production
+bundle through the same preview hook, but `SLOW_FAKE=1` substitutes an existing same-slot part
+for Rodin. It proves the host and every downstream step without spending credits.
 
 **Before doors open, turn off every auto-framing upstream of the browser.**
 macOS Control Centre › Video Effects › **Center Stage off**; Windows Settings ›
@@ -301,7 +308,9 @@ The symptom is a screen that still works: `webcam.ts` never throws out of
 
 ### Nobody is detected
 
-The body will not stand up below `CAPTURE.minScore` (0.5 average visibility).
+The body needs either an average visibility above `CAPTURE.minScore` (0.5) or a
+reliable shoulder/hip pair. A low number can therefore mean cropped legs rather
+than an empty room; the little screen distinguishes that from poor tracking.
 In order of what actually fixes it on site:
 
 0. **Turn the little screen on: `?preview=on`.** It is the fastest way to tell
@@ -388,9 +397,11 @@ sends a **silhouette mask** — a black-and-white PNG of the visitor's outline,
 drawn from MediaPipe's segmentation mask, with no photographic content — to a
 3D generation model. Precisely:
 
-- It is submitted to **`POST /__slow` on localhost**, a dev-server middleware
+- It is submitted to **`POST /__slow` on localhost**, a local Vite middleware
   (`vite.config.ts`). The Node side holds the API key and talks to Hyper3D
   Rodin; the key never enters the browser bundle (P8).
+- The socket must be loopback. A request from the LAN gets the same structured 404 as a
+  disabled host, even if Vite itself was started with `--host`.
 - **It is not user-triggered.** `slow.ts` arms itself after
   `SLOW_LOOP.armAfter` = 20 seconds of continuous presence and fires at most
   `maxPerSession` = 1 time. Standing there is the trigger. (The `/about` and
@@ -399,10 +410,10 @@ drawn from MediaPipe's segmentation mask, with no photographic content — to a
 - The resulting part and a row naming session id, time, species and slot are
   kept locally in the lineage pool, so the next visitor may inherit it.
 
-**3. On the deployed web build, not even that leaves.** `/__slow` is registered
-with `apply: 'serve'` — it exists only under the dev server. The production
-build has no such endpoint, and `configurePreviewServer` returns an explicit
-404 so the absence reads as absence rather than as a parse error. `docs/10`
+**3. On the deployed web build, not even that leaves.** `/__slow` is a Node-side
+host hook, not browser-bundle code. A normal production preview returns an explicit 404;
+only the on-site command sets `SLOW_ENABLE=1`. Static Vercel deployment runs neither Vite
+hook and has no endpoint. `docs/10`
 records the check: after `npm run build`, `grep -rl "__slow\|slow-http\|RODIN_API_KEY" dist/`
 is empty. So **on https://useeme.ptoq.io nothing at all is uploaded**; the piece
 there is the fast loop only.

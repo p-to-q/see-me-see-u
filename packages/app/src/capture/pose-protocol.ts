@@ -12,7 +12,6 @@ export type PoseIn =
     wasmLoaderPath: string;
     wasmBinaryPath: string;
     poseModel: string;
-    segmenterModel: string | null;
     /** 预热用的画布尺寸：让着色器按真实输入的尺寸编译 */
     width: number;
     height: number;
@@ -22,15 +21,22 @@ export type PoseIn =
      */
     numPoses?: number;
   }
-  /** 运行中改人数上限（控件条）。worker 在两帧之间重建图，这期间来的帧回 `fail` */
-  | { type: 'options'; numPoses: number }
+  /** 慢回路第一次需要剪影时才建分割图；一次 worker 生命周期最多请求一次。 */
+  | { type: 'segmenter-init'; model: string }
+  /**
+   * 运行中改人数上限（控件条）。worker 在两帧之间重建图，这期间来的帧回 `fail`。
+   * `requestId` 让主线程可以丢掉旧回执；只有匹配的成功回执才能改“已生效”人数。
+   */
+  | { type: 'options'; requestId: number; numPoses: number }
   | {
     type: 'frame';
     frame: VideoFrame | ImageBitmap;
     /** 主线程的 `performance.now()`，严格递增。worker 的时钟原点不同，所以时间戳只用这一个 */
     stamp: number;
-    /** 这一帧顺手抠一次图（慢回路用，2Hz） */
-    mask: boolean;
+    /** 这张输入帧自己的宽高比；回执原样带回，不能拿下一张视频尺寸配旧 pose。 */
+    aspect: number;
+    /** 非 null 才抠图；generation 把迟到回执隔离在原观众内。 */
+    maskGeneration: number | null;
   };
 
 export type PoseOut =
@@ -39,7 +45,7 @@ export type PoseOut =
   /** 起不来（init 失败）。之后这个 worker 不再可用 */
   | { type: 'error'; error: string }
   | {
-    type: 'pose'; stamp: number; world: Landmark[] | null; screen: Landmark[] | null; score: number; inferMs: number;
+    type: 'pose'; stamp: number; aspect: number; world: Landmark[] | null; screen: Landmark[] | null; score: number; inferMs: number;
     /**
      * MediaPipe 这一帧给出的**其余**几个人（下标 1..n−1）。`numPoses = 1` 时永远不出现。
      * 顺序不保证、不带身份（docs/24 #4681）：身份由主线程的 `core/src/people.ts` 跟出来。
@@ -49,14 +55,18 @@ export type PoseOut =
   }
   /** 这一帧推理抛了；worker 还活着 */
   | { type: 'fail'; stamp: number; error: string }
-  | { type: 'mask'; bitmap: ImageBitmap };
+  /** `setOptions()` 的显式结果；失败时不得把目标值当成已生效 */
+  | { type: 'options-result'; requestId: number; numPoses: number; ok: boolean; error?: string }
+  | { type: 'mask'; generation: number; bitmap: ImageBitmap }
+  | { type: 'mask-fail'; generation: number; error: string };
 
 export function toLandmark(l: { x: number; y: number; z: number; visibility?: number }): Landmark {
   return { x: l.x, y: l.y, z: l.z, visibility: l.visibility };
 }
 
 /**
- * MediaPipe 不给"整体置信度"，只有逐点 visibility。取平均值当 score（docs/06 §1 用它判有没有人）。
+ * MediaPipe 不给"整体置信度"，只有逐点 visibility。取平均值当整身质量 score；
+ * presence 还会在 `core/src/pose-signal.ts` 检查可靠的肩 / 胯对，以免画外下肢把近距离人平均成“无人”。
  * 有些模型版本 visibility 恒为 0；那种情况下"检出了 33 个点"本身就是证据，记 1。
  */
 export function overallScore(

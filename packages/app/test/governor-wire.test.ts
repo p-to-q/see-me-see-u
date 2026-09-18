@@ -29,7 +29,7 @@ test('调速器接线: 放到第 n 级 = 前 n 个开关拨成"放下"，只拨�
   assert.deepEqual(calls, [['swaps', false]], '拿回一级只拨那一个');
   calls.length = 0;
   apply(GOVERNOR_LADDER.length);
-  assert.deepEqual(calls.map((c) => c[0]), ['swaps', 'inference', 'post', 'dpr', 'ui', 'people']);
+  assert.deepEqual(calls.map((c) => c[0]), ['swaps', 'inference', 'dpr', 'post', 'ui', 'people']);
   assert.ok(calls.every((c) => c[1] === true));
 });
 
@@ -52,7 +52,7 @@ test('调速器接线: 每一级都登记了它拨的是哪个开关，而且那
     ink: read('../src/stage/stage.ts'),
     swaps: main,
     inference: read('../src/capture/webcam.ts'),
-    post: read('../src/ui/control-table.ts') + main,
+    post: read('../src/stage/stage.ts') + main,
     dpr: main,
     ui: main,
     // 多人（docs/50 §5.4）：开关是 main.ts 里 `people` 那一块的 `shed` 位，帧循环里按它把伴随身体的预算压到 0

@@ -102,7 +102,7 @@ export function previewReservedTop(): number {
 
 export interface Preview {
   /** 每帧调一次。`pose` 是帧循环手上那一份，不另取 */
-  update(pose: RawPose | null, dt: number): void;
+  update(pose: RawPose | null, dt: number, aspect?: number): void;
   dispose(): void;
 }
 
@@ -117,8 +117,10 @@ export function mountPreview(opts: {
   mount?: HTMLElement;
   video: () => HTMLVideoElement | null;
   cameraOn: () => boolean;
-  /** 上半身是正当取景（docs/49 §落地）。缺省 false = 这一版之前的行为：不裁切、腿出画照样说话 */
-  framing?: () => boolean;
+  /** 画面下边缺腿是不是合理：最终中景，或上游摄像头正在自行取景。 */
+  lowerBodyOptional?: () => boolean;
+  /** 舞台最终采用的是不是中景。只用它开数字裁切，不再从原始分类结果猜。 */
+  cropUpper?: () => boolean;
   /**
    * 画面里**其余**被看见的人（docs/50 §6.2）：`bodied` = 他有没有身体。缺省 = 单人，只画 `pose` 那一个。
    * 有身体的画 0.5 透明度，没有身体的（超过上限、海报）画 0.2 —— 小屏说实话：他确实被看见了，只是没有身体。
@@ -294,17 +296,16 @@ export function mountPreview(opts: {
   }
 
   return {
-    update(pose, dt) {
+    update(pose, dt, aspect) {
       const camera = opts.cameraOn();
       attach(camera ? opts.video() : null);
-      const upper = opts.framing?.() ?? false;
-      const seen = watch.update({ camera, pose, upperIsIntended: upper }, dt);
+      const lowerBodyOptional = opts.lowerBodyOptional?.() ?? false;
+      const seen = watch.update({ camera, pose, upperIsIntended: lowerBodyOptional, aspect }, dt);
       say(seen);
       sayNotice(opts.notice?.() ?? null);
       applyCrop(cropActive({
-        upperIsIntended: upper,
+        upperIsIntended: opts.cropUpper?.() ?? false,
         reduced: opts.reduced?.() ?? false,
-        othersBodied: (opts.others?.() ?? []).some((o) => o.bodied),
       }), seen, pose, dt);
       noteCameraFraming(camera && (opts.cameraFraming?.() ?? false));
       // 只在采集端真的给了新一帧的时候重画。`pose.t` 是 `performance.now()`

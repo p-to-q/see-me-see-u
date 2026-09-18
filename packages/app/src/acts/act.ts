@@ -61,6 +61,8 @@ export interface ActContext {
    * 弧线在底下照走，拿掉叠加的那一帧就回到 `overall`。
    */
   point?: MovementIndex | null;
+  /** Director 私有的一条动作线；缺失时玩法必须回到当帧 live，不能借模块全局状态。 */
+  line?: LineRuntime;
 }
 
 export interface Act {
@@ -68,6 +70,11 @@ export interface Act {
   label: string;
   /** 'body' = 决定身体怎么动，同时只有一个；'ambient' = 常驻叠加 */
   kind: 'body' | 'ambient';
+  /**
+   * 为每个 Director 建一份私有实例。有跨帧记忆的玩法必须提供；无状态玩法省略即可共享。
+   * `ACTS` 是目录，不是运行时状态的所有者（双舞台 / 联机时尤其不能共用一份闭包）。
+   */
+  instantiate?(): Act;
   canEnter?(w: World): boolean;
   weight?: number;
   minSeconds?: number;
@@ -80,11 +87,29 @@ export interface Act {
 // ── 一条线（docs/44 §6：四个乐章留名字，删边界）──────────────────────────────
 //
 // follow / echo / resist / facing 不再是四套逻辑，是同一个采样器在四个点上的名字。
-// 采样器**只有一个**、状态跨四个名字共享：弧线在 40 秒把名字从 follow 换成 echo 时，
-// 缓冲、追踪、朝向一样都不重置 —— 名字换了，线没有断。
-const line = createLineSampler();
-let lastPin: MovementIndex | null = null;
-let lastOverall = 0;
+// 每个 Director / encounter 有且只有一个采样器，状态跨四个名字共享：弧线换名字时，
+// 缓冲、追踪、朝向一样都不重置；另一个 Director 或下一位观众则拿不到这一份历史。
+interface LineRuntime {
+  readonly sampler: ReturnType<typeof createLineSampler>;
+  lastPin: MovementIndex | null;
+  lastOverall: number;
+  reset(): void;
+}
+
+function createLineRuntime(): LineRuntime {
+  const sampler = createLineSampler();
+  const runtime: LineRuntime = {
+    sampler,
+    lastPin: null,
+    lastOverall: 0,
+    reset() {
+      sampler.reset();
+      runtime.lastPin = null;
+      runtime.lastOverall = 0;
+    },
+  };
+  return runtime;
+}
 
 /**
  * 名字为 `actId` 的那个玩法此刻在这条线上取哪一组数 —— **和 `playLine` 喂给身体的是同一点**：
@@ -106,17 +131,25 @@ export function lineFor(actId: string | null, overall: number, pinned: boolean):
 export function playLine(w: World, dt: number, movement: MovementIndex, ctx?: ActContext): void {
   const sk = w.skeleton;
   if (!sk) return;
+  const runtime = ctx?.line;
+  // 独立调用某个 Act（测试、未来插件、降级路径）时没有 Director 所有的状态。
+  // 这时宁可逐字 follow，也不偷偷退回一份跨观众共享的模块全局历史。
+  if (!runtime) {
+    w.creature.pose(sk, w.presence, dt);
+    w.note('线 实时兜底');
+    return;
+  }
   const pin = ctx?.pinned ? movement : ctx?.point ?? null;
   const live = w.arc && Number.isFinite(w.arc.overall) ? w.arc.overall : pointOf(movement);
   const overall = pin === null ? live : pointOf(pin);
   // 换钉点、或者弧线往回走了（归零 = 换了一个人）：朝向直接到位，不慢慢追
-  const snap = pin !== lastPin || overall < lastOverall - 1e-3;
-  lastPin = pin;
-  lastOverall = overall;
+  const snap = pin !== runtime.lastPin || overall < runtime.lastOverall - 1e-3;
+  runtime.lastPin = pin;
+  runtime.lastOverall = overall;
   const target = lineAt(overall);
-  const posed = line.apply({ skeleton: sk, t: w.t, dt, speed: w.features?.speed ?? 0, target, snap });
+  const posed = runtime.sampler.apply({ skeleton: sk, t: w.t, dt, speed: w.features?.speed ?? 0, target, snap });
   w.creature.pose(posed, w.presence, dt);
-  w.note(`线 延迟 ${target.delay.toFixed(2)}s · 重量 ${target.weight.toFixed(2)} · 朝向 ${line.facing.toFixed(2)}`);
+  w.note(`线 余波 ${target.delay.toFixed(2)}s/${runtime.sampler.history.toFixed(2)} · 重量 ${target.weight.toFixed(2)} · 朝向 ${runtime.sampler.facing.toFixed(2)}`);
 }
 
 /** 连续出错这么多次，这个 Act 就被永久禁用 —— 一个坏玩法不该带走整件作品 */
@@ -138,19 +171,25 @@ export interface Director {
    * 观众拿回身体之后应该回到**这一场此刻的**乐章，而不是永远停在 follow。
    */
   release(w: World): void;
+  /** 换观众 / 主身份 / 输入源时切断逐帧历史；弧线与物种状态由各自所有者决定是否保留。 */
+  resetTemporal(): void;
   /** 现在是不是被强制按住了（HUD / 出口那一列要知道） */
   readonly forced: boolean;
 }
 
 export function createDirector(acts: readonly Act[], fallbackId = 'follow'): Director {
-  const body = acts.filter((a) => a.kind === 'body');
-  const ambient = acts.filter((a) => a.kind === 'ambient');
+  // `acts` 是玩法目录。把有记忆的条目在边界上实例化一次，Director 此后只碰自己的副本。
+  // 无状态玩法仍共享原对象，不为每帧或每场制造没有意义的分配。
+  const ownedActs = acts.map((act) => act.instantiate?.() ?? act);
+  const body = ownedActs.filter((a) => a.kind === 'body');
+  const ambient = ownedActs.filter((a) => a.kind === 'ambient');
   const fallback = body.find((a) => a.id === fallbackId) ?? body[0];
 
   const disabled = new Map<string, string>();
   const strikes = new Map<string, number>();
   let current: Act | null = null;
   let forced = false;
+  const line = createLineRuntime();
 
   /** 把 Act 的任何异常挡在帧循环之外（docs/16 §5 规则 2） */
   function guard<T>(act: Act, what: string, fn: () => T): T | undefined {
@@ -206,7 +245,7 @@ export function createDirector(acts: readonly Act[], fallbackId = 'follow'): Dir
       // 叠加只换采样点，不换演员：弧线说该演哪一段就演哪一段（`currentId` 照走），
       // 线在叠加的那个地名上采样。「还回去」按住时叠加让路 —— 那一场不跟随任何人
       const point = forced ? null : lineOverlay(w.intent ?? NO_INTENT);
-      if (current) guard(current, 'update', () => current!.update(w, dt, { pinned: forced, point }));
+      if (current) guard(current, 'update', () => current!.update(w, dt, { pinned: forced, point, line }));
       for (const a of ambient) {
         if (disabled.has(a.id)) continue;
         if (a.canEnter && guard(a, 'canEnter', () => a.canEnter!(w)) !== true) continue;
@@ -216,17 +255,20 @@ export function createDirector(acts: readonly Act[], fallbackId = 'follow'): Dir
     get currentId() { return current?.id ?? null; },
     get disabled() { return disabled; },
     force(id, w) {
-      const act = acts.find((a) => a.id === id && a.kind === 'body');
+      const act = ownedActs.find((a) => a.id === id && a.kind === 'body');
       if (!act || disabled.has(id)) return false;
+      if (act.id === 'untether' && current?.id !== 'untether') line.reset();
       forced = true;
       switchTo(act, w);
       return true;
     },
     release(w) {
+      if (current?.id === 'untether') line.reset();
       forced = false;
       const next = arcPick(w);
       if (next && next !== current) switchTo(next, w);
     },
+    resetTemporal() { line.reset(); },
     get forced() { return forced; },
   };
 }

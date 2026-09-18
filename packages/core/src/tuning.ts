@@ -19,12 +19,14 @@ export const TIME = {
 
 // ── 1. 采集 ────────────────────────────────────────────────────────────────
 export const CAPTURE = {
-  /** 低于这个分数视为"没有人" */
+  /** 33 点平均过这条线可以证明有人；可靠躯干对的例外见 `pose-signal.ts` */
   minScore: 0.5,
   /** 单个关节低于这个 visibility 就不参与运动统计 */
   minJointConfidence: 0.4,
   /** 目标推理频率（Hz）。渲染永远不等推理 */
   targetHz: 30,
+  /** rAF 节拍判断的提前余量（毫秒）：免得 30Hz 因显示时钟的细小抖动掉成 20Hz。 */
+  cadenceSlackMs: 2,
   requestedVideo: { width: 1280, height: 720 },
 
   // ── 推理与渲染的节拍分离（`app/src/capture/pose-clock.ts`，docs/48 §3）──────
@@ -42,6 +44,13 @@ export const CAPTURE = {
   stallAfter: 0.25,
   /** 停滞之后再保持多久（秒）才交出 null，由在场判定接手淡出（不闪、不僵） */
   holdAfterStall: 0.6,
+  /** worker 的一张输入帧超过这么久未回（毫秒）就退休该 worker，再走有上限的重建。 */
+  workerFrameTimeoutMs: 2000,
+  /**
+   * `setOptions({ numPoses })` 重建图的最长等待。超时后不能放锁继续用旧实例：worker 整体退休，
+   * 主线程 landmarker 整体隔离。它比单帧上限宽，仍远短于一次完整冷启动。
+   */
+  peopleReconfigureTimeoutMs: 2500,
   /**
    * 按下「摄像头」到第一次推理完成最多等多久（秒）。**等的时候回放照跑**；
    * 超时就撤回这一次（回放继续、那一行回到「关着」）。基线冷缓存实测 32.6s（docs/48 §2），给足余量。
@@ -112,6 +121,8 @@ export const GOVERNOR = {
  * 实测：调速器放下「后期」那一帧直出管线现编译，273ms + 367ms 两次长任务。
  */
 export const WARM = {
+  /** 未来档位桶走真实后期时，整组 Mesh 暂放到相机视野外的世界 Y；实例桶禁用了视锥剔除 */
+  tierOffscreenY: 10_000,
   /** 桶的集合（身体上画着的部件 × 材质）要稳定这么久（毫秒）才编：换件那一串中间态不值得编 */
   settleMs: 1000,
   /**
@@ -264,8 +275,13 @@ export const ARC = {
  * 代码里从来没有实现过，这里没有凭空发明它们 —— 见 docs/44 §6 的补记。
  */
 export const LINE = {
-  /** 延迟（秒），I..IV。原 `echo.ts` 的 `ECHO_SECONDS` */
+  /** 双臂局部历史余波的取样距离（秒），I..IV。原 `echo.ts` 的 `ECHO_SECONDS` */
   delay: [0, 1.2, 0, 0],
+  /**
+   * 单层身体里历史所能占的上限。0.5 不是审美调参，是安全边界：
+   * 当下载波永远不比历史少，新动作第一帧至少画出一半。真人验收前不向上调。
+   */
+  maxHistoryShare: 0.5,
   /** 重量 0..1，I..IV：输出在"原样"与"临界阻尼追踪"之间的混合。原 `resist.ts` */
   weight: [0, 0, 1, 0],
   /** 朝向 0..1，I..IV：镜像被抵消的程度。原 `facing.ts` */
@@ -466,6 +482,25 @@ export const THESEUS = {
    */
   coreHold: 0.6,
   /**
+   * 可见脱离的完整产品预算。profile 只决定相对当前 socket 的附加位移，骨架本身仍逐帧实时；
+   * `unlockOverall` 按整条弧线比例表达，因此 90s / 180s 版本保留同一段落关系。
+   * 第一次脱离由策略固定为手；chance 只作用于这门语法已经建立之后的事件。
+   */
+  detachment: {
+    unlockOverall: { terminal: 0.11, segment: 0.28, core: 0.53 },
+    chance: { terminal: 0.5, segment: 0.32, core: 0.16 },
+    /** 两次脱离之间至少隔几次真正被接受的原位替换。 */
+    minAcceptedGap: 2,
+    /** 末端成本 1，肢段 / 核心成本 2；总预算 2，所以结构段与核心事件独占。 */
+    budget: 2,
+    /** 骨头件最远离开当帧骨长的比例；两端仍严格回到 socket。 */
+    along: { terminal: 0.55, segment: 0.30, core: 0.14 },
+    /** 世界 +Y 的小弧线，避免脚 / 小腿沿近水平骨轴贴地拖行；仍由逐件 floor clamp 兜底。 */
+    liftMeters: { terminal: 0.035, segment: 0.028, core: 0.018 },
+    /** 关节盖片没有单独骨长，沿“骨盆→该关节”方向最多移这么多米。 */
+    jointOffsetMeters: 0.05,
+  },
+  /**
    * 人一走全部回到原件（§8）。false 之后第二个观众看到的是一具已经被换了一半的
    * 身体，而他没见过原件 —— 对他来说忒修斯之船从来没发生过，
    * 而且失效得看不出来（画面照常在动）。**这不是一个应该被关掉的开关。**
@@ -487,8 +522,6 @@ export const MORPH = {
   crossfade: 1.2,
   /** 同时最多几个槽位在做换装动画，其余排队（避免"整个人炸开"） */
   maxConcurrentSwaps: 3,
-  /** 组装动画：新部件从骨头轴向外这么远吸附回位（米） */
-  assembleOffset: 0.15,
   /** 整具身体同 family 的概率 */
   sameFamilyChance: 0.8,
   /** tier 3 允许跨主题杂交的槽位数 */
@@ -1243,8 +1276,13 @@ export const AUTOFRAME = {
   legBlendSeconds: 0.5,
 
   // ── 舞台相机（中景）──
-  /** 两种景别之间走多久（秒），smoothstep */
-  shotSeconds: 1.0,
+  /** 景别临界阻尼的角频率（1/秒）：配合下面的限速，约 1 秒到视觉端点；反向时保留速度、先刹再回头。 */
+  shotOmega: 6.0,
+  /** 景别进度最大速度（1/秒）。套 smoothstep 后峰值不超过旧轨迹的连续性上限。 */
+  shotMaxSpeed: 1.25,
+  /** 接近端点且速度足够低时精确吸附；此处的 5% 经 smoothstep 后只剩约 0.7% 画面差。 */
+  shotSettlePosition: 0.05,
+  shotSettleVelocity: 0.25,
   /** `prefers-reduced-motion` 时走多久。0.15 秒读作一次切，不是一段运镜 */
   shotSecondsReduced: 0.15,
   /**
@@ -1265,6 +1303,21 @@ export const AUTOFRAME = {
   /** 跟随：水平 / 竖直最大偏移（米）。**小范围**：这是一面镜子，相机不许把人的位移抵消掉 */
   followRangeX: 0.12,
   followRangeY: 0.08,
+
+  // ── 中景的画面空间纵向跟随 ──
+  /**
+   * pelvis/chest 相对进入中景时的位置，先扣掉同名 world 关节的同步移动，再在画面单位里过死区、折成米。
+   * 初值与中景横向同一量级：近处小幅上下移动能进来，亚像素抖动进不来；真人摄像头验收后只调这里。
+   */
+  verticalDeadZoneImage: 0.003,
+  verticalBandImage: 0.02,
+  /** 画面锚点与躯干尺度分别去抖；先滤再除尺度，避免远处两份噪声相乘。 */
+  verticalCenterJitter: { minCutoff: 1.2, beta: 1.5 },
+  verticalScaleJitter: { minCutoff: 0.3, beta: 0 },
+  /** 单帧纵向锚点跳过 20% 画面高或尺度跨过身份门：当成换人，重立基线而不是运镜追过去。 */
+  verticalJump: 0.2,
+  /** 纵向证据短丢失先冻结；超过一秒平滑归中。 */
+  verticalHoldSeconds: 1.0,
 
   // ── 左上角小屏的数字裁切 ──
   /** 最大放大倍数。小屏上再大就糊，而且"整个画框"这件事会看不见 */
@@ -1301,26 +1354,34 @@ export const AUTOFRAME = {
   previewMinSourcePerDisplayPx: 1.0,
 
   // ── 身体的横向根偏移（docs/49 §6.3 二）──
-  /** 死区 / 过渡带（米）。5cm 以内的晃身体不动 */
-  lateralDeadZone: 0.05,
-  lateralBand: 0.08,
+  /**
+   * 横向死区 / 过渡带（画面高度单位；16:9 下 0.006 ≈ 画面宽的 0.34%）。
+   * 必须在除以躯干尺度**之前**判断：用米制死区时，同样 1% 的画面移动在近处会被吞掉、
+   * 在远处却会被放大十倍。投影后的米制死区由 `stepLateral()` 每帧推导，不再另调一份。
+   */
+  lateralDeadZoneImage: 0.006,
+  lateralBandImage: 0.02,
   /** 弹簧角频率（1/秒）与限速（米/秒）。镜子不能太迟钝：1 米的一步大约 0.8 秒跟到 */
   lateralOmega: 3.5,
   lateralMaxSpeed: 1.5,
   /**
-   * 上半身（中景）专用的死区与角频率——比全景更小、更快（作品负责人 2026-09-15 追加要求）。
+   * 上半身（中景）专用的画面死区与角频率——比全景更小、更快（作品负责人 2026-09-15 追加要求）。
    * 全景那一档的迟钝是故意的：`stage/framing.ts` 头一条主张是"等身 + 相机距离不动"，
    * 横向根偏移已经是那条主张里**唯一**的让步，不该再让它抢戏。中景不受那条主张约束——
    * 进中景本身就已经是自适应取景（画面高 × 0.64、放大 2.2 倍），旁边没有巨题、没有站位线替它撑住，
-   * 笔记本观众也几乎只用得到这一档。**未接过真人摄像头**（docs/49 §6.8 第 2 条同一个未验证）。
+   * 笔记本观众也几乎只用得到这一档。**未接过真人摄像头**（docs/49 §6.8 第 1 条同一个未验证）。
    */
-  lateralDeadZoneUpper: 0.02,
+  lateralDeadZoneUpperImage: 0.003,
   lateralOmegaUpper: 5.5,
   /** 速度前馈（秒）与上限（米）：横穿时少落后一截；停下时最多冲过这么多 */
   lateralLead: 0.12,
   lateralLeadMax: 0.1,
-  /** 目标去抖（One Euro，米） */
-  lateralJitter: { minCutoff: 1.2, beta: 1.5 },
+  /**
+   * 中心与尺度各自在画面空间去抖，再做 `center / scale` 的透视投影。
+   * 尺度用低截止、零速度增益：远处尺度噪声最容易被除法放大；真实前后移动慢一个量级，0.3Hz 仍跟得上。
+   */
+  lateralCenterJitter: { minCutoff: 1.2, beta: 1.5 },
+  lateralScaleJitter: { minCutoff: 0.3, beta: 0 },
   /** 横向证据没了之后停多久（秒）才回中线 */
   lateralHoldSeconds: 1.0,
   /** 躯干宽度里有这么多越过了左 / 右边 = 那一侧出画（小屏说那一侧的话，身体停住） */
@@ -1329,6 +1390,11 @@ export const AUTOFRAME = {
   lateralMinTorsoWidth: 0.3,
   /** 根的画面 x 一帧跳过这么多（画面宽）= 换人，先停住 */
   lateralJump: 0.2,
+  /**
+   * 横向跟随的尺度换人还必须同时越过这个绝对差（画面高度单位）；相对差按两者较小值算，方向对称。远处 0.10 ↔ 0.14
+   * 虽有 40% 相对差，绝对只抖 0.04，不该把同一个人每隔一帧拦成换人；0.30 ↔ 0.80 仍会命中。
+   */
+  lateralIdentityJumpAbsolute: 0.05,
   /** 跳过去的新位置稳定这么久（秒）才跟过去 */
   lateralJumpConfirmSeconds: 0.5,
   /** 舞台余量里给身体边缘再留多少（米） */
@@ -1338,13 +1404,14 @@ export const AUTOFRAME = {
   /**
    * 每 16ms 最多变多少。**这是守卫，不是旋钮**：`core/test/autoframe-continuity.test.ts` 用随机决策序列逐帧核对，
    * 调快了某个弹簧、它红了，就是在说"这个变化读起来会是一次跳"。减少动态不受它约束（6.3 写明的例外）。
-   *  - `progress`：景别进度**缓动之后**（smoothstep 峰值斜率 1.5 × 16ms / `shotSeconds` = 0.024）
+   *  - `progress`：景别进度**缓动之后**
+   *  - `progressVelocity`：景别原始进度速度每 16ms 的最大变化；挡住目标反向时的速度瞬间翻号
    *  - `zoom` / `center`：小屏裁切的放大倍数 / 窗口中心（画面归一化）
    *  - `legHold`：腿混向站姿的权重（缓动之后）
    *  - `lateral`：身体的横向根偏移（米）
    *  - `fovDeg` / `pan`：舞台相机的竖直视角（度）/ 移轴平移（米）
    */
-  maxStep: { progress: 0.03, zoom: 0.03, center: 0.02, legHold: 0.06, lateral: 0.03, fovDeg: 1.5, pan: 0.012 },
+  maxStep: { progress: 0.03, progressVelocity: 0.65, zoom: 0.03, center: 0.02, legHold: 0.06, lateral: 0.03, fovDeg: 1.5, pan: 0.012 },
 };
 
 /**
@@ -1357,11 +1424,11 @@ export const AUTOFRAME = {
 export const PEOPLE = {
   // ── 人数 ──
   /**
-   * `?people=` 的默认值（网页版）。**1，直到证据说可以改**：它唯一的依据是 docs/50 §1.2 的推理表
+   * 网页自动人数的稳态起点。**1，直到证据说可以改**：它唯一的依据是 docs/50 §1.2 的推理表
    * （numPoses 1/2/3 × 画面里 1/2/3 人），而那张表这一轮没跑（Not run）。
    */
   defaultCap: 1,
-  /** `?kiosk=1` 的默认值。同上；现场要多人写 `?kiosk=1&people=2` */
+  /** `?kiosk=1` 的自动人数起点 / 退档下限。同上；显式 `?people=2` 仍可固定在两人档。 */
   defaultCapKiosk: 1,
   /**
    * 硬上限：`?people=` 认的最大值，也是 worker 里 `numPoses` 的上限。
@@ -1369,13 +1436,19 @@ export const PEOPLE = {
    */
   hardMax: 3,
 
-  // ── 自动探测（网页版默认开，docs/50 §6.3 修订）──
+  // ── 自动探测（网页 / 现场在未显式固定人数时默认开，docs/50 §6.3）──
   // `defaultCap` 仍然是 1：没有零成本的办法"偷看"有没有第二个人（numPoses 是 worker 参数，
-  // 要看就得真的按更高的档跑一遍检测器，docs/50 §1.2）。这一组数管的是：背景里定期开一个短窗口
-  // 抬一档看看，看见了就当真升上去、看错了就退回来 —— 不是持续多付检测器的钱。
+  // 要看就得真的按更高的档跑一遍检测器，docs/50 §1.2）。这一组数管的是：先让单人稳定、之后背景定期开短窗，
+  // 临时到 hardMax 一次看全 1/2/3，看见了就当真升上去、看错了就退回来 —— 不是持续多付检测器的钱。
   /**
-   * 稳态（没在探测窗口里）时，隔多久开一次探测窗口（秒）。不能太勤：每次窗口都要真的抬一档
-   * numPoses，画面里没有多的人时那一档"没跟满就每帧重跑检测器"（docs/50 §1.2）。
+   * 真摄像头开始稳定出帧后，先让最常见的单人路径独占这么久（秒）再做第一次后台探测。
+   * 不能首帧就重建三人图：摄像头 / 模型刚起来本来就是启动最重的一段。
+   */
+  probeInitialDelaySeconds: 3,
+  /**
+   * 稳态（没在探测窗口里）时，隔多久开一次探测窗口（秒）。第一扇只等 `probeInitialDelaySeconds`，不等满它。
+   * 不能太勤：每次窗口都要真的把
+   * `numPoses` 抬到 `hardMax`，画面里没有多的人时那一档"没跟满就每帧重跑检测器"（docs/50 §1.2）。
    * 也不能太懒：这是"有人进画面、过一会儿也能认出来"里那个"一会儿"的上限。
    */
   probeIntervalSeconds: 12,
@@ -1384,6 +1457,11 @@ export const PEOPLE = {
    * 这条确认链，还要留出跟踪抖动的余量，否则窗口会在人刚转正、还没攒够 `probeConfirmSeconds` 时就先关了。
    */
   probeWindowSeconds: 3.0,
+  /**
+   * 探测窗里的推理频率（Hz）。15Hz 的间隔约 66.7ms，仍在 `CAPTURE.interpDelayMax=70ms`
+   * 的插值上限内；同时把“单人画面 + numPoses=3”最贵窗口的调用次数减半。
+   */
+  probeInferenceHz: 15,
   /**
    * 窗口内，多出来的那个人要连续拿到身体（被选中、`missing === 0`）攒够这么久（秒，漏桶，
    * 和 `people.ts` 里其余漏桶同一种衰减）才当真升档。不是另一套置信度 —— 转正本身已经用
@@ -1473,6 +1551,10 @@ export const PEOPLE = {
   slotOmega: 4.0,
   /** 站位的死区（米）：人在原地晃，身体不跟着挪 */
   slotDeadZone: 0.05,
+  /** 多人回到单人中线时，距中线小于这个距离就精确归零（米）。 */
+  slotRestEpsilon: 0.001,
+  /** 归中同时还要低于这个速度才归零（米/秒），防止高速路过中线时急停。 */
+  slotRestSpeedEpsilon: 0.005,
 
   // ── 身体的差异 ──
   /**
@@ -1514,28 +1596,47 @@ export const BUDGET = {
  * 生命力（`core/src/vitality.ts`）——「一串刚体怎么看起来像活的」。
  *
  * 参照作品里那具身体被描述成 "wiggles, shifts, and bends"。我们按设计不做蒙皮，
- * 所以"弯"只能靠**末端比根部慢半拍**造出来（动画里的跟随与重叠动作）。
+ * 所以"弯"只能靠**前臂 / 手比当前肘慢半拍**造出来（动画里的跟随与重叠动作）。
+ * 骨盆、躯干、头、肘与承重链没有延迟，也没有隐藏的自主呼吸。
  * 这几个数是这件事的全部旋钮。
  */
 export const VITALITY = {
   enabled: true,
   /**
-   * 最末端（指尖/脚尖）落后多少秒。
+   * 手部末端落后多少秒。
    * 0.12 是"看得出软、但不会让人觉得延迟"的上沿 —— 再大就开始像在水里。
    * 现场如果有人说"反应慢"，先怀疑它，用 `?vitality=0` 做 A/B。
    */
   lagSeconds: 0.12,
   /**
-   * 延迟沿链分配的次幂。**1 = 线性，会让肩膀就明显拖**，整个人像泡在水里；
-   * 2.2 把延迟压向末端，得到的是甩鞭子的形状 —— 那才是"弯"。
+   * 延迟沿前臂 / 手分配的次幂。2.2 把更多余势压向手尖；肘始终取当前帧。
    */
   lagCurve: 2.2,
-  /** 呼吸频率（Hz）。0.22 ≈ 13 次/分，比真人静息略慢，慢一点更像"它在等你" */
-  breathHz: 0.22,
-  /** 呼吸幅度，按身高的比例。1.7m 的身体上 ≈ 5mm —— 要的是察觉不到但感觉得到 */
-  breathAmplitude: 0.003,
-  /** 运动能量到这个值时呼吸完全让位给真实动作 */
-  breathFadeEnergy: 0.25,
+};
+
+/**
+ * 观众明确「把身体还回去」之后，那具身体自己的站立摇曳（`app/src/acts/untether.ts`）。
+ *
+ * 这是唯一允许脱离实时人体输入的身体动作，所以参数独立成组：改声音、段落速度或展场尺度时，
+ * 不需要进 Act 拆数学。它不属于正常四段变化；正常变化的宏观动作仍必须由观众供能。
+ */
+export const UNTETHER = {
+  /** 两个不成整数比的频率让循环不容易被读出来。 */
+  swayHz: 0.11,
+  breathHz: 0.19,
+  /** 振幅都按捕获身体的身高缩放。 */
+  swayHeightRatio: 0.035,
+  breathHeightRatio: 0.012,
+  /** 纵深摇曳相对水平摇曳的频率、相位与幅度。 */
+  depthFrequencyRatio: 0.7,
+  depthPhaseRadians: 1.1,
+  depthAmplitudeRatio: 0.6,
+  /** 位移沿高度增长；上限避免异常高关节把摇曳放大。 */
+  heightWeightCap: 1.4,
+  minHeightMeters: 0.2,
+  /** 后台恢复 / 卡顿后不追赶整段墙钟，避免一步跳走。 */
+  maxStepSeconds: 1 / 15,
+  fallbackStepSeconds: 1 / 60,
 };
 
 export const SLOW_LOOP = {
@@ -1543,6 +1644,11 @@ export const SLOW_LOOP = {
   maxPerSession: 1,
   /** 进入 ALIVE 多久之后才允许触发（秒） */
   armAfter: 20,
+  /**
+   * 已武装但还没有人像 mask 时，多久再探测一次（秒）。
+   * 1 秒把回放 / 分割器降级时的空轮询从逐帧降到 1Hz，同时让晚到的 mask 最多只等一秒。
+   */
+  maskRetrySeconds: 1,
   /** 前端轮询间隔与上限 */
   pollIntervalMs: 5000,
   maxPolls: 24,

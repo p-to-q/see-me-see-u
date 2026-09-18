@@ -193,22 +193,22 @@ export interface Flags {
    */
   hall: boolean;
   /**
-   * ?people=1|2|3 画面里最多给几个人各一具身体（`core/src/people.ts`，docs/50）。
-   * 默认 `PEOPLE.defaultCap`（网页）/ `PEOPLE.defaultCapKiosk`（现场）—— 两个数由 docs/50 §5 的实测定。
+   * ?people=auto|1|2|3 画面里最多给几个人各一具身体（`core/src/people.ts`，docs/50）。
+   * 没写或者写 `auto` = 自己发现画面里有几个人；`people` 里保留的初始上限仍由
+   * `PEOPLE.defaultCap` / `PEOPLE.defaultCapKiosk` 给出，随后由自动发现调度。
    *
    * `1` 是**这一版之前的那条路，一个字都不变**：worker 里 `numPoses = 1`、不跑多人跟踪、只有一具身体。
    * 大于 1 时推理要多看几个人（`numPoses = 上限`），身体按帧预算再砍一次（`creature/people-budget.ts`）——
    * 所以写 3 不保证台上有三具：最重的物种上预算只放得下两具，第三个人没有身体（和超过上限的人同一个待遇）。
-   * 认不出来的值（`?people=4` / `?people=two`）按没写过处理并喊一声 —— 规矩和 `?framing=` 一样。
+   * 认不出来的值（`?people=4` / `?people=two`）按 `auto` 处理并喊一声 —— 规矩和 `?framing=` 一样。
    */
   people: number;
   /**
-   * 网页版默认开的自动探测（`core/src/people-probe.ts`，docs/50 §6.3 修订）：背景里定期抬一档
-   * `numPoses` 看看是不是真的来了第二、第三个人，观众不用自己去按「人数」。
+   * 网页和现场都默认开的自动探测（`core/src/people-probe.ts`，docs/50 §6.3）：真摄像头稳定后、且有性能余量时定期
+   * 降频并把 `numPoses` 临时抬到 `hardMax`，一次分辨一、二、三个人；一旦卡顿就收回，观众不用自己去按「人数」。
    *
-   * `?people=` **写了值**（哪怕就是写 `1`）= 观众 / 策展自己选的数，探测不该在背后把它悄悄改掉 ——
-   * 显式的选择永远赢，这里就是 false。`?kiosk=1` 现场是策展决定（`?kiosk=1&people=2`），
-   * 这一版不碰现场的人数策略，探测同样为 false。两者都不是才为 true：网页版、没写 `?people=`。
+   * 只有合法的数字值是固定覆盖；哪怕显式写 `1`，探测也不该在背后把它改掉。
+   * 没写、写 `auto`、或写了无效值都走自动；网页和 kiosk 的语义完全一致。
    */
   peopleAuto: boolean;
 }
@@ -227,9 +227,9 @@ function resolvePeople(raw: string | null, kiosk: boolean): number {
   const parsed = parsePeople(raw);
   if (parsed !== null) return parsed;
   const fallback = kiosk ? PEOPLE.defaultCapKiosk : PEOPLE.defaultCap;
-  if (raw !== null && !warnedPeople.has(raw)) {
+  if (raw !== null && raw.trim().toLowerCase() !== 'auto' && !warnedPeople.has(raw)) {
     warnedPeople.add(raw);
-    console.warn(`[kiosk] ?people=${raw} 认不出来，只认 1–${PEOPLE.hardMax} —— 按没写过处理（${fallback}）`);
+    console.warn(`[kiosk] ?people=${raw} 认不出来，只认 auto / 1–${PEOPLE.hardMax} —— 按 auto 处理（初始 ${fallback}）`);
   }
   return fallback;
 }
@@ -548,8 +548,8 @@ export function readFlags(search = location.search): Flags {
     camframing: resolveCamFraming(q.get('camframing')),
     hall: q.get('hall') === '1',
     people: resolvePeople(q.get('people'), q.get('kiosk') === '1'),
-    // 没写 `?people=` 且不是现场，才自动探测；写了值（包括显式 `?people=1`）或现场都不碰
-    peopleAuto: parsePeople(q.get('people')) === null && q.get('kiosk') !== '1',
+    // 只有合法的数字才是固定覆盖；没写 / auto / 无效值在网页和现场都自动探测
+    peopleAuto: parsePeople(q.get('people')) === null,
   };
 }
 

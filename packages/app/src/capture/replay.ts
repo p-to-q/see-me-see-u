@@ -13,6 +13,7 @@
  */
 import type { RawPose } from '../../../core/src/types.ts';
 import { CAPTURE } from '../../../core/src/tuning.ts';
+import { posePresent } from '../../../core/src/pose-signal.ts';
 import { readFlags } from '../shell/kiosk.ts';
 import { notePresence } from '../shell/idle.ts';
 import type { Capture, CaptureStep } from './capture.ts';
@@ -80,7 +81,7 @@ export class ReplayCapture implements Capture {
   }
 
   /** 录制里没有 mask（慢回路在 demo 模式下本来就该关掉） */
-  latestMask(): ImageBitmap | null { return null; }
+  takeMask(): ImageBitmap | null { return null; }
 
   /** 永不 reject：加载失败只写 lastError，latest() 恒为 null */
   async start(): Promise<void> {
@@ -133,7 +134,7 @@ export class ReplayCapture implements Capture {
     this.#all = this.#people > 1 && this.#latest ? synthPeople(clip.frames, i, this.#people, now) : [];
     this.#inferredAt = now;
     // 和 WebcamCapture 同构：顺手把"有没有人"喂给无人降帧（shell/idle.ts）
-    notePresence((this.#latest?.score ?? 0) > CAPTURE.minScore, now);
+    notePresence(posePresent(this.#latest), now);
 
     this.#serveTimes.push(now);
     while (this.#serveTimes.length && now - this.#serveTimes[0] > 1000) this.#serveTimes.shift();

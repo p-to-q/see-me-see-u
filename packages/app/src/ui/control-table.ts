@@ -32,14 +32,15 @@
  */
 import { ARC_ACTS } from '../../../core/src/arc.ts';
 import { FRAMING_POLICIES, isFramingPolicy, type FramingPolicy } from '../../../core/src/autoframe.ts';
-import { BODY_PLANS, PLANS_WITHOUT_PARTS } from '../../../core/src/bodyplan.ts';
+import { PLANS_WITHOUT_PARTS } from '../../../core/src/bodyplan.ts';
+import { PUBLIC_BODY_PLANS } from '../creature/body-plan-policy.ts';
 import { SCENE_IDS } from '../stage/scenes.ts';
 import { intentFromFlags } from '../shell/intent.ts';
 import { parsePeople, type Flags } from '../shell/kiosk.ts';
 import { PEOPLE } from '../../../core/src/tuning.ts';
 
-/** 人数控件的选项：'1'..'hardMax'。字符串：choice 控件的值和 i18n 的键都是字符串 */
-export const PEOPLE_OPTIONS: readonly string[] = Array.from({ length: PEOPLE.hardMax }, (_, i) => String(i + 1));
+/** 人数控件的选项：自动在前，再是 '1'..'hardMax'。字符串同时是 choice 值和 i18n 键 */
+export const PEOPLE_OPTIONS: readonly string[] = ['auto', ...Array.from({ length: PEOPLE.hardMax }, (_, i) => String(i + 1))];
 
 /** 面板上能读能写的全部值。**这就是"这一屏怎么演"** —— 重载、回大厅、回舞台都带它 */
 export interface ControlValues {
@@ -56,7 +57,7 @@ export interface ControlValues {
   post: boolean;
   /** 取景策略（`core/src/autoframe.ts`）。`auto` = 听分类器 */
   framing: FramingPolicy;
-  /** 最多给几个人各一具身体（`core/src/people.ts`，docs/50）。`'1'` = 单人那条路 */
+  /** 自动发现人数，或固定给几个人各一具身体。`'1'` = 显式锁在单人 */
   people: string;
 }
 export type ValueId = keyof ControlValues;
@@ -118,10 +119,10 @@ const SHADINGS = ['physical', 'toon'] as const;
 
 export const CONTROLS: readonly ControlDef[] = [
   {
-    id: 'form', kind: 'overlay', group: 'form', key: 'F', options: BODY_PLANS, default: null,
+    id: 'form', kind: 'overlay', group: 'form', key: 'F', options: PUBLIC_BODY_PLANS, default: null,
     fromFlags: (f) => f.plan,
     url: { param: 'plan', write: (v) => (v as string | null) ?? null },
-    roll: { slot: 1, param: 'plan', options: BODY_PLANS },
+    roll: { slot: 1, param: 'plan', options: PUBLIC_BODY_PLANS },
     links: [{ page: '/dev/lineup.html', theme: false }, { page: '/dev/mass.html', theme: true }],
     // 进出 B 档（团块 / 点场）是另一条身体实现，开机时就定了
     reload: (ctx, next) => {
@@ -147,11 +148,14 @@ export const CONTROLS: readonly ControlDef[] = [
     // 人数（docs/50）。和取景同一组：它回答的也是"画面里框进几个人"。
     // **要重载**：伴随身体的颜色挂在桶的 `instanceColor` 上，而它只在建身体时挂（半路挂上会在帧循环里换管线，
     // `creature.ts` 那一段）；单人那条路不挂它 —— 于是 1 ↔ 多人是两种身体，和换物种同一个待遇。
-    // 写回 URL 时默认值写成删除（地址栏里不留一个等于默认的参数）。随机不抽它：它是现场的决定，不是长相
-    id: 'people', kind: 'choice', group: 'framing', key: 'N', options: PEOPLE_OPTIONS, default: String(PEOPLE.defaultCap),
-    fromFlags: (f) => String(f.people),
-    url: { param: 'people', write: (v) => (parsePeople(String(v)) === null || Number(v) === PEOPLE.defaultCap ? null : String(v)) },
+    // 自动写成删除；固定 1 必须真正写成 people=1，否则重载后会又交还给自动。
+    // 随机不抽它：它是现场的决定，不是长相
+    id: 'people', kind: 'choice', group: 'framing', key: 'N', options: PEOPLE_OPTIONS, default: 'auto',
+    fromFlags: (f) => f.peopleAuto ? 'auto' : String(f.people),
+    url: { param: 'people', write: (v) => (v === 'auto' || parsePeople(String(v)) === null ? null : String(v)) },
     reload: () => true,
+    // 团块 / 点场没有可共用的刚体桶，主线会固定单人；不给一个看得见却永远不生效的控件。
+    available: (ctx) => !isBodyImpl(ctx.bootPlan),
   },
   {
     id: 'act', kind: 'overlay', group: 'act', key: 'A', options: ARC_ACTS, default: null,

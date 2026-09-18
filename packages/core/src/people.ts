@@ -19,8 +19,9 @@
  * 结论要读得出来（每条轨迹带 `cost` / `age` / `missing`，HUD 与 `/dev/people.html` 直接显示）。
  */
 import type { Landmark, RawPose } from './types.ts';
-import { CAPTURE, PEOPLE } from './tuning.ts';
+import { PEOPLE } from './tuning.ts';
 import { imageToStageX, inFrame, torsoScale, trustedLandmark } from './autoframe.ts';
+import { posePresent } from './pose-signal.ts';
 
 // ── 观测 ────────────────────────────────────────────────────────────────────
 
@@ -45,11 +46,11 @@ export interface PersonObs {
 const ok = (l: Landmark | undefined): l is Landmark => trustedLandmark(l) && inFrame(l as Landmark);
 
 /**
- * 一份姿态 → 一份观测。`null` = 这一份不作数：分太低、没有 `screen`、躯干量不到。
+ * 一份姿态 → 一份观测。`null` = 这一份不作数：没有人体证据、没有 `screen`、躯干量不到。
  * @param aspect 画面宽 / 高。x 乘它才和 y 同一个单位
  */
 export function observePerson(pose: RawPose | null | undefined, aspect = 16 / 9): PersonObs | null {
-  if (!pose || !(Number.isFinite(pose.score) && pose.score > CAPTURE.minScore)) return null;
+  if (!posePresent(pose)) return null;
   const s = pose.screen;
   if (!s?.length) return null;
   const sL = s[SHOULDER_L], sR = s[SHOULDER_R], hL = s[HIP_L], hR = s[HIP_R];
@@ -155,6 +156,11 @@ export interface PersonTrack {
   primary: boolean;
 }
 
+/** `reacquired` 只是一次新推理事件；重复渲染同一份 PeopleFrame 不能重复消费它。 */
+export function isFreshReacquisition(freshInference: boolean, track: Pick<PersonTrack, 'reacquired'>): boolean {
+  return freshInference && track.reacquired;
+}
+
 export interface PeopleFrame {
   /** 活着的轨迹（含还没转正的），按 id 升序 */
   tracks: readonly PersonTrack[];
@@ -165,7 +171,8 @@ export interface PeopleFrame {
 }
 
 export interface PeopleTracker {
-  update(poses: readonly (RawPose | null | undefined)[], dt: number): PeopleFrame;
+  /** `aspect` 可随 Capture 换源更新；缺省沿用创建时的值。 */
+  update(poses: readonly (RawPose | null | undefined)[], dt: number, aspect?: number): PeopleFrame;
   readonly current: PeopleFrame;
   /** 运行中改人数上限（控件条）。多出来的身体按"最后拿到的先让"退场 */
   setCap(n: number): void;
@@ -258,7 +265,9 @@ export function bestAssignment(cost: readonly (readonly number[])[], nTracks: nu
 export const leak = (held: number, on: boolean, dt: number): number => (on ? held + dt : Math.max(0, held - 2 * dt));
 
 export function createPeopleTracker(opts: { cap?: number; aspect?: number } = {}): PeopleTracker {
-  const aspect = opts.aspect ?? 16 / 9;
+  const cleanAspect = (value: number | undefined): number =>
+    typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : 16 / 9;
+  let aspect = cleanAspect(opts.aspect);
   let cap = clampCap(opts.cap ?? PEOPLE.defaultCap);
   let tracks: Internal[] = [];
   let ghosts: Ghost[] = [];
@@ -367,7 +376,8 @@ export function createPeopleTracker(opts: { cap?: number; aspect?: number } = {}
   }
 
   return {
-    update(poses, dtIn) {
+    update(poses, dtIn, aspectIn = aspect) {
+      aspect = cleanAspect(aspectIn);
       const dt = Number.isFinite(dtIn) && dtIn > 0 ? Math.min(dtIn, 0.25) : 0;
       clock += dt;
       const raw: PersonObs[] = [];

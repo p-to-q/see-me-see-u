@@ -7,7 +7,7 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createPoseClock } from '../src/capture/pose-clock.ts';
+import { createPoseClock, measuredPose, type PoseClockState } from '../src/capture/pose-clock.ts';
 import { CAPTURE } from '../../core/src/tuning.ts';
 import type { RawPose } from '../../core/src/types.ts';
 
@@ -71,6 +71,20 @@ test('姿态时钟: 停滞 → 保持最后姿态 → 超过保持时长交出 n
   // 推理回来：立刻重新活过来
   c.observe(pose(3, goneAt + 10), goneAt + 10);
   assert.notEqual(c.sample(goneAt + 20), null);
+});
+
+test('姿态时钟: 身体可保持，取景 / 小屏 / 读数不报缓存骨架', () => {
+  const last = pose(1, 33.3);
+  const expected = new Map<PoseClockState, RawPose | null>([
+    ['waiting', null],
+    ['live', last],
+    ['extrapolating', last],
+    ['holding', null],
+    ['stalled', null],
+    ['empty', null],
+  ]);
+  for (const [state, want] of expected) assert.equal(measuredPose(last, state), want, state);
+  assert.equal(measuredPose(null, 'live'), null);
 });
 
 test('姿态时钟: 推理说"没人" —— 立刻 null，不从上一份里插出一个幽灵', () => {

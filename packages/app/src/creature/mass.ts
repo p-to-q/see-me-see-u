@@ -74,6 +74,8 @@ export interface MassBody extends BodyInstance {
    * 不调也能跑：energy 停在 0，只剩呼吸与流动 —— 静止的身体仍然不死。
    */
   setEnergy(v: number): void;
+  /** 清掉上一位观众的表面时钟、能量与落地基准，保留 MarchingCubes 缓冲 */
+  reset(): void;
   readonly stats: MassStats;
   /** 当前分辨率 */
   readonly res: number;
@@ -240,6 +242,21 @@ export function createMassBody(opt: MassOptions = {}): MassBody {
 
   const body: MassBody = {
     get object() { return object; },
+
+    reset() {
+      clock = 0;
+      energy = 0;
+      lift = 0;
+      seeded = false;
+      center[0] = 0; center[1] = 0.95; center[2] = 0;
+      mc.reset();
+      blob.visible = false;
+      stats.triangles = 0;
+      stats.drawCalls = 0;
+      stats.balls = 0;
+      stats.cpuMs = 0;
+      stats.lift = 0;
+    },
 
     setEnergy(v) {
       const target = Number.isFinite(v) ? clamp(v, 0, 3) : 0;

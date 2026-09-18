@@ -12,13 +12,22 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { assemble } from '../src/creature/assemble.ts';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { assemble, JOINT_CAPS } from '../src/creature/assemble.ts';
+import { detachmentProfileFor, type DetachmentPlan } from '../src/creature/detachment.ts';
+import { crossfadeRenders, graftCurve, REPLACE_SECONDS, replaceRenders } from '../src/creature/replace-event.ts';
 import { REFERENCE_POSE } from '../src/stage/framing.ts';
 import { BODY_PLANS, remapSkeleton, type BodyPlanId } from '../../core/src/bodyplan.ts';
+import { makeGenome } from '../../core/src/genome.ts';
 import { ALL_BONE_IDS } from '../../core/src/slots.ts';
 import type {
-  Genome, Mat4, PartMeta, Skeleton, Slot, SlotKey, Vec3,
+  Genome, Mat4, PartLibraryIndex, PartMeta, Skeleton, Slot, SlotKey, Vec3,
 } from '../../core/src/types.ts';
+
+const read = (rel: string) => readFileSync(fileURLToPath(new URL(rel, import.meta.url)), 'utf8');
+let REAL_INDEX: PartLibraryIndex | null = null;
+try { REAL_INDEX = JSON.parse(read('../../../assets/parts/parts.json')) as PartLibraryIndex; } catch { /* P3: 无资产仍可跑 */ }
 
 /**
  * 一套"每个槽位一件"的假部件。包围盒照抄 parts.json 的形状约定：
@@ -143,5 +152,234 @@ test('落地：部件缺 aabb 时不产生 NaN 矩阵（parts.json 是外部数�
   assert.ok(parts.length > 0);
   for (const p of parts) {
     assert.ok(p.matrix.every(Number.isFinite), `${p.key} 的矩阵出现了 NaN`);
+  }
+});
+
+/** 找到未替换的头部件，它的 Y 变化就是整具主体被落地算法搬了多少。 */
+function headY(parts: ReturnType<typeof assemble>): number {
+  const head = parts.find((p) => p.key === 'head');
+  assert.ok(head, '回归必须装配出一件头部，否则没有量到稳定部位');
+  return head.matrix[13];
+}
+
+test('落地：真实全槽位同件替换的芯 / 碎屑 / 短命件不再让稳定部位泵动', { skip: !REAL_INDEX }, () => {
+  const genome = makeGenome(11, 2, REAL_INDEX!, { theme: 'porcelain' });
+  const byId = new Map(REAL_INDEX!.parts.map((p) => [p.id, p]));
+  const source = {
+    metaOf(id: string): PartMeta {
+      const meta = byId.get(id);
+      assert.ok(meta, `parts.json 里找不到 ${id}`);
+      return meta;
+    },
+  };
+  const baselineParts = assemble(genome, REFERENCE_POSE, source);
+
+  // 修之前 replace 的 t=0.65 会把头连同整具身体抬高 33.2mm；
+  // 这里连脚在内扫完全部槽位、忒修斯替换与 graft/remorph 交接的全部阶段。
+  for (const key of [...ALL_BONE_IDS, 'joint'] as SlotKey[]) {
+    const pick = genome.slots[key];
+    assert.ok(pick, `真实 genome 必须有 ${key} 件`);
+    const probeKey = key === 'head' ? 'spine' : 'head';
+    const baseline = baselineParts.find((p) => p.key === probeKey);
+    assert.ok(baseline, `${key} 回归找不到稳定探针 ${probeKey}`);
+
+    for (const [kind, renders] of [['replace', replaceRenders], ['crossfade', crossfadeRenders]] as const) {
+      for (let i = 0; i <= 20; i++) {
+        const t = i / 20;
+        const effect = renders(key, pick, pick, t);
+        assert.ok(effect.every((r) => r.groundsBody === false), `${kind} ${key} 混进了会决定 lift 的效果实例`);
+        const parts = assemble(genome, REFERENCE_POSE, source, {
+          render: { [key]: effect },
+          ground: { [key]: [{ partId: pick.partId, materialRole: pick.materialRole }] },
+        });
+        const probe = parts.find((p) => p.key === probeKey);
+        assert.ok(probe, `${kind} ${key} t=${t.toFixed(2)} 找不到稳定探针`);
+        for (let n = 0; n < 16; n++) {
+          const delta = probe.matrix[n] - baseline.matrix[n];
+          assert.ok(Math.abs(delta) < 1e-12,
+            `${kind} ${key} t=${t.toFixed(2)} 把 ${probeKey} 矩阵[${n}] 搬了 ${delta}`);
+        }
+      }
+    }
+  }
+});
+
+test('落地：真实全槽位与每个 joint cap 的脱离效果不穿地、不搬主体', { skip: !REAL_INDEX }, () => {
+  const genome = makeGenome(11, 2, REAL_INDEX!, { theme: 'porcelain' });
+  const byId = new Map(REAL_INDEX!.parts.map((p) => [p.id, p]));
+  const source = { metaOf(id: string): PartMeta { return byId.get(id)!; } };
+  const baselineParts = assemble(genome, REFERENCE_POSE, source);
+  const cases: Array<{ key: SlotKey; plan: DetachmentPlan; label: string }> = [];
+  for (const key of ALL_BONE_IDS) cases.push({
+    key,
+    plan: { profile: detachmentProfileFor(key), result: 'transform' },
+    label: key,
+  });
+  for (const cap of JOINT_CAPS) cases.push({
+    key: 'joint',
+    plan: { profile: detachmentProfileFor('joint', cap.joint), result: 'transform', member: cap.joint },
+    label: `joint:${cap.joint}`,
+  });
+
+  for (const { key, plan, label } of cases) {
+    const pick = genome.slots[key];
+    const probeKey = key === 'head' ? 'spine' : 'head';
+    const baseline = baselineParts.find((p) => p.key === probeKey)!;
+    for (let i = 0; i <= 20; i++) {
+      const u = i / 20;
+      const parts = assemble(genome, REFERENCE_POSE, source, {
+        render: { [key]: replaceRenders(key, pick, pick, u, 1, plan) },
+        ground: { [key]: [{ partId: pick.partId, materialRole: pick.materialRole }] },
+      });
+      let lowest = Infinity;
+      for (const part of parts) lowest = Math.min(lowest, lowestOf(part.matrix, source.metaOf(part.partId).aabb));
+      assert.ok(lowest >= -1e-9, `${label} t=${u.toFixed(2)} 穿地 ${(lowest * 1000).toFixed(3)}mm`);
+      const probe = parts.find((p) => p.key === probeKey)!;
+      for (let n = 0; n < 16; n++) assert.ok(Math.abs(probe.matrix[n] - baseline.matrix[n]) < 1e-12,
+        `${label} t=${u.toFixed(2)} 搬动稳定主体矩阵[${n}]`);
+    }
+  }
+});
+
+test('落地：真实脚部 old→new 的 AABB 基准走完整交接，不在最后一帧跳 45mm', { skip: !REAL_INDEX }, (t) => {
+  const fromGenome = makeGenome(1, 3, REAL_INDEX!, { theme: 'wheelleg' });
+  const donor = makeGenome(1, 3, REAL_INDEX!, { theme: 'screenface' });
+  const key: SlotKey = 'footL';
+  const from = fromGenome.slots[key];
+  const to = donor.slots[key];
+  assert.ok(from && to, '真实夹具必须有新旧两只脚');
+  assert.notEqual(from.partId, to.partId, '夹具必须真的换件');
+
+  const genome: Genome = {
+    ...fromGenome,
+    slots: { ...fromGenome.slots, [key]: to },
+  };
+  const byId = new Map(REAL_INDEX!.parts.map((p) => [p.id, p]));
+  const source = {
+    metaOf(id: string): PartMeta {
+      const meta = byId.get(id);
+      assert.ok(meta, `parts.json 里找不到 ${id}`);
+      return meta;
+    },
+  };
+  const proxy = (pick: typeof from) => [{
+    partId: pick!.partId, materialRole: pick!.materialRole,
+  }];
+  const at = (u: number, continuous: boolean): number => headY(assemble(genome, REFERENCE_POSE, source, {
+    render: { [key]: replaceRenders(key, from, to, u) },
+    ground: { [key]: proxy(from) },
+    groundTo: continuous ? { [key]: proxy(to) } : undefined,
+    groundProgress: continuous ? { [key]: graftCurve(u).scale } : undefined,
+  }));
+  const done = headY(assemble(genome, REFERENCE_POSE, source));
+
+  // 对照组：旧实现把旧脚代理用到事件最后，下一帧直接切新脚。这个真资产组合会跳约 45mm。
+  const oldLast = at(1 - 1 / 72, false);
+  const oldJump = Math.abs(done - oldLast);
+  t.diagnostic(`旧代理终点跳变 ${(oldJump * 1000).toFixed(2)}mm`);
+  assert.ok(oldJump > 0.04, `夹具只量到 ${(oldJump * 1000).toFixed(2)}mm，不能证明修复有效`);
+
+  // 正式动画 1.2s @60Hz。落地基准按各槽位自己的进度连续走，终点必须等于正常装配。
+  const frames = Math.max(1, Math.round(REPLACE_SECONDS * 60));
+  let previous = at(0, true);
+  let worst = 0;
+  for (let frame = 1; frame <= frames; frame++) {
+    const current = at(frame / frames, true);
+    worst = Math.max(worst, Math.abs(current - previous));
+    previous = current;
+  }
+  t.diagnostic(`连续代理最坏单帧 ${(worst * 1000).toFixed(3)}mm / ${frames} 帧`);
+  assert.ok(worst <= 0.001, `落地代理单帧仍跳 ${(worst * 1000).toFixed(2)}mm`);
+  assert.ok(Math.abs(previous - done) < 1e-12, '交接终点必须逐位回到正式新身体的落地基准');
+
+  const bad = at(Number.NaN, true);
+  assert.ok(Number.isFinite(bad), '坏进度不能把帧循环送进 NaN');
+});
+
+test('落地：四足承重手的原位换装与末端脱离都只修自己，不穿地也不抬主体', { skip: !REAL_INDEX }, (t) => {
+  const fromGenome = makeGenome(92, 2, REAL_INDEX!, { theme: 'wheelleg' });
+  const targetGenome = makeGenome(92, 3, REAL_INDEX!, { theme: 'wheelleg' });
+  const key: SlotKey = 'handR';
+  const from = fromGenome.slots[key];
+  const to = targetGenome.slots[key];
+  assert.equal(from?.partId, 'hand.wheelleg.limx', '真夹具的旧承重手变了');
+  assert.equal(to?.partId, 'hand.digitigrade.real', '真夹具的新承重手变了');
+
+  const genome: Genome = { ...fromGenome, slots: { ...fromGenome.slots, [key]: to! } };
+  const skeleton = remapSkeleton(REFERENCE_POSE, 'quadruped');
+  const byId = new Map(REAL_INDEX!.parts.map((p) => [p.id, p]));
+  const source = {
+    metaOf(id: string): PartMeta {
+      const meta = byId.get(id);
+      assert.ok(meta, `parts.json 里找不到 ${id}`);
+      return meta;
+    },
+  };
+  const proxy = (pick: typeof from) => [{
+    partId: pick!.partId, materialRole: pick!.materialRole,
+  }];
+  for (const [name, render] of [
+    ['原位换装', (u: number) => crossfadeRenders(key, from, to!, u)],
+    ['末端脱离', (u: number) => replaceRenders(key, from, to!, u, 1, {
+      profile: 'terminal-release', result: 'transform',
+    })],
+  ] as const) {
+    let worst = Infinity;
+    for (let frame = 0; frame <= 120; frame++) {
+      const u = frame / 120;
+      const common = {
+        ground: { [key]: proxy(from) },
+        groundTo: { [key]: proxy(to) },
+        groundProgress: { [key]: graftCurve(u).scale },
+      };
+      const parts = assemble(genome, skeleton, source, {
+        ...common,
+        render: { [key]: render(u) },
+      });
+      const bodyOnly = assemble(genome, skeleton, source, { ...common, render: { [key]: [] } });
+      let lo = Infinity;
+      for (const p of parts) lo = Math.min(lo, lowestOf(p.matrix, source.metaOf(p.partId).aabb));
+      worst = Math.min(worst, lo);
+      assert.ok(lo >= -1e-9, `${name} t=${u.toFixed(3)} 可见几何穿地 ${(lo * 1000).toFixed(3)}mm`);
+      assert.ok(Math.abs(headY(parts) - headY(bodyOnly)) < 1e-12,
+        `${name} t=${u.toFixed(3)} 效果碰地反向搬动了主体`);
+    }
+    t.diagnostic(`四足${name}全程可见最低点 ${(worst * 1000).toFixed(3)}mm`);
+  }
+});
+
+test('落地：parts.json 缺失的占位身体在替换中仍有限、不泵动', () => {
+  const emptyIndex: PartLibraryIndex = {
+    version: 0,
+    units: 'meters',
+    convention: { axis: '+Y', socketA: [0, 0, 0], socketB: [0, 1, 0], length: 1 },
+    themes: [{
+      id: 'placeholder', kind: 'archetype', name: '原型', nameEn: 'Proto', tagline: '',
+      palette: [], source: 'procedural', axes: { humanLike: 0.5, lifeLike: 0.2 }, coverage: 'full',
+    }],
+    materials: [],
+    parts: [],
+  };
+  const genome = makeGenome(1, 1, emptyIndex, { theme: 'placeholder' });
+  const source = {
+    metaOf(id: string): PartMeta {
+      const slot = id.slice('placeholder:'.length) as Slot;
+      return {
+        id, slot, tier: 0, file: '', family: 'placeholder', localGirth: 1, triCount: 0,
+        aabb: { min: [-0.5, 0, -0.5], max: [0.5, 1, 0.5] }, symmetry: 'none',
+      };
+    },
+  };
+  const pick = genome.slots.joint;
+  const baseline = headY(assemble(genome, REFERENCE_POSE, source));
+  for (const [kind, renders] of [['replace', replaceRenders], ['crossfade', crossfadeRenders]] as const) {
+    for (const t of [0, 0.25, 0.65, 1]) {
+      const parts = assemble(genome, REFERENCE_POSE, source, {
+        render: { joint: renders('joint', pick, pick, t) },
+        ground: { joint: [{ partId: pick.partId, materialRole: pick.materialRole }] },
+      });
+      assert.ok(parts.every((p) => p.matrix.every(Number.isFinite)), `${kind} t=${t} 占位矩阵出现 NaN`);
+      assert.ok(Math.abs(headY(parts) - baseline) < 1e-12, `${kind} t=${t} 占位主体被替换效果搬动`);
+    }
   }
 });

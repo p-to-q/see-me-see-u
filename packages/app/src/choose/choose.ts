@@ -32,12 +32,15 @@ import { mulberry32 } from '../../../core/src/rng.ts';
 import { cjkClass, COPY, setBi } from '../ui/i18n.ts';
 import { markNode } from '../ui/mark.ts';
 import { announceBrand, declareShared, freezeCanvas, handOff, stageShown } from '../ui/page-transition.ts';
-import type { PartLibraryIndex, RawPose, Rng, ThemeDef } from '../../../core/src/types.ts';
+import type { RawPose, Rng, ThemeDef } from '../../../core/src/types.ts';
 import { acquireRingField, type RingField } from './ring/field.ts';
 import { holdFirstScreen } from './ring/first-screen.ts';
 import { buildCard, loadImage, type BuiltCard } from './cards.ts';
 import { startWaveInput, type WaveDriver } from './ring/wave-input.ts';
 import { isWearable } from './wearable.ts';
+import {
+  catalogKnowsTheme, resolveChooseCatalog, type ChooseCatalog,
+} from './catalog.ts';
 
 export interface ChooseOptions {
   /** 选定了。id 已经写进 URL。 */
@@ -51,6 +54,8 @@ export interface ChooseOptions {
   seed?: number;
   /** 直接给条目，跳过 fetch（dev 页面 / 演示用）。 */
   themes?: ThemeDef[];
+  /** 正式程序已经加载过的目录投影。传它就绝不再请求 parts.json。 */
+  catalog?: ChooseCatalog;
   /** 强制走无 WebGL 的降级路径。 */
   forceFallback?: boolean;
   /**
@@ -163,45 +168,6 @@ export function morphologyOrder(themes: ThemeDef[]): ThemeDef[] {
 
 // ── 数据 ────────────────────────────────────────────────────────────────────
 
-/** parts.json 是旧版（没有 kind/axes）时补默认值，别让一页 UI 因为一个字段炸掉。 */
-function normalize(raw: Partial<ThemeDef> & { id: string }): ThemeDef {
-  return {
-    id: raw.id,
-    kind: raw.kind ?? 'archetype',
-    name: raw.name ?? raw.id,
-    nameEn: raw.nameEn ?? raw.id,
-    tagline: raw.tagline ?? '',
-    taglineEn: raw.taglineEn ?? '',
-    palette: raw.palette ?? [],
-    source: raw.source ?? 'rodin',
-    axes: raw.axes ?? { humanLike: 0.5, lifeLike: 0.5 },
-    coverage: raw.coverage ?? 'light',
-    base: raw.base,
-  };
-}
-
-interface Library {
-  themes: ThemeDef[];
-  /** theme id → 库里有多少件部件 */
-  partCount: Map<string, number>;
-}
-
-async function readLibrary(url: string): Promise<Library> {
-  // parts.json 不存在时应用必须照常运行（AGENTS.md 不变量）。
-  try {
-    const res = await fetch(url);
-    if (!res.ok) throw new Error(`${res.status}`);
-    const index = (await res.json()) as PartLibraryIndex;
-    const partCount = new Map<string, number>();
-    for (const p of index.parts ?? []) {
-      partCount.set(p.family, (partCount.get(p.family) ?? 0) + 1);
-    }
-    return { themes: (index.themes ?? []).map(normalize), partCount };
-  } catch {
-    return { themes: [], partCount: new Map() };
-  }
-}
-
 // ── 挂载 ────────────────────────────────────────────────────────────────────
 
 export async function mountChoose(options: ChooseOptions): Promise<ChooseHandle> {
@@ -220,9 +186,10 @@ export async function mountChoose(options: ChooseOptions): Promise<ChooseHandle>
   // 非确定性只从这里进来一次，之后全程用这个 Rng。
   const rng: Rng = mulberry32(options.seed ?? (Date.now() >>> 0));
 
-  const library = options.themes
-    ? { themes: options.themes.map(normalize), partCount: new Map<string, number>() }
-    : await readLibrary(partsUrl);
+  const resolved = await resolveChooseCatalog({
+    catalog: options.catalog, themes: options.themes, partsUrl,
+  });
+  const library = resolved.catalog;
 
   // 先拿 anchor 图，再决定谁能上场。一张也不等太久（cards.ts 有超时）。
   // 每张到货就报一次，好让外面的加载态往前走一格 —— 顺序无关，报的是"到齐了几张"。
@@ -255,7 +222,7 @@ export async function mountChoose(options: ChooseOptions): Promise<ChooseHandle>
   const cards: BuiltCard[] = [];
   morphologyOrder(library.themes).forEach((theme) => {
     const image = images[library.themes.indexOf(theme)] ?? null;
-    if (!isWearable(theme, library, options.themes !== undefined)) return;
+    if (!isWearable(theme, library, resolved.callerSuppliedThemes)) return;
     cards.push(buildCard(theme, image, rng));
   });
 
@@ -558,20 +525,16 @@ export async function mountChoose(options: ChooseOptions): Promise<ChooseHandle>
  * 返回 null 表示跳过了。
  */
 export async function chooseTheme(options: ChooseOptions): Promise<ChooseHandle | null> {
+  // 无论 URL 是否带 theme 都先解析一次；若需要真正挂轮播，把同一份结果继续传下去。
+  // 这样坏深链也不会先验证一次、再为列表下载第二次。
+  const resolved = await resolveChooseCatalog(options);
   const pre = themeFromUrl();
-  if (pre) {
-    // 条目表读不到（parts.json 缺失）时也认这个 id —— 手动覆盖优先于校验。
-    const known = options.themes
-      ? options.themes.some((t) => t.id === pre)
-      : await readLibrary(options.partsUrl ?? '/parts/parts.json').then(
-          (lib) => lib.themes.length === 0 || lib.themes.some((t) => t.id === pre),
-        );
-    if (known) {
-      options.onChoose(pre);
-      return null;
-    }
+  // 条目表读不到（sourceAvailable=false）时也认这个 id：手动覆盖优先于校验。
+  if (pre && catalogKnowsTheme(resolved.catalog, pre)) {
+    options.onChoose(pre);
+    return null;
   }
-  return mountChoose(options);
+  return mountChoose({ ...options, catalog: resolved.catalog });
 }
 
 // ── DOM 外壳 ────────────────────────────────────────────────────────────────

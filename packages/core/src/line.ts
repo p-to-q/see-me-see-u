@@ -11,8 +11,9 @@
  * 四个玩法是这条线上的四个采样点（`pointOf`）。`?act=` 钉住的就是那个点。
  *
  * ── 永远不脱钩 ──────────────────────────────────────────────────────────────
- * 三个数里每一个都只改**怎么映射**，不改**从哪儿来**：延迟读的是观众过去的帧，
- * 重量追的是观众现在的帧，朝向翻的是观众现在的帧。站着别动，缓冲里全是同一帧、
+ * 三个数里每一个都只改**怎么映射**，不改**从哪儿来**。骨盆、躯干、头与整条承重链
+ * 永远是当前观众；双臂是表达层，可以同时含有当下与历史余波。历史永远不超过一半，
+ * 所以任何新动作在第一帧就会出现，不再整副骨架等 1.2 秒。站着别动，缓冲里全是同一帧、
  * 追踪收敛到同一帧 —— 输出也不动。
  * 朝向是唯一一个在静止时**不是恒等**的变换（抬着手站定，翻过去手就换了边），
  * 所以它的实际值只在观众动的时候才向曲线靠（`LINE.facingChase`）。
@@ -20,12 +21,13 @@
  * 纯函数式：时间从 `t` / `dt` 进来，不读时钟、不碰 three（P1）。
  */
 import { movementBounds, type MovementIndex } from './arc.ts';
+import { BONES } from './skeleton.ts';
 import { ARC, LINE, MOTION } from './tuning.ts';
 import type { Bone, Skeleton, Vec3 } from './types.ts';
 
 /** 这条线在某一点上的三个数 */
 export interface LineParams {
-  /** 延迟（秒）：演的是观众多久之前的动作 */
+  /** 历史余波的取样距离（秒）；不再把整副身体延迟 */
   delay: number;
   /** 重量 0..1：0 = 原样，1 = 临界阻尼追踪（快动作跟不上） */
   weight: number;
@@ -33,7 +35,7 @@ export interface LineParams {
   facing: number;
 }
 
-const clamp01 = (x: number) => (x < 0 ? 0 : x > 1 ? 1 : x);
+const clamp01 = (x: number) => (!Number.isFinite(x) ? 0 : x < 0 ? 0 : x > 1 ? 1 : x);
 const smooth = (x: number) => { const u = clamp01(x); return u * u * (3 - 2 * u); };
 
 /**
@@ -97,6 +99,52 @@ const lerp3 = (a: Vec3, b: Vec3, u: number): Vec3 =>
 const lerp = (a: number, b: number, u: number) => (u >= 1 ? b : a + (b - a) * u);
 const measure = (p0: Vec3, p1: Vec3) => Math.hypot(p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2]);
 
+const finiteVec = (v: Vec3 | undefined): v is Vec3 =>
+  !!v && Number.isFinite(v[0]) && Number.isFinite(v[1]) && Number.isFinite(v[2]);
+
+const direction = (from: Vec3, to: Vec3): Vec3 => {
+  const d: Vec3 = [to[0] - from[0], to[1] - from[1], to[2] - from[2]];
+  const n = Math.hypot(d[0], d[1], d[2]);
+  return n > 1e-9 ? [d[0] / n, d[1] / n, d[2] / n] : [0, 1, 0];
+};
+
+const alongDirection = (origin: Vec3, dir: Vec3, length: number): Vec3 => [
+  origin[0] + dir[0] * length,
+  origin[1] + dir[1] * length,
+  origin[2] + dir[2] * length,
+];
+
+/**
+ * 方向插值后重新归一化。两根方向恰好相反时线性和会过零；那一帧留在当前方向，
+ * 不让一根有长度的骨头因为数学退化突然竖起来。
+ */
+function blendDirection(current: Vec3, other: Vec3, amount: number): Vec3 {
+  const mixed = lerp3(current, other, clamp01(amount));
+  const n = Math.hypot(mixed[0], mixed[1], mixed[2]);
+  return n > 1e-9 ? [mixed[0] / n, mixed[1] / n, mixed[2] / n] : [...current];
+}
+
+const ARM_CHAINS = [
+  { elbow: 'elbowL', wrist: 'wristL', tip: 'handTipL' },
+  { elbow: 'elbowR', wrist: 'wristR', tip: 'handTipR' },
+] as const;
+
+const ENDPOINTS = new Map<string, readonly [string, string]>(
+  BONES.map(([id, a, b]) => [id, [a, b] as const]),
+);
+
+/** 关节是源，骨头永远从关节重建：延迟 / 阻尼 / 换边都不能留下断开的 p0/p1。 */
+function rebuildBones(template: Skeleton, joints: Record<string, Vec3>): Skeleton {
+  const bones: Bone[] = template.bones.map((bone) => {
+    const ends = ENDPOINTS.get(bone.id);
+    if (!ends) return bone;
+    const p0 = finiteVec(joints[ends[0]]) ? joints[ends[0]] : bone.p0;
+    const p1 = finiteVec(joints[ends[1]]) ? joints[ends[1]] : bone.p1;
+    return { ...bone, p0: [...p0], p1: [...p1], length: measure(p0, p1) };
+  });
+  return { ...template, joints, bones };
+}
+
 /** 左右互换名字：`shoulderL` ↔ `shoulderR`。不带左右的（`pelvis` / `spine`）原样 */
 const side = (k: string): string =>
   (k.endsWith('L') ? `${k.slice(0, -1)}R` : k.endsWith('R') ? `${k.slice(0, -1)}L` : k);
@@ -156,6 +204,8 @@ export interface LineSampler {
   apply(input: LineInput): Skeleton;
   /** 朝向此刻的**实际值**（追赶之后的），给测试和 HUD 看 */
   readonly facing: number;
+  /** 此刻双臂里的历史比例；永远不超过 `LINE.maxHistoryShare` */
+  readonly history: number;
   reset(): void;
 }
 
@@ -167,13 +217,14 @@ interface Frame { t: number; sk: Skeleton; }
 export function createLineSampler(): LineSampler {
   const maxDelay = Math.max(0, ...LINE.delay);
   let frames: Frame[] = [];
-  let track: Record<string, Vec3> = {};
+  let directionTrack: Record<string, Vec3> = {};
   let lastT = Number.NaN;
   let facing = 0;
+  let history = 0;
   let fresh = true;
 
   function reset(): void {
-    frames = []; track = {}; lastT = Number.NaN; fresh = true;
+    frames = []; directionTrack = {}; lastT = Number.NaN; history = 0; fresh = true;
   }
 
   /** 观众 `delay` 秒之前的那一帧（两帧之间插值；缓冲不够长就取最老的那一帧） */
@@ -191,62 +242,106 @@ export function createLineSampler(): LineSampler {
     return sk;
   }
 
-  /** 临界阻尼追踪，一直在跑（所以重量从 0 爬上来的那一刻它已经是热的） */
-  function weighted(sk: Skeleton, dt: number, speed: number, weight: number): Skeleton {
+  /**
+   * 实时载波 + 局部表达。两路先经过同一份空间映射，再只混前臂 / 手的**方向**：
+   * 肘是当下的插座，长度取当前帧，历史与重量都不能把链扯断或让整副身体迟到。
+   */
+  function express(live: Skeleton, past: Skeleton, dt: number, speed: number, historyShare: number, weight: number): Skeleton {
     const step = Number.isFinite(dt) && dt > 0 ? Math.min(dt, 1 / 15) : 1 / 60;
     const tau = LINE.tauSlow + (LINE.tauFast - LINE.tauSlow) * Math.min(1, Math.max(0, speed) / LINE.speedRef);
     const a = 1 - Math.exp(-step / Math.max(1e-3, tau));
     const follow = (key: string, target: Vec3): Vec3 => {
-      let cur = track[key];
-      if (!cur) { cur = [target[0], target[1], target[2]]; track[key] = cur; return cur; }
-      cur[0] += (target[0] - cur[0]) * a;
-      cur[1] += (target[1] - cur[1]) * a;
-      cur[2] += (target[2] - cur[2]) * a;
-      return cur;
+      const prior = directionTrack[key];
+      if (!finiteVec(prior)) {
+        directionTrack[key] = [...target];
+        return target;
+      }
+      const next = blendDirection(prior, target, a);
+      directionTrack[key] = next;
+      return next;
     };
+
     const joints: Record<string, Vec3> = {};
-    for (const k in sk.joints) joints[k] = follow(k, sk.joints[k]);
-    const bones = sk.bones.map((b) => {
-      const p0 = follow(`${b.id}#0`, b.p0);
-      const p1 = follow(`${b.id}#1`, b.p1);
-      return { b, p0, p1 };
-    });
-    if (!(weight > 0)) return sk;
-    const out: Record<string, Vec3> = {};
-    for (const k in sk.joints) out[k] = lerp3(sk.joints[k], joints[k], weight);
-    return {
-      ...sk,
-      joints: out,
-      // 追踪出来的骨头**重新量长度**（原 `resist.ts` 同一条理由：否则阻尼让骨头忽长忽短）
-      bones: bones.map(({ b, p0, p1 }) => {
-        const q0 = lerp3(b.p0, p0, weight), q1 = lerp3(b.p1, p1, weight);
-        return { ...b, p0: q0, p1: q1, length: lerp(b.length, measure(p0, p1), weight) };
-      }),
-    };
+    for (const key in live.joints) joints[key] = finiteVec(live.joints[key]) ? [...live.joints[key]] : [0, 0, 0];
+
+    for (const chain of ARM_CHAINS) {
+      const elbow = live.joints[chain.elbow];
+      const liveWrist = live.joints[chain.wrist];
+      const liveTip = live.joints[chain.tip];
+      const pastElbow = past.joints[chain.elbow];
+      const pastWrist = past.joints[chain.wrist];
+      const pastTip = past.joints[chain.tip];
+      if (![elbow, liveWrist, liveTip, pastElbow, pastWrist, pastTip].every(finiteVec)) continue;
+
+      const foreLength = measure(elbow, liveWrist);
+      const handLength = measure(liveWrist, liveTip);
+      const liveFore = direction(elbow, liveWrist);
+      const pastFore = direction(pastElbow, pastWrist);
+      const echoFore = blendDirection(liveFore, pastFore, historyShare);
+      const lagFore = follow(`${chain.wrist}:direction`, echoFore);
+      const outFore = blendDirection(echoFore, lagFore, weight);
+      const wrist = alongDirection(elbow, outFore, foreLength);
+
+      const liveHand = direction(liveWrist, liveTip);
+      const pastHand = direction(pastWrist, pastTip);
+      const echoHand = blendDirection(liveHand, pastHand, historyShare);
+      const lagHand = follow(`${chain.tip}:direction`, echoHand);
+      const outHand = blendDirection(echoHand, lagHand, weight);
+      joints[chain.wrist] = wrist;
+      joints[chain.tip] = alongDirection(wrist, outHand, handLength);
+    }
+
+    return rebuildBones(live, joints);
   }
 
   return {
     get facing() { return facing; },
+    get history() { return history; },
     reset,
     apply({ skeleton: sk, t, dt, speed, target, snap }) {
-      if (!(t >= lastT && t - lastT <= STALE_AFTER)) reset();
-      lastT = t;
+      const step = Number.isFinite(dt) && dt > 0 ? Math.min(dt, 1 / 15) : 1 / 60;
+      const now = Number.isFinite(t) ? t : (Number.isFinite(lastT) ? lastT + step : 0);
+      if (!(now >= lastT && now - lastT <= STALE_AFTER)) reset();
+      lastT = now;
 
-      frames.push({ t, sk });
+      const raw = target as Partial<LineParams> | null | undefined;
+      const safe = {
+        delay: Number.isFinite(raw?.delay) ? Math.max(0, Math.min(maxDelay, raw!.delay!)) : 0,
+        weight: clamp01(raw?.weight ?? 0),
+        facing: clamp01(raw?.facing ?? 0),
+      };
+      const safeSpeed = Number.isFinite(speed) ? Math.max(0, speed) : 0;
+
+      frames.push({ t: now, sk });
       // 留够最长延迟再多一点，保证 `t - delay` 总有一帧在它前面
-      while (frames.length > 2 && frames[1].t < t - maxDelay - 0.1) frames.shift();
+      while (frames.length > 2 && frames[1].t < now - maxDelay - 0.1) frames.shift();
+
+      // 历史只是双臂的次级表达，永远不能多于当下。进出 echo 用最长 delay 自己做时标，
+      // 不再发明第二个秒数旋钮。显式换点 / 换人时可以 snap：缓冲还是当帧，不会造成跳变。
+      const requestedHistory = maxDelay > 0
+        ? clamp01(safe.delay / maxDelay) * clamp01(LINE.maxHistoryShare)
+        : 0;
+      if (snap || fresh) history = requestedHistory;
+      else {
+        const room = step / Math.max(1e-3, maxDelay);
+        history += Math.max(-room, Math.min(room, requestedHistory - history));
+      }
 
       // 朝向：只在观众动的时候向曲线靠（见文件头）。刚开始 / 钉住 / 换人时直接到位
-      if (snap || fresh) facing = clamp01(target.facing);
+      if (snap || fresh) facing = safe.facing;
       else {
-        const moving = Math.min(1, Math.max(0, Number.isFinite(speed) ? speed : 0) / MOTION.stillnessSpeedRef);
+        const moving = Math.min(1, safeSpeed / MOTION.stillnessSpeedRef);
         const room = LINE.facingChase * moving * (Number.isFinite(dt) && dt > 0 ? Math.min(dt, 1 / 15) : 0);
-        const gap = clamp01(target.facing) - facing;
+        const gap = safe.facing - facing;
         facing += Math.max(-room, Math.min(room, gap));
       }
       fresh = false;
 
-      return weighted(faceSk(delayed(sk, t, target.delay), facing), dt, speed, target.weight);
+      // 当前与历史经过**同一份**空间映射：facing 可以改变全身关系，但不会增加时间延迟。
+      // express() 只把历史 / 重量放进双臂末端，并从 live 肘关节重新长出连续骨链。
+      const liveMapped = faceSk(sk, facing);
+      const pastMapped = faceSk(delayed(sk, now, safe.delay), facing);
+      return express(liveMapped, pastMapped, dt, safeSpeed, history, safe.weight);
     },
   };
 }

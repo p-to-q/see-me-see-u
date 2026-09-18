@@ -54,6 +54,15 @@ export interface FrameFit {
   aimY: number;
 }
 
+export type ContactPoint = [x: number, z: number, lift: number];
+export type ContactBoneFilter = (bone: BoneId) => boolean;
+
+const sameSocket = (a: Vec3, b: Vec3): boolean => (
+  Math.abs(a[0] - b[0]) <= 1e-8
+  && Math.abs(a[1] - b[1]) <= 1e-8
+  && Math.abs(a[2] - b[2]) <= 1e-8
+);
+
 export const FRAMING = FRAMING_TUNING;
 
 
@@ -199,17 +208,25 @@ export function contactPoints(
   sk: Skeleton | null | undefined,
   n = 4,
   maxLift = 0.22,
-): Array<[number, number, number]> {
+  excludeBone?: ContactBoneFilter,
+): ContactPoint[] {
   if (!sk || !sk.bones?.length) return [];
+  // 一个 socket 同时是两根骨的端点。只跳过被脱离的 bone 不够：footL.p0 还会从 shinL.p1
+  // 重新混进来。先收集该可见件覆盖的端点，再从所有候选里按位置排除，另一只脚/其余支点照常保留。
+  const excluded: Vec3[] = [];
+  if (excludeBone) {
+    for (const b of sk.bones) if (b && excludeBone(b.id)) excluded.push(b.p0, b.p1);
+  }
   const pts: Vec3[] = [];
   for (const b of sk.bones) {
     for (const p of [b.p0, b.p1]) {
-      if (p && Number.isFinite(p[0]) && Number.isFinite(p[1]) && Number.isFinite(p[2])) pts.push(p);
+      if (p && Number.isFinite(p[0]) && Number.isFinite(p[1]) && Number.isFinite(p[2])
+        && !excluded.some((q) => sameSocket(p, q))) pts.push(p);
     }
   }
   if (pts.length < 4) return [];
   pts.sort((a, b) => a[1] - b[1]);
-  const out: Array<[number, number, number]> = [];
+  const out: ContactPoint[] = [];
   /**
    * "地面"取 **y = 0**，不取这具身体自己的最低点。
    *
@@ -297,6 +314,8 @@ export interface ShotCamera {
   fov: number;
   /** 中景跟随的移轴平移（米） */
   panX: number;
+  /** 中景跟随的纵向移轴（米）；正 = 画面中心上移、身体在输出里下移 */
+  panY: number;
   /** 画面竖直中心（米，含场景的构图票） */
   centerY: number;
   /** 取景平面离相机多远（米） */
@@ -314,6 +333,7 @@ export function shotCamera(bounds: BodyBounds, bodyH: number, shot: ShotState, a
   const mix = smoothstep(shot.progress);
   const fit = blendFit(fitFrame(bounds), upperFit(bodyH, bounds.width), mix);
   const panX = shot.fx.x * mix;
+  const panY = shot.fy.x * mix;
   let h = fit.frameHeight;
   if (h * aspect < fit.frameWidth) h = fit.frameWidth / aspect;   // 太窄了就往高了框
   // 取景平面放在身体的**近面**，不是身体中心（四足的腿跑出画面外那个 bug 的修法，见 stage.ts）
@@ -322,7 +342,8 @@ export function shotCamera(bounds: BodyBounds, bodyH: number, shot: ShotState, a
     h,
     fov: (2 * Math.atan((h / 2) / dist) * 180) / Math.PI,
     panX,
-    centerY: fit.centerY + shot.fy.x * mix + bounds.height * frameLift,
+    panY,
+    centerY: fit.centerY + panY + bounds.height * frameLift,
     dist,
     aimY: fit.aimY,
     room: lateralRoom(h, aspect, bounds.width, panX),

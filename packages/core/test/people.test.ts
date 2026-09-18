@@ -54,7 +54,7 @@ test('观测：躯干中心、尺度、面积；没有 screen / 分太低 = 不�
   const near = observePerson(person({ cx: 0.5, s: 0.9, hy: 0.6 }))!;
   assert.ok(near.area > o.area, '离得近的人面积大');
   assert.equal(observePerson({ ...person(), screen: undefined }), null, '回放录制没有 screen：多人跟踪不认它');
-  assert.equal(observePerson({ ...person(), score: 0.2 }), null);
+  assert.equal(observePerson(person({ score: 0.2, vis: 0.2 })), null);
   assert.equal(observePerson(null), null);
 });
 
@@ -74,6 +74,17 @@ test('观测：胯在画外（笔记本前坐着）照样有中心和尺度', ()
   const o = observePerson(person({ s: 1.0, hy: 0.95 }))!;
   assert.ok(o, '只露头肩的人也是一个人');
   assert.ok(o.scale > 0.3, `按肩宽折算的躯干长 ${o.scale}`);
+});
+
+test('观测：近距离可靠头肩不会被画外腿拉低的整身平均从人数跟踪里删掉', () => {
+  const close = person({ s: 1, hy: 0.95 });
+  const visibility = (i: number) => i <= 12 ? 0.95 : 0.1;
+  close.screen = close.screen!.map((l, i) => ({ ...l, visibility: visibility(i) }));
+  close.world = close.world.map((l, i) => ({ ...l, visibility: visibility(i) }));
+  close.score = (13 * 0.95 + 20 * 0.1) / 33;
+  const o = observePerson(close);
+  assert.ok(o, '可靠肩线已经证明有人，人数跟踪仍把它删了');
+  assert.ok(o.scale > 0);
 });
 
 test('去重：MediaPipe 在同一个人身上给两份，留一份；两个真人不合并', () => {

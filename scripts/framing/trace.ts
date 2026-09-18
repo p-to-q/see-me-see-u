@@ -35,7 +35,7 @@ const isNew = typeof af.stepLateral === 'function';
 function createOldSim() {
   const classifier = af.createFramingClassifier();
   const watch = ps.createSeeWatch();
-  let crop = af.CROP_FULL, shot = af.SHOT_REST, legHold = 0, t = 0;
+  let crop = af.CROP_FULL, shot = af.SHOT_REST, legHold = 0, t = 0, previousProgress = 0;
   const trace: unknown[] = [];
   const aspect = 16 / 9;
   const B = fr.DEFAULT_BOUNDS;
@@ -57,12 +57,15 @@ function createOldSim() {
       let h = fit.frameHeight;
       if (h * aspect < fit.frameWidth) h = fit.frameWidth / aspect;
       const dist = Math.max(0.8, tuning.STAGE.viewDistance - Math.min(1.0, B.depth / 2));
+      const velocity = dt > 0 ? (shot.progress - previousProgress) / dt : 0;
+      previousProgress = shot.progress;
       trace.push({
-        t, dt, mode: r.mode, why: r.why, shot: d.shot, progress: shot.progress, eased: mix,
-        fov: (2 * Math.atan((h / 2) / dist) * 180) / Math.PI, panX: shot.fx.x * mix, room: 0, legHold: af.smoothstep(legHold),
+        t, dt, mode: r.mode, why: r.why, shot: d.shot, progress: shot.progress, velocity, eased: mix,
+        fov: (2 * Math.atan((h / 2) / dist) * 180) / Math.PI,
+        panX: shot.fx.x * mix, panY: shot.fy.x * mix, room: 0, legHold: af.smoothstep(legHold),
         see: { state: seen.state, reason: seen.reason, side: null },
         crop: { zoom: crop.zoom, cx: crop.cx.x, cy: crop.cy.x, active: d.upperIsIntended, snap, tx: null, ty: null },
-        lateral: { x: 0, target: 0, why: 'none', side: null },
+        lateral: { x: 0, target: 0, deadZone: 0, why: 'none', side: null },
       });
     },
   };

@@ -29,10 +29,10 @@ import { fileURLToPath } from 'node:url';
 const lm = (x: number, y: number, v = 1): Landmark => ({ x, y, z: 0, visibility: v });
 
 /** 一副全在画面里的 33 点 */
-function inFrame(score: number): RawPose {
+function inFrame(score: number, visibility = score): RawPose {
   return {
     world: [],
-    screen: Array.from({ length: 33 }, (_, i) => lm(0.5, 0.1 + (i / 33) * 0.8)),
+    screen: Array.from({ length: 33 }, (_, i) => lm(0.5, 0.1 + (i / 33) * 0.8, visibility)),
     score,
     t: 0,
   };
@@ -55,8 +55,8 @@ test('看见：摄像头开着但没有人', () => {
   assert.deepEqual(seeState({ camera: true, pose: null }), { state: 'empty', reason: 'nobody' });
   // 门限和 `main.ts` 判 `detected` 用的是同一条线。不一致的话，
   // 会出现"身体已经站起来了，小屏幕还在说站到画面里"
-  assert.equal(seeState({ camera: true, pose: inFrame(CAPTURE.minScore) }).state, 'empty');
-  assert.equal(seeState({ camera: true, pose: inFrame(CAPTURE.minScore + 0.01) }).state, 'partial');
+  assert.equal(seeState({ camera: true, pose: inFrame(CAPTURE.minScore, 0.1) }).state, 'empty');
+  assert.equal(seeState({ camera: true, pose: inFrame(CAPTURE.minScore + 0.01, 0.1) }).state, 'partial');
 });
 
 test('看见：一切正常的时候不说话', () => {
@@ -103,17 +103,19 @@ test('看见：出画排在质量前面 —— 「往后退一点」观众做得
 });
 
 test('看见：没有 screen 坐标时跳过出画判定，而不是假装都在画面里', () => {
-  const noScreen: RawPose = { world: [], score: 1, t: 0 };
+  const noScreen: RawPose = { world: Array.from({ length: 33 }, () => lm(0, 0, 1)), score: 1, t: 0 };
   assert.equal(seeState({ camera: true, pose: noScreen }).state, 'ok');
   // 但质量那一条照常生效 —— 少一条判据是事实，少两条就是装聋
-  assert.equal(seeState({ camera: true, pose: { ...noScreen, score: 0.55 } }).reason, 'quality');
+  assert.equal(seeState({ camera: true, pose: {
+    ...noScreen, world: noScreen.world.map((l) => ({ ...l, visibility: 0.55 })), score: 0.55,
+  } }).reason, 'quality');
 });
 
 test('看见：脏输入不许炸，也不许判成"好的"', () => {
   const nan: RawPose = { world: [], screen: [lm(NaN, NaN)], score: NaN, t: 0 };
   assert.equal(seeState({ camera: true, pose: nan }).state, 'empty');
   const empty: RawPose = { world: [], screen: [], score: 1, t: 0 };
-  assert.equal(seeState({ camera: true, pose: empty }).state, 'ok', 'screen 是空数组 = 没有这条判据');
+  assert.equal(seeState({ camera: true, pose: empty }).state, 'empty', '空 landmark 不能只靠一个脏高分冒充人');
 });
 
 // ── 憋话 ──────────────────────────────────────────────────────────────────

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  blendSkeletons, remapSkeleton, BODY_PLANS, PLANS_WITHOUT_FEET, PLANS_WITHOUT_PARTS,
+  blendSkeletons, groundSkeleton, remapSkeleton, BODY_PLANS, PLANS_WITHOUT_FEET, PLANS_WITHOUT_PARTS,
   type BodyPlanSpec,
 } from '../src/bodyplan.ts';
 import { buildSkeleton } from '../src/skeleton.ts';
@@ -392,4 +392,32 @@ test('blend: 漂移的每一帧都还是一具合法骨架（拓扑换了也一�
       }
     }
   }
+});
+
+test('blend: 每个中间态都按目标方案落地，不悬空也不入地', () => {
+  // 真实主线的 rig 来自 stabilizer，入口已经贴地；测试也遵守这个前提。
+  const raw = human();
+  const floor = lowestFoot(raw);
+  const joints: Record<string, Vec3> = {};
+  for (const key in raw.joints) {
+    const p = raw.joints[key];
+    joints[key] = [p[0], p[1] - floor, p[2]];
+  }
+  const rig = buildSkeleton(joints, [], 0);
+
+  for (const plan of ['quadruped', 'towering', 'stub', 'inverted', 'radial', 'column'] as const) {
+    const target = remapSkeleton(rig, plan);
+    for (const t of [0.01, 0.25, 0.5, 0.75, 0.99]) {
+      const mid = groundSkeleton(blendSkeletons(rig, target, t), plan);
+      const y = PLANS_WITHOUT_FEET.includes(plan) ? lowestJoint(mid) : lowestFoot(mid);
+      assert.ok(Math.abs(y) < 1e-9, `${plan} @${t.toFixed(2)} 的落地点在 y=${y.toFixed(4)}m`);
+    }
+  }
+});
+
+test('final grounding is zero-allocation when the body is already on the floor', () => {
+  const input = human();
+  const grounded = groundSkeleton(input, 'rig');
+  assert.notEqual(grounded, input, 'the floating fixture must exercise the correction path first');
+  assert.equal(groundSkeleton(grounded, 'rig'), grounded, 'the normal grounded path allocated a second skeleton');
 });

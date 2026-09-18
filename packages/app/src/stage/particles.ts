@@ -73,6 +73,8 @@ export interface SwarmField extends BreathField {
    * 历史的长度因此不随帧率漂（60fps 和 120fps 拖影一样长）。
    */
   pushPose(bones: readonly { p0: Vec3; p1: Vec3 }[], dt: number, bodyScale: number): void;
+  /** 换观众：下一副骨架重新灌满历史环，绝不拖着上一位的半秒尾巴进场 */
+  resetTrail(): void;
   /** 整片点沿 +Y 平移多少米（落地，见 `creature/swarm.ts`） */
   setLift(lift: number): void;
   /** 这片点的静态属性表 —— 落地要拿它算最低点 */
@@ -393,6 +395,14 @@ export function createBreathField(opt: BreathFieldOptions = {}): SwarmField {
       }
       uHead.value = head;
       uFrac.value = Math.min(1, sinceStep / SWARM.trailStep);
+    },
+
+    resetTrail() {
+      head = 0;
+      sinceStep = 0;
+      seededTrail = false;
+      uHead.value = 0;
+      uFrac.value = 0;
     },
 
     setLift(lift: number) { uLift.value = Number.isFinite(lift) ? lift : 0; },

@@ -32,6 +32,14 @@ import { CAPTURE } from '../../../core/src/tuning.ts';
 
 export type PoseClockState = 'waiting' | 'live' | 'extrapolating' | 'holding' | 'stalled' | 'empty';
 
+/**
+ * 给“此刻真的测量”的消费者用：身体可以在推理短停时保持最后姿态，
+ * 但取景分类、小屏和读数不能把缓存骨架继续报成新观测。
+ */
+export function measuredPose(pose: RawPose | null, state: PoseClockState): RawPose | null {
+  return state === 'live' || state === 'extrapolating' ? pose : null;
+}
+
 export interface PoseClock {
   /**
    * 每帧调一次都行。`inferredAt` = 这份结果是哪一次推理给的（毫秒，和 `now` 同一时钟）。

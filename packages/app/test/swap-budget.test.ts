@@ -199,13 +199,14 @@ test('交接中的 draw call 不越 BUDGET —— 稳态桶数 + 同时交接件
     + `（多开最多的一次：${at}），描边每桶 ${PASSES} 次提交`);
 });
 
-test('creature 真的按那个上限跑 —— 交叉淡入给替换留着名额，替换满了先收尾一件再进', () => {
+test('creature 真的按那个上限跑 —— 交叉淡入给替换留名额，满了也不驱逐在途件', () => {
   const src = read('../src/creature/creature.ts');
   const pump = src.slice(src.indexOf('function pumpQueue()'), src.indexOf('function enqueue('));
   assert.ok(/active\.size \+ reserve < c\b/.test(pump), 'pumpQueue() 不再按 `swapCeiling` 和替换预留的名额收交叉淡入');
-  const replace = src.slice(src.indexOf('    replace(slot, pick)'), src.indexOf('    setShading(id)'));
-  assert.ok(/while \(active\.size >= ceiling\(\)\)/.test(replace) && replace.includes('active.delete('),
-    'replace() 名额满了直接叠上去 —— 那就是 42/40 的来路');
+  const replace = src.slice(src.indexOf('    replace(slot, pick, requested'), src.indexOf('    settleDetachment()'));
+  assert.match(replace, /if \(active\.size >= ceiling\(\)\) return null/,
+    'replace() 名额满了没有明确拒绝 —— 会叠过 42/40 或驱逐半空中的旧事件');
+  assert.doesNotMatch(replace, /active\.delete\(/, 'replace() 仍会把在途脱离突然掐掉');
   const main = read('../src/main.ts');
   assert.ok(/createCreature\(\{[^}]*replaceSlots: flags\.theseus\.on \? 1 : 0/.test(main),
     'main.ts 没给替换留名额：升档那一批交叉淡入会把名额占满');

@@ -47,9 +47,11 @@ import {
 } from './look.ts';
 import {
   boundsOfPlan, boundsOfSkeleton, contactPoints, lerpBounds, shotCamera, DEFAULT_BOUNDS,
-  type BodyBounds,
+  type BodyBounds, type ContactPoint,
 } from './framing.ts';
-import { stepShot, SHOT_REST, type Shot, type ShotState } from '../../../core/src/autoframe.ts';
+import {
+  resetShotIdentity as resetShotIdentityState, stepShot, SHOT_REST, type Shot, type ShotState, type VerticalMeasurement,
+} from '../../../core/src/autoframe.ts';
 import { applyScene, isSceneId, pickScene, SCENES, type SceneId } from './scenes.ts';
 import { createInkSampler } from './ink-sampler.ts';
 
@@ -93,14 +95,18 @@ export interface Stage {
    * 不调也不会出画：换主题时舞台已经按该物种的 `bodyPlan` 摆好了取景，
    * 这个方法是用真人的高矮胖瘦去**细化**它。
    */
-  frame(skeleton: Skeleton | null): void;
+  /** 可传已过滤的落点；空数组只收掉接触 cue，取景仍照常读 skeleton。 */
+  frame(skeleton: Skeleton | null, contacts?: readonly ContactPoint[]): void;
   /**
    * 景别（docs/49 §落地）：全景（等身）或中景（上半身）。**每帧调都行**，同一个值不重启任何东西。
    * 走多久、跟不跟随由舞台自己按时间推（`core/src/autoframe.ts` 的 `stepShot`），不靠 CSS 或动画事件。
    * @param opts.reduced `prefers-reduced-motion`：0.15 秒到位，中景不跟随
    * @param opts.hold 帧循环在降级：跟随冻结，景别照常按时间走完（docs/49 §6.3：不再直接切）
+   * @param opts.vertical 同一人物的 screen.y 与 world 高度配对；null = 本帧丢失，缺省 = 旧回放没有 screen
    */
-  setShot(shot: Shot, opts?: { reduced?: boolean; hold?: boolean }): void;
+  setShot(shot: Shot, opts?: { reduced?: boolean; hold?: boolean; vertical?: VerticalMeasurement | null }): void;
+  /** 换主身份：保留当前镜头位置与景别过渡，只丢掉上一人的跟随速度、滤波与纵向基线。 */
+  resetShotIdentity(): void;
   /**
    * 台上一组身体占多宽、最高的那一具多高（米）。0, 0 = 单人（缺省）。
    * 多人时取景的包围盒至少是这么宽、这么高（docs/50 §4.3），相机距离照旧不动 ——
@@ -117,10 +123,15 @@ export interface Stage {
   /** 当前取景依据的包围盒（HUD / 截图取证用） */
   readonly bounds: BodyBounds;
   /**
-   * 运行时开关后期（HUD / 现场排查 / 降级阶梯 / 调速器）。
-   * 关掉就拆链、拿回来重建（和这一轮之前一样；"不拆"量过，没有量出好处，docs/48 §10.3）。
+   * 永久开关后期（控件条 / 现场排查 / 降级阶梯）。
+   * 关掉会拆链并释放显存；调速器的短暂让路必须走 `setPostSuspended`，不能冒充用户关掉。
    */
   setPost(on: boolean): void;
+  /**
+   * 调速器临时绕过后期，但保留已经建好的链。恢复时继续用同一个 PassNode / RenderTarget，
+   * 不在帧循环里重建；永久关闭仍由 `setPost(false)` 负责释放。
+   */
+  setPostSuspended(suspended: boolean): void;
   readonly post: boolean;
   /**
    * 在空闲里把**直出**那条路（画布、不走后期）编译一遍。后期开着时直出从来没被画过，
@@ -447,6 +458,8 @@ export function createStage(opt: StageOptions = {}): Stage {
   let renderer: THREE.Renderer | null = null;
   let post: PostChain | null = null;
   let postFailed = false;
+  /** 调速器的临时状态，和用户 / 降级阶梯拥有的 `postEnabled` 正交。 */
+  let postSuspended = false;
   let renderedViaStage = false;
   let warnedWiring = false;
   let frames = 0;
@@ -460,6 +473,7 @@ export function createStage(opt: StageOptions = {}): Stage {
   let shotWant: Shot = 'full';
   let shotReduced = false;
   let shotHold = false;
+  let shotVertical: VerticalMeasurement | null | undefined;
   let shotState: ShotState = SHOT_REST;
   /** 中景按身高取景；身高来自骨架（上半身模式下是站姿身高，`core/src/leghold.ts`），带 framingTau 缓动 */
   let bodyH = DEFAULT_BOUNDS.height + 0.14;
@@ -800,7 +814,9 @@ export function createStage(opt: StageOptions = {}): Stage {
       // ── 景别过渡与中景跟随（时间驱动；静止时一帧都不重算）──
       {
         bodyH += (bodyHTarget - bodyH) * (1 - Math.exp(-step / STAGE.framingTau));
-        const next = stepShot(shotState, { shot: shotWant, offset: shotOffset, reduced: shotReduced, hold: shotHold }, step);
+        const next = stepShot(shotState, {
+          shot: shotWant, offset: shotOffset, vertical: shotVertical, reduced: shotReduced, hold: shotHold,
+        }, step);
         const moved = Math.abs(next.progress - shotState.progress) > 1e-6
           || Math.abs(next.fx.x - shotState.fx.x) > 1e-6 || Math.abs(next.fy.x - shotState.fy.x) > 1e-6
           || (next.progress > 0 && Math.abs(bodyHTarget - bodyH) > 1e-4)
@@ -880,9 +896,10 @@ export function createStage(opt: StageOptions = {}): Stage {
     render(r) {
       renderedViaStage = true;
       adopt(r);
-      if (postEnabled) buildPost();
+      const postActive = postEnabled && !postSuspended;
+      if (postActive) buildPost();
       // 后期没建起来（旧后端 / 建链失败）就直出。帧循环里永不抛异常（P2）
-      if (postEnabled && post) post.render();
+      if (postActive && post) post.render();
       else r.render(scene, camera);
       // 必须紧跟着绘制、在同一个任务里：WebGPU 画布出了这个任务就读不到了
       inkSampler.afterRender((r as { domElement?: HTMLCanvasElement }).domElement);
@@ -910,6 +927,12 @@ export function createStage(opt: StageOptions = {}): Stage {
       shotWant = shot === 'upper' ? 'upper' : 'full';
       shotReduced = !!opts?.reduced;
       shotHold = !!opts?.hold;
+      shotVertical = opts?.vertical;
+    },
+
+    resetShotIdentity() {
+      shotState = resetShotIdentityState(shotState);
+      shotVertical = null;
     },
 
     get shot() { return shotState; },
@@ -920,7 +943,7 @@ export function createStage(opt: StageOptions = {}): Stage {
       groupHeight = Number.isFinite(h) && h > 0 ? h : 0;
     },
 
-    frame(skeleton) {
+    frame(skeleton, contacts) {
       const b = boundsOfSkeleton(skeleton);
       // 多人（docs/50 §4.3）：画面至少框住整组身体 —— 最宽的跨度、最高的那一具（身体都站在 y = 0 上）。
       // 单人时两个数都是 0，这两行什么都不改
@@ -944,7 +967,7 @@ export function createStage(opt: StageOptions = {}): Stage {
       // 骨架本身不可信（b 为 null）才保持上一帧；骨架可信但**整具身体都离地**时
       // 必须把落点全部关掉 —— 那正好是"它跳起来了"，那一刻脚下就不该有接触阴影
       if (!b) return;
-      const feet = contactPoints(skeleton, STAGE.contactPoints, STAGE.contactLiftRange);
+      const feet = contacts ?? contactPoints(skeleton, STAGE.contactPoints, STAGE.contactLiftRange);
       let cx = 0;
       let cz = 0;
       for (let i = 0; i < uFeet.length; i++) {
@@ -961,11 +984,12 @@ export function createStage(opt: StageOptions = {}): Stage {
 
     setPost(on) {
       postEnabled = on;
-      // 关后期照旧拆链。试过"不拆、只是不走它"（docs/48 §10.3）：放下那一帧的代价是直出管线现编译，
-      // 和拆不拆无关（由 `warmDirect` 处理）；拿回来那一帧两种写法都会顿（拆：95–848ms，不拆：两次里一次 417ms），
-      // 样本太少分不出谁好 —— 所以不改原来的行为。
+      // 这是用户 / 永久降级的资源所有权开关：关掉就释放。调速器只需暂时直出，走下面的挂起位，
+      // 否则恢复那一帧会重建整条 PassNode / RenderTarget 链（实测 95–848ms，docs/48 §10.10）。
       if (!on) { post?.dispose(); post = null; postFailed = false; }
     },
+
+    setPostSuspended(suspended) { postSuspended = suspended; },
 
     warmDirect(r) {
       try {
@@ -983,7 +1007,7 @@ export function createStage(opt: StageOptions = {}): Stage {
       }
     },
 
-    get post() { return postEnabled && post !== null; },
+    get post() { return postEnabled && !postSuspended && post !== null; },
     setInk(on) { inkSampler.setPaused(!on); },
     get look() { return look; },
 

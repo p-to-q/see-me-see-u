@@ -23,11 +23,12 @@
 import * as THREE from 'three/webgpu';
 import { harmonize } from '../../../core/src/palette.ts';
 import { ALL_SLOT_KEYS } from '../../../core/src/slots.ts';
-import { BUDGET, MATERIAL, MORPH, TIME } from '../../../core/src/tuning.ts';
+import { BUDGET, MATERIAL, MORPH, THESEUS, TIME } from '../../../core/src/tuning.ts';
 import type {
-  Genome, MaterialDef, MaterialRole, PartMeta, Presence, Skeleton, Slot, SlotKey, SlotPick,
+  Genome, MaterialDef, MaterialRole, PartMeta, Presence, Skeleton, Slot, SlotKey, SlotPick, Tier,
 } from '../../../core/src/types.ts';
 import type { PartLibrary } from '../assets/library.ts';
+import { writeInstanceColor } from './instance-color.ts';
 import { assemble, partIdsOf, type PartInstance, type SlotRender } from './assemble.ts';
 import {
   createFillMaterial, createOutlineMaterial, DEFAULT_SHADING, disposeShading, outlineMetersFor,
@@ -36,7 +37,13 @@ import {
 } from './shading.ts';
 import { ARC_OFF, arcWeights, rgbToHsl, type ArcWeights } from '../stage/look.ts';
 import { surfaceFor, type SurfaceSpec } from './surface.ts';
-import { crossfadeRenders, REPLACE_SECONDS, replaceRenders } from './replace-event.ts';
+import {
+  crossfadeRenders, graftCurve, REPLACE_SECONDS, replaceRenders, resolveDetachmentPlan,
+} from './replace-event.ts';
+import {
+  detachmentCost, IN_PLACE_DETACHMENT, sameDetachment,
+  type DetachmentPlan, type TransitionReceipt,
+} from './detachment.ts';
 import { passesOf, swapCeiling } from './swap-budget.ts';
 
 export interface CreatureStats {
@@ -62,6 +69,8 @@ export interface Creature {
   /** 只对变化的槽位做 crossfade，最多同时 MORPH.maxConcurrentSwaps 个（docs/05 §3） */
   remorph(g: Genome): void;
   pose(sk: Skeleton, p: Presence, dt: number): void;
+  /** 换观众：丢掉 genome 与所有在途交接，保留桶和 GPU 资源供下一场复用 */
+  reset(): void;
   /** 慢回路产物到货：把某个槽位热插拔成新部件，带组装动画 */
   graft(slot: SlotKey, meta: PartMeta, geometry: THREE.BufferGeometry): void;
   /**
@@ -69,7 +78,11 @@ export interface Creature {
    * **当帧就开始**，不排队 —— 替换音在同一帧响，排进队列就对不上了。
    * 形状全在 `replace-event.ts`，这里只管把它接进帧循环。
    */
-  replace(slot: SlotKey, pick: SlotPick): void;
+  replace(slot: SlotKey, pick: SlotPick, plan?: DetachmentPlan): TransitionReceipt | null;
+  /** 主身份换人时只撤掉旧人的位移；保留当前交接进度，不能从半空瞬间跳成满尺寸。 */
+  settleDetachment(): void;
+  /** 某个可见骨段正在离开 socket；舞台只收掉对应承重点，不殃及仍在承重的肢体。 */
+  isDetached(slot: SlotKey): boolean;
   /**
    * 换着色语言。控件条的「描边」那一项走这里 —— 它要重建全部材质与桶，
    * 所以只该被一次按键调用，不该每帧调。相同值是 no-op。
@@ -95,11 +108,27 @@ export interface Creature {
   /** 伴随身体在场时主身体留不留描边（`creature/people-budget.ts` 的结论） */
   setOutlineWithCompanions(on: boolean): void;
 
+  /**
+   * 为尚未出现的 genome 建立**将来真正会采用的同一批桶**。调用方一次只让 `next()`
+   * 暴露一个桶，走过一帧真实渲染后立刻 `park()`；失败或来不及就什么也不暖，正式成型照旧现建。
+   */
+  prepareBuckets(g: Genome, sk: Skeleton): CreatureBucketWarmPlan;
+  /** 取消尚未上场的桶保留；桶本身走原来的空闲 TTL，不在取消当帧集中 dispose */
+  clearPreparedBuckets(): void;
+
   /** 挂到 scene 上的根节点 */
   readonly object: THREE.Group;
   readonly genome: Genome | null;
   readonly stats: CreatureStats;
   dispose(): void;
+}
+
+export interface CreatureBucketWarmPlan {
+  /** 暴露下一个桶；false = 全部走完或准备失败 */
+  next(): boolean;
+  /** 收起此刻暴露的桶；幂等，取消 / render 抛错时也必须调用 */
+  park(): void;
+  readonly done: boolean;
 }
 
 export interface CreatureOptions {
@@ -149,6 +178,8 @@ interface Swap {
   t: number;
   /** 'replace' = 忒修斯那一下（碎开 + 组装），缺省 = 交叉淡入 */
   kind?: 'replace';
+  /** 只有主身体消费；伴随身体对同一替换始终保持原位。 */
+  detachment?: DetachmentPlan;
 }
 
 interface MeshEntry {
@@ -159,6 +190,10 @@ interface MeshEntry {
   trisPerInstance: number;
   /** 连续多少帧没被用到 —— 换材质/换部件后回收空 mesh，免得 draw call 慢慢长胖 */
   idleFrames: number;
+  /** 预备桶在目标档位出现前不能被普通空桶回收；真正走到这档后恢复原来的 TTL */
+  preparedUntilTier: Tier | null;
+  /** 这一帧是否真的改过实例颜色；稳定单人全白时必须一直为 false，避免重复 GPU 上传。 */
+  colorDirty: boolean;
   /**
    * 描边外壳（只在 `toon` 下存在）。**和填充共用同一个 `instanceMatrix`**：
    * 矩阵每帧只写一遍，外壳白拿 —— 这是这条路径几乎不吃 CPU 的原因。
@@ -199,6 +234,10 @@ export function createCreature(opt: CreatureOptions): Creature {
   let outlineWithCompanions = true;
   /** 伴随身体每一帧的渲染表（复用同一个对象） */
   const renderC: Partial<Record<SlotKey, SlotRender[]>> = {};
+  /** 伴随身体交接槽位的稳定落地代理（不画） */
+  const groundC: Partial<Record<SlotKey, SlotRender[]>> = {};
+  /** 伴随身体交接目标的稳定落地代理（与 groundC 的最低点连续插值） */
+  const groundToC: Partial<Record<SlotKey, SlotRender[]>> = {};
   /** 这一帧每个桶里主身体占几份（描边外壳只画这几份） */
   const primaryCounts = new Map<string, number>();
   /** 这一帧伴随身体实例的颜色，下标 = 实例序号 − 主身体实例数 */
@@ -238,6 +277,12 @@ export function createCreature(opt: CreatureOptions): Creature {
   const specs = new Map<string, PartInstance>();
   const cursor = new Map<string, number>();
   const render: Partial<Record<SlotKey, SlotRender[]>> = {};
+  /** 主身体交接槽位的稳定落地代理（不画） */
+  const ground: Partial<Record<SlotKey, SlotRender[]>> = {};
+  /** 主身体交接目标的稳定落地代理 */
+  const groundTo: Partial<Record<SlotKey, SlotRender[]>> = {};
+  /** 每个槽位自己的交接进度；主身体和伴随身体共用同一条事件时间线 */
+  const groundProgress: Partial<Record<SlotKey, number>> = {};
 
   const unsubscribe = library.onGeometry((partId) => { dirtyParts.add(partId); });
 
@@ -249,9 +294,9 @@ export function createCreature(opt: CreatureOptions): Creature {
    * 的结果（`core/palette.ts`）。同一个 `matte.ash` 挂在瓷身上和挂在异形身上不是同一块材质，
    * 键不带主色就会拿错缓存 —— 换个物种，旧材质还挂在那儿。
    */
-  function materialIdFor(role: MaterialRole): string {
-    const id = genome?.materials?.[role] ?? 'proto.clay';
-    return `${id}@${genome?.materials?.primary ?? id}@${role}`;
+  function materialIdFor(role: MaterialRole, source: Genome | null = genome): string {
+    const id = source?.materials?.[role] ?? 'proto.clay';
+    return `${id}@${source?.materials?.primary ?? id}@${role}`;
   }
 
   function materialFor(materialKey: string): THREE.Material {
@@ -396,7 +441,7 @@ export function createCreature(opt: CreatureOptions): Creature {
       const pos = geo.getAttribute('position');
       stats.buckets++;
       e = {
-        mesh, partId, materialId, capacity, idleFrames: 0, outline,
+        mesh, partId, materialId, capacity, idleFrames: 0, preparedUntilTier: null, colorDirty: false, outline,
         trisPerInstance: Math.floor((idx ? idx.count : pos ? pos.count : 0) / 3),
       };
       meshes.set(key, e);
@@ -413,7 +458,34 @@ export function createCreature(opt: CreatureOptions): Creature {
     return false;
   }
 
+  function activeDetachmentCost(): number {
+    let cost = 0;
+    for (const s of active.values()) if (s.kind === 'replace' && s.detachment) cost += detachmentCost(s.detachment);
+    return cost;
+  }
+
+  function exclusiveDetachmentActive(): boolean {
+    for (const s of active.values()) {
+      const profile = s.kind === 'replace' ? s.detachment?.profile : undefined;
+      if (profile === 'segment-release' || profile === 'core-release') return true;
+    }
+    return false;
+  }
+
+  function detachmentConflicts(slot: SlotKey, plan: DetachmentPlan): boolean {
+    if (plan.profile === 'in-place') return false;
+    // 两只脚同时离开会把承重读法整个拿走；肢段/core 的全交接独占由上面的 owner 另守。
+    if (slot !== 'footL' && slot !== 'footR') return false;
+    for (const key of ['footL', 'footR'] as const) {
+      const current = active.get(key)?.detachment;
+      if (current && current.profile !== 'in-place') return true;
+    }
+    return false;
+  }
+
   function pumpQueue() {
+    // 肢段/核心是一次完整的构图标点，不只对其它 detachment 独占：在它回接前，普通 remorph/graft 也不抢读法。
+    if (exclusiveDetachmentActive()) return;
     // 没有替换在飞时给它空着一个名额；替换在飞时名额就是它自己占着的那一个
     const c = ceiling();
     const reserve = replacing() ? 0 : Math.min(c - 1, Math.max(0, Math.floor(opt.replaceSlots ?? 0)));
@@ -433,8 +505,40 @@ export function createCreature(opt: CreatureOptions): Creature {
     pumpQueue();
   }
 
+  /**
+   * 还没拿到交接名额的槽位必须继续画 `from`。
+   * `genome` 记的是最终目标，不是每个槽位当下已经走到的画面状态；
+   * 把两者混在一起会让排队件先闪成新件，轮到它时又闪回旧件。
+   * 队列最长只有槽位数，线性查找不分配，也避免再维护一张会与队列漂移的镜像 Map。
+   */
+  function queuedSwap(key: SlotKey): Swap | undefined {
+    for (const swap of queued) if (swap.key === key) return swap;
+    return undefined;
+  }
+
   // ── 接口 ────────────────────────────────────────────────────────────────
   const creature: Creature = {
+    reset() {
+      genome = null;
+      active.clear();
+      queued.length = 0;
+      companions = [];
+      arc = 0;
+      weights = ARC_OFF;
+      applyArcToMaterials();
+      for (const e of meshes.values()) {
+        e.mesh.count = 0;
+        e.mesh.visible = false;
+        if (e.outline) { e.outline.count = 0; e.outline.visible = false; }
+      }
+      stats.instances = 0;
+      stats.triangles = 0;
+      stats.drawCalls = 0;
+      stats.swapsActive = 0;
+      stats.swapsQueued = 0;
+      stats.placeholders = 0;
+    },
+
     remorph(g) {
       if (!g || !g.slots) return;
       const prev = genome;
@@ -476,10 +580,11 @@ export function createCreature(opt: CreatureOptions): Creature {
 
       // 3. 这一帧每个槽位画什么
       for (const key of ALL_SLOT_KEYS) {
-        const pick = genome.slots?.[key];
         const s = active.get(key);
+        const waiting = s ? undefined : queuedSwap(key);
+        const pick = waiting ? waiting.from : genome.slots?.[key];
         if (s?.kind === 'replace') {
-          render[key] = replaceRenders(key, s.from, s.to, s.t, pres);
+          render[key] = replaceRenders(key, s.from, s.to, s.t, pres, s.detachment);
         } else if (s) {
           // 旧件缩没、新件走 graft 的组装曲线；关节那一格是一道波（`replace-event.ts`）
           render[key] = crossfadeRenders(key, s.from, s.to, s.t, pres);
@@ -488,12 +593,31 @@ export function createCreature(opt: CreatureOptions): Creature {
         } else {
           render[key] = [];
         }
+        // 交接的视觉实例会缩放、飞入、散开：它们不能决定整具身体的 lift。
+        // 用交接前那件的满尺寸插座位置做代理；从空槽 graft 时才用目标件。
+        const anchor = s?.from ?? s?.to;
+        if (s && anchor) {
+          ground[key] = [{ partId: anchor.partId, materialRole: anchor.materialRole, scale: pres }];
+          groundTo[key] = [{ partId: s.to.partId, materialRole: s.to.materialRole, scale: pres }];
+          // 主体基准和新件长回来共用同一条时间语义；调 graft 节奏时不得遗漏落地。
+          groundProgress[key] = graftCurve(s.t).scale;
+        } else {
+          delete ground[key];
+          delete groundTo[key];
+          delete groundProgress[key];
+        }
       }
 
       // 4. 装配（挂载数学全在 core/attach.ts 里）
       let instances: PartInstance[];
       try {
-        instances = assemble(genome, sk, library, { render, maxInstances });
+        instances = assemble(genome, sk, library, {
+          render,
+          ground: active.size ? ground : undefined,
+          groundTo: active.size ? groundTo : undefined,
+          groundProgress: active.size ? groundProgress : undefined,
+          maxInstances,
+        });
       } catch (e) {
         console.error('[creature] assemble 失败，保持上一帧', e);
         return;
@@ -508,15 +632,30 @@ export function createCreature(opt: CreatureOptions): Creature {
         const cp = presenceScale(c.presence) * Math.max(0, Math.min(1, Number.isFinite(c.scale) ? c.scale! : 1));
         if (cp <= 1e-3 || !c.skeleton) continue;
         for (const key of ALL_SLOT_KEYS) {
-          const pick = genome.slots?.[key];
           const s = active.get(key);
+          const waiting = s ? undefined : queuedSwap(key);
+          const pick = waiting ? waiting.from : genome.slots?.[key];
           renderC[key] = s?.kind === 'replace' ? replaceRenders(key, s.from, s.to, s.t, cp)
             : s ? crossfadeRenders(key, s.from, s.to, s.t, cp)
               : pick ? [{ partId: pick.partId, materialRole: pick.materialRole, scale: cp }] : [];
+          const anchor = s?.from ?? s?.to;
+          if (s && anchor) {
+            groundC[key] = [{ partId: anchor.partId, materialRole: anchor.materialRole, scale: cp }];
+            groundToC[key] = [{ partId: s.to.partId, materialRole: s.to.materialRole, scale: cp }];
+          } else {
+            delete groundC[key];
+            delete groundToC[key];
+          }
         }
         let extra: PartInstance[];
         try {
-          extra = assemble(genome, c.skeleton, library, { render: renderC, maxInstances });
+          extra = assemble(genome, c.skeleton, library, {
+            render: renderC,
+            ground: active.size ? groundC : undefined,
+            groundTo: active.size ? groundToC : undefined,
+            groundProgress: active.size ? groundProgress : undefined,
+            maxInstances,
+          });
         } catch {
           continue;   // 一具伴随身体摆不出来不拖垮主身体（P2）
         }
@@ -552,6 +691,9 @@ export function createCreature(opt: CreatureOptions): Creature {
         // 有伴随身体的时候按"每具一份"预留容量：第二个人进画不重建桶
         const need = companionsMax > 0 ? Math.max(n, (primaryCounts.get(key) ?? 1) * (1 + companionsMax)) : n;
         const e = entryFor(key, spec.partId, materialIdFor(spec.materialRole), spec.mirrored, need, spec.slot);
+        if (e.preparedUntilTier !== null && genome && genome.tier >= e.preparedUntilTier) {
+          e.preparedUntilTier = null;
+        }
         e.mesh.count = n;
         e.mesh.visible = true;
         e.idleFrames = 0;
@@ -576,6 +718,12 @@ export function createCreature(opt: CreatureOptions): Creature {
         e.mesh.count = 0;
         e.mesh.visible = false;
         if (e.outline) { e.outline.count = 0; e.outline.visible = false; }
+        // 保留一直持续到**这个桶真的被 pose 采用**。只看 `genome.tier` 不够：remorph
+        // 先换 genome，再把十几个槽位分批交叉淡入；排在队尾的桶可能等超过普通 TTL。
+        if (e.preparedUntilTier !== null) {
+          e.idleFrames = 0;
+          continue;
+        }
         if (++e.idleFrames > IDLE_FRAMES_BEFORE_DISPOSE) disposeEntry(key);
       }
 
@@ -591,15 +739,17 @@ export function createCreature(opt: CreatureOptions): Creature {
         const col = e.mesh.instanceColor;
         if (col) {
           const c = k < primaryN ? null : tints[k - primaryN];
-          const a = col.array as Float32Array;
-          a[i * 3] = c ? c[0] : 1; a[i * 3 + 1] = c ? c[1] : 1; a[i * 3 + 2] = c ? c[2] : 1;
+          e.colorDirty = writeInstanceColor(col.array as Float32Array, i, c ?? null) || e.colorDirty;
         }
         cursor.set(key, i + 1);
       }
       for (const [key, e] of meshes) {
         if (!counts.has(key)) continue;
         e.mesh.instanceMatrix.needsUpdate = true;
-        if (e.mesh.instanceColor) e.mesh.instanceColor.needsUpdate = true;
+        if (e.mesh.instanceColor && e.colorDirty) {
+          e.mesh.instanceColor.needsUpdate = true;
+          e.colorDirty = false;
+        }
       }
 
       stats.instances = instances.length;
@@ -620,34 +770,51 @@ export function createCreature(opt: CreatureOptions): Creature {
       enqueue({ key: slot, from: prev, to: pick, t: 0 }, true);
     },
 
-    replace(slot, pick) {
-      if (!genome?.slots || !pick?.partId) return;
+    replace(slot, pick, requested = IN_PLACE_DETACHMENT) {
+      if (!genome?.slots || !pick?.partId) return null;
       const running = active.get(slot);
-      // 这一格正在交接：从**正在装上的那一件**碎起，不是从更早那一件
-      const from = running ? running.to : genome.slots[slot] ?? null;
-      if (from?.partId === pick.partId) return;
+      // 旧人的脱离或上一件交接尚未结束时，不把它当场掐掉再从中间开一件。
+      if (running) return null;
+      const from = genome.slots[slot] ?? null;
+      if (from?.partId === pick.partId) return null;
+      // 替换必须当帧开始才配得上同帧声音；没有名额时宁可明确拒绝，也不能驱逐半空中的旧事件。
+      if (active.size >= ceiling()) return null;
+      if (exclusiveDetachmentActive()) return null;
+
+      const validated = resolveDetachmentPlan(slot, requested);
+      let applied = validated;
+      let reason: TransitionReceipt['reason'] = sameDetachment(validated, requested) ? 'accepted' : 'invalid-profile';
+      const budget = Math.max(0, Math.floor(THESEUS.detachment.budget));
+      const structural = applied.profile === 'segment-release' || applied.profile === 'core-release';
+      if (structural && active.size > 0) {
+        applied = IN_PLACE_DETACHMENT;
+        reason = 'detachment-conflict';
+      } else if (detachmentCost(applied) + activeDetachmentCost() > budget) {
+        applied = IN_PLACE_DETACHMENT;
+        reason = 'detachment-budget';
+      } else if (detachmentConflicts(slot, applied)) {
+        applied = IN_PLACE_DETACHMENT;
+        reason = 'detachment-conflict';
+      }
       genome = { ...genome, slots: { ...genome.slots, [slot]: pick } };
       const i = queued.findIndex((q) => q.key === slot);
       if (i >= 0) queued.splice(i, 1);
-      // 不走 `enqueue`：队列满（升档那一批正在交叉淡入）时它会等，而替换音不等。
-      // 它的名额是 `replaceSlots` 事先空出来的，所以正常情况下这里不会满。
-      // 满了只可能是帧卡顿：排期器按弧线秒数发件，这里的动画吃的是被 `TIME.dtMax` 钳过的 dt，
-      // 上一件替换就还差一点没演完。那就让**最快演完的那一件**当帧收尾（先挑替换、再挑交叉淡入）——
-      // genome 里早就是它的新件，收尾只是少画最后几帧，而不是越过预算叠上去。
-      if (!running) {
-        while (active.size >= ceiling()) {
-          let victim: SlotKey | null = null;
-          let best = -Infinity;
-          for (const [k, s] of active) {
-            const score = (s.kind === 'replace' ? 2 : 0) + s.t;
-            if (score > best) { best = score; victim = k; }
-          }
-          if (victim === null) break;
-          active.delete(victim);
-        }
-      }
-      active.set(slot, { key: slot, from, to: pick, t: 0, kind: 'replace' });
+      active.set(slot, { key: slot, from, to: pick, t: 0, kind: 'replace', detachment: applied });
       void library.preload([pick.partId]);
+      return { slot, requested, applied, degraded: !sameDetachment(requested, applied), reason };
+    },
+
+    settleDetachment() {
+      for (const s of active.values()) {
+        if (s.kind !== 'replace' || !s.detachment || s.detachment.profile === 'in-place') continue;
+        // 换主人的瞬间不能把半程事件删掉：那会让它从半空/半尺寸直接变成满尺寸目标件。
+        // 只撤可见位移，旧/新件仍按原来的 t 在 socket 上完成同一场交接。
+        s.detachment = IN_PLACE_DETACHMENT;
+      }
+    },
+    isDetached(slot) {
+      const plan = active.get(slot)?.detachment;
+      return plan !== undefined && plan.profile !== 'in-place';
     },
 
     setShading(id) {
@@ -679,6 +846,73 @@ export function createCreature(opt: CreatureOptions): Creature {
       companions = companionsMax > 0 && Array.isArray(list) ? list.slice(0, companionsMax) : [];
     },
     setOutlineWithCompanions(on) { outlineWithCompanions = !!on; },
+
+    prepareBuckets(g, sk) {
+      let instances: PartInstance[];
+      try {
+        instances = assemble(g, sk, library, { maxInstances });
+      } catch {
+        return { next: () => false, park: () => undefined, done: true };
+      }
+      const planned = new Map<string, { count: number; spec: PartInstance; materialId: string }>();
+      for (const inst of instances) {
+        const materialId = materialIdFor(inst.materialRole, g);
+        const key = bucketKey(inst.partId, inst.mirrored, materialId);
+        const row = planned.get(key);
+        if (row) row.count++;
+        else planned.set(key, { count: 1, spec: inst, materialId });
+      }
+      const primed: MeshEntry[] = [];
+      for (const [key, row] of planned) {
+        const need = row.count * (1 + companionsMax);
+        const e = entryFor(key, row.spec.partId, row.materialId, row.spec.mirrored, need, row.spec.slot);
+        // 相邻档位经常沿用同一个部件；同一个 live Mesh 真渲染一次就够，后面的计划
+        // 只把保留期限延长，不再白占一帧重复提交。
+        const alreadyPrepared = e.preparedUntilTier !== null;
+        e.preparedUntilTier = e.preparedUntilTier === null
+          ? g.tier
+          : Math.max(e.preparedUntilTier, g.tier) as Tier;
+        // 调用方只在资源队列清空后准备。这里已经用当前几何重建好这一桶，之前同 part 的
+        // “到货待重建”信号因此已经兑现；不删会在正式 pose 的第一行把刚暖好的同一 Mesh 丢掉。
+        dirtyParts.delete(row.spec.partId);
+        e.mesh.count = 0;
+        e.mesh.visible = false;
+        if (e.outline) { e.outline.count = 0; e.outline.visible = false; }
+        if (!alreadyPrepared) primed.push(e);
+      }
+      let cursor = 0;
+      let active: MeshEntry | null = null;
+      const park = () => {
+        if (active) {
+          const e = active;
+          e.mesh.count = 0;
+          e.mesh.visible = false;
+          if (e.outline) { e.outline.count = 0; e.outline.visible = false; }
+          active = null;
+        }
+      };
+      return {
+        next() {
+          park();
+          const e = primed[cursor++];
+          if (!e) return false;
+          tmp.identity();
+          e.mesh.setMatrixAt(0, tmp);
+          e.mesh.instanceMatrix.needsUpdate = true;
+          e.mesh.count = 1;
+          e.mesh.visible = true;
+          if (e.outline) { e.outline.count = 1; e.outline.visible = true; }
+          active = e;
+          return true;
+        },
+        park,
+        get done() { return cursor >= primed.length && active === null; },
+      };
+    },
+
+    clearPreparedBuckets() {
+      for (const e of meshes.values()) e.preparedUntilTier = null;
+    },
 
     get object() { return object; },
     get genome() { return genome; },

@@ -8,6 +8,7 @@ export * from './ground.ts';
 export * from './palette.ts';
 export * from './slots.ts';
 export * from './presence.ts';
+export * from './pose-signal.ts';
 export * from './evolution.ts';
 export * from './arc.ts';
 export * from './theseus.ts';

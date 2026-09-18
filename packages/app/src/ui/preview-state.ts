@@ -17,7 +17,9 @@
  * score 高于 `REFINE.qualityStart` 就是 1，跌到 `qualityFloor` 压到
  * `slowdownFactor`）。精化器正是靠它决定要不要变迟钝。
  *
- * 这里**直接用同一个函数**，不另外写一个门限。两套置信度必然会漂：
+ * 这里**直接用同一个函数**，不另外写一个门限；只是小屏要回答的是
+ * “能不能看见 / 跟住我”，所以近距离时用可靠肩对作为它的任务局部质量。胯对不能替坏肩担保。
+ * 两套门限必然会漂：
  * 那天就会出现"缩略图说一切正常、身体却在发木"，而那是 P21 里最贵的那种仪表 ——
  * 它报的数是真的，只是**真在另一件事上**。
  *
@@ -32,7 +34,7 @@ import type { Landmark, RawPose } from '../../../core/src/types.ts';
 import { PREVIEW } from '../../../core/src/tuning.ts';
 import { qualityScale } from '../../../core/src/refine.ts';
 import { lateralEvidence, trustedLandmark, type Side } from '../../../core/src/autoframe.ts';
-import { CAPTURE } from '../../../core/src/tuning.ts';
+import { posePresent, poseTorsoEvidence } from '../../../core/src/pose-signal.ts';
 import type { Flags } from '../shell/kiosk.ts';
 
 /**
@@ -98,13 +100,15 @@ export function displaySide(side: Side, mirror: boolean): Side {
 }
 
 /**
- * 小屏的数字裁切开不开（docs/49 §6.3 一、§6.5）。三条都要满足：
+ * 小屏的数字裁切开不开（docs/49 §6.3 一、§6.5）。两条都要满足：
  *  - 上半身是正当取景；
  *  - 没有减少动态（一块跟着人挪的缩略图本身就是动态）；
- *  - 画里没有别的**有身体**的人（多人时取景是整组，也就是整幅 —— 和舞台一律全景同一条）。
+ *
+ * “台上有没有别的身体”已经由 app 编排层折进 `upperIsIntended`。这里再看一遍
+ * 探测轨迹，会让超出渲染预算的人错误地否决裁切，制造第二份事实来源。
  */
-export function cropActive(input: { upperIsIntended: boolean; reduced: boolean; othersBodied: boolean }): boolean {
-  return input.upperIsIntended && !input.reduced && !input.othersBodied;
+export function cropActive(input: { upperIsIntended: boolean; reduced: boolean }): boolean {
+  return input.upperIsIntended && !input.reduced;
 }
 
 export interface SeeInput {
@@ -118,6 +122,8 @@ export interface SeeInput {
   pose: RawPose | null;
   /** 上半身是正当取景（`FramingDecision.upperIsIntended`）。缺省 false = 这一版之前的行为 */
   upperIsIntended?: boolean;
+  /** 摄像头画面宽 / 高；缺省由 Auto Framing 安全回落 16:9。 */
+  aspect?: number;
 }
 
 // 四个数都在 `core/tuning.ts` 的 `PREVIEW` 块里，各自的理由写在那边。
@@ -166,17 +172,20 @@ export function seeState(input: SeeInput): SeeReading {
   if (!input.camera) return { state: 'off', reason: 'camera' };
 
   const pose = input.pose;
-  const score = Number.isFinite(pose?.score) ? pose!.score : 0;
-  // 和 `main.ts` 判 `detected` 用的是**同一条线**（CAPTURE.minScore）。
+  // 和 `main.ts` 判 `detected` 用的是**同一条线**（可靠躯干对或整身平均过 CAPTURE.minScore）。
   // 不一致的话，缩略图会在身体已经站起来之后还说"站到画面里"。
-  if (!pose || score <= CAPTURE.minScore) return { state: 'empty', reason: 'nobody' };
+  if (!posePresent(pose)) return { state: 'empty', reason: 'nobody' };
+  // 小屏回答“能不能看见 / 跟住我”，可靠躯干足够；左下读数仍原样报告整身平均分。
+  const rawScore = Number.isFinite(pose.score) ? pose.score : 0;
+  const torso = poseTorsoEvidence(pose);
+  const score = Math.max(rawScore, torso.shoulders);
 
   // `screen` 可能没有（回放数据里就常常没有）。没有就跳过这一条，
   // 而不是当成"没出画" —— 少一条判据是事实，编一个"都在画面里"不是。
   if (pose.screen?.length) {
     // 从左右走出去的排在「往后退」前面：它按躯干**坐标**判，不数可信点 ——
     // MediaPipe 对画外的点给低可见度，半个人出了左边时画外点一个都不可信（docs/49 §6.2 S4）
-    const side = lateralEvidence(pose)?.side;
+    const side = lateralEvidence(pose, input.aspect)?.side;
     if (side) return { state: 'partial', reason: 'side', side };
     if (outOfFrame(pose.screen, input.upperIsIntended) >= OUT_OF_FRAME_POINTS) return { state: 'partial', reason: 'bounds' };
   }

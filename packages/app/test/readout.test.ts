@@ -72,8 +72,8 @@ test('readout: 摄像头关着、身体在放录像时，不说「有人」—�
 
 test('readout: score 压线 —— 判据和 main.ts 的 detected 是同一条', () => {
   // CAPTURE.minScore = 0.5，严格大于才算有人（和 `preview-state.seeState` 逐字相同）
-  assert.equal(readOut({ pose: pose(0.5, [0.9]), features: FEATURES, inferenceHz: 30 }).present, false);
-  assert.equal(readOut({ pose: pose(0.51, [0.9]), features: FEATURES, inferenceHz: 30 }).present, true);
+  assert.equal(readOut({ pose: pose(0.5, [0.1]), features: FEATURES, inferenceHz: 30 }).present, false);
+  assert.equal(readOut({ pose: pose(0.51, [0.1]), features: FEATURES, inferenceHz: 30 }).present, true);
 });
 
 test('readout: 有人的时候五个数按位数写出来', () => {

@@ -28,6 +28,7 @@ interface Act {
   label: string;                       // 给 ?debug=1 的 HUD 看
   /** 'body' = 决定身体怎么动，同时只能有一个；'ambient' = 常驻叠加，可以有多个 */
   kind: 'body' | 'ambient';
+  instantiate?(): Act;                 // 有跨帧状态时，为每个 Director 建私有实例
   canEnter?(w: World): boolean;        // 不满足就永远不会被选中
   weight?: number;                     // 随机选择时的权重，默认 1
   minSeconds?: number;                 // 上场后至少演这么久，防止来回横跳
@@ -37,6 +38,11 @@ interface Act {
   exit?(w: World): void;
 }
 ```
+
+`ACTS` 是玩法目录，不是运行时状态的所有者。无状态 Act 可以直接共享一个对象；只要玩法记住了
+上一帧、进入时姿态、相位或缓冲，就必须实现 `instantiate()`，把这些量放进工厂闭包。
+`createDirector()` 在边界上只实例化一次。这样单舞台没有每帧分配，双舞台、联机协作或测试并行时，
+第二个身体也不会覆盖第一个身体的历史。`untether` 是这条规则的第一个使用者。
 
 ## 4. `World`
 
@@ -100,6 +106,8 @@ export const myIdea: Act = {
 ```
 
 然后在 `packages/app/src/acts/index.ts` 的 `ACTS` 数组里加一行。**没有别的步骤。**
+如果它有跨帧状态，则导出 `createMyIdea()`，并把 `instantiate: createMyIdea` 放在返回的 Act 上；
+不要把状态放在模块级 `let` 里。
 
 ## 7. 已有的 Act
 
@@ -110,7 +118,7 @@ export const myIdea: Act = {
 | id | kind | 是什么 | 弧线里的位置 | 它问了什么 |
 |---|---|---|---|---|
 | `follow` | body | 基线：身体跟随你。原作的行为 | **第 I 乐章**（也是永远的兜底） | — |
-| `echo` | body | 身体演的是你 **1.2 秒前**的动作 | **第 II 乐章** | 那个身体是**现在**的我吗 |
+| `echo` | body | 主体当帧回应，前臂 / 手混入 **1.2 秒前**的方向余波 | **第 II 乐章** | 现在和刚才可以同时是我吗 |
 | `resist` | body | 跟随，但**有重量**：快动作被阻尼，慢动作 1:1 | **第 III 乐章** | 是它学我，还是我学它 |
 | `facing` | body | 镜像被抵消：它不是你的反射，是一个**面对你的人** | **第 IV 乐章** | 那个身体是**我**吗 |
 | `untether` | body | **归还**：它不再用你的骨架，演自己的一场缓慢摇曳。摄像头照开、采集照跑 | **`canEnter` 恒为 false** —— 导演永远排不到它；只由右下角那一行「把身体还回去」和 `?act=untether` 进来 | 那具身体还是我的吗 |
@@ -118,7 +126,8 @@ export const myIdea: Act = {
 `untether` 和上面四个不是一类：**它是唯一一个由观众按出来的玩法**，所以它不参加选角
 （`weight: 0` 且 `canEnter` 恒为 false），`director.force()` 不看 `canEnter`，这是它进得来的全部机制。
 它也是唯一一个**不由任何一副当前骨架驱动**的：以观众交出身体那一刻的姿态为基准，
-叠一个随高度增强的正弦位移场。写它的理由写在 `acts/untether.ts` 的文件头 ——
+叠一个随高度增强的正弦位移场；姿态基准和相位由每个 Director 私有，全部艺术旋钮集中在
+`core/src/tuning.ts` 的 `UNTETHER`。写它的理由写在 `acts/untether.ts` 的文件头 ——
 一句话是：此前四个玩法全都要有人站在那儿，「它自己动」在这个仓库里不存在。
 
 **那件事现在是一条纪律，不只是一个现状**（`docs/40 §1`「永远不脱钩」）：

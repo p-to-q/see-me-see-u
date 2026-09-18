@@ -9,7 +9,9 @@
  *  2. **一个控制器** `stepFollow()`：目标去抖（One Euro）→ 速度前馈（有上限）→ 夹住范围 → 稳定延迟 →
  *     死区 + 二次过渡带 → 帧率无关的临界阻尼弹簧 → 限速。舞台中景跟随、小屏裁切、身体的横向根偏移**共用这一个**，
  *     各自只是参数不同（docs/49 §6.5 那张对照表里每一条"采纳"都落在这个函数的一个参数上，不是一个特例）。
- *  3. **景别** `stepShot()`：全景 ↔ 中景按时间走完，任何状态下都不一帧切（减少动态是写明的例外）。
+ *  3. **景别** `stepShot()`：全景 ↔ 中景按时间走完；中景另把 pelvis/chest 的 `screen.y` 与同名 world 高度配对，
+ *     让整体上下移动不会被落地抹掉，同时不把蹲起重复计算。
+ *     world 骨架的落地步骤抹掉。任何状态下都不一帧切（减少动态是写明的例外）。
  *  4. **小屏裁切** `stepCrop()`：只在上半身模式、一切正常时放大跟随；任何告警 0.2 秒内限速退回整幅（诚实规则）。
  *  5. **横向** `lateralEvidence()` / `stepLateral()`：躯干在画面里的横坐标 → 身体的有界横向根偏移；出了左右边时报哪一侧。
  *
@@ -20,10 +22,11 @@
  *  - 结论要能读出来：每一次读数都带 `why` 和证据，HUD 与 `/dev/framing.html` 直接显示它。
  */
 import type { Landmark, RawPose } from './types.ts';
-import { AUTOFRAME, CAPTURE, PEOPLE, PREVIEW, REFINE } from './tuning.ts';
+import { AUTOFRAME, PEOPLE, PREVIEW, REFINE } from './tuning.ts';
 import { qualityScale } from './refine.ts';
 import { MIRROR_X } from './skeleton.ts';
 import { oneEuroStep, type OneEuroState } from './filter.ts';
+import { posePresent, poseTorsoEvidence } from './pose-signal.ts';
 
 /** 分类器判出来的状态。`stepping-back` 是过渡态：人正在往后退，景别先给全景，腿先别急着放开 */
 export type FramingMode = 'full' | 'upper' | 'stepping-back';
@@ -95,6 +98,24 @@ export function imageToStageX(cx: number, scale: number, aspect = 16 / 9): numbe
   return MIRROR_X * (cx - 0.5) * aspect * (PEOPLE.torsoMeters / Math.max(PEOPLE.minScale, scale));
 }
 
+/** `imageToStageX()` 的逆变换：把当前舞台根位置投回摄像头画面，供画面空间死区比较。 */
+export function stageToImageX(x: number, scale: number, aspect = 16 / 9): number {
+  const a = Number.isFinite(aspect) && aspect > 0 ? aspect : 16 / 9;
+  return 0.5 + (MIRROR_X * x * Math.max(PEOPLE.minScale, scale)) / (a * PEOPLE.torsoMeters);
+}
+
+/**
+ * 尺度换人门：近处保留比例判据；远处还必须越过一个绝对画面尺度，免得 0.10 ↔ 0.14
+ * 这种只有 4% 画面高的检测波动因为比例大而把同一个人拦成 `hold-jump`。
+ */
+function lateralScaleJump(a: number, b: number): boolean {
+  if (!Number.isFinite(a) || !Number.isFinite(b)) return false;
+  const delta = Math.abs(a - b);
+  return delta > AUTOFRAME.lateralIdentityJumpAbsolute
+    // 身份分组必须是对称关系：a→b 与 b→a 不能一个算换人、另一个算同一人。
+    && delta / Math.max(PEOPLE.minScale, Math.min(Math.abs(a), Math.abs(b))) > AUTOFRAME.identityJump;
+}
+
 /** 一帧里分类器看到的全部东西。HUD 和工作台页直接显示它 */
 export interface FramingEvidence {
   /** 膝踝四点里可信且在画内的个数（没有 screen 时只看可信） */
@@ -103,7 +124,7 @@ export interface FramingEvidence {
   upper: boolean;
   /** 头肩点（0–12）里可信但在画外的个数 */
   upperOut: number;
-  /** 追踪质量够不够（`refine.ts` 的 `qualityScale`，和小屏同一把尺子）。不够 = 这一帧不作数 */
+  /** 头肩任务的追踪质量够不够：整身平均或成对肩点过 `qualityScale`。不够 = 这一帧不作数 */
   quality: boolean;
   /** 肩宽（画面高度为单位，x 按宽高比折算）。NaN = 量不到 */
   shoulder: number;
@@ -118,9 +139,10 @@ export interface FramingEvidence {
  * @param aspect 摄像头画面宽 / 高。x 坐标乘它才和 y 同一个单位（1280×720 = 16/9）
  */
 export function frameEvidence(pose: RawPose | null, aspect = 16 / 9): FramingEvidence | null {
-  const score = Number.isFinite(pose?.score) ? pose!.score : 0;
-  if (!pose || score <= CAPTURE.minScore) return null;
-  const quality = qualityScale(score) >= 1;
+  if (!posePresent(pose)) return null;
+  // 这里只需要可靠地读头肩与腿是否被裁；画外腿不该把可靠肩线平均成“坏光”。
+  const rawScore = Number.isFinite(pose.score) ? pose.score : 0;
+  const quality = qualityScale(Math.max(rawScore, poseTorsoEvidence(pose).shoulders)) >= 1;
   const screen = pose.screen?.length ? pose.screen : null;
 
   if (!screen) {
@@ -194,6 +216,8 @@ export interface ClassifierFrame {
    * 那时腿不在是预期：进上半身走快档；**不用尺度趋势判退后**（摄像头自己在缩放，尺度不再说明人在动）。
    */
   cameraFraming?: boolean;
+  /** 这一帧 `screen` 坐标所属的原始画幅；缺省沿用构造时的兼容值。 */
+  aspect?: number;
 }
 
 export interface FramingClassifier {
@@ -217,7 +241,7 @@ const leak = (held: number, on: boolean, dt: number): number => (on ? held + dt 
 
 export function createFramingClassifier(opts: ClassifierOptions = {}): FramingClassifier {
   const T = AUTOFRAME;
-  const aspect = opts.aspect ?? 16 / 9;
+  const fallbackAspect = Number.isFinite(opts.aspect) && (opts.aspect ?? 0) > 0 ? opts.aspect! : 16 / 9;
   let mode: FramingMode = 'full';
   let why: FramingWhy = 'start';
   let inMode = 0;
@@ -267,6 +291,7 @@ export function createFramingClassifier(opts: ClassifierOptions = {}): FramingCl
       cam = frame?.cameraFraming === true;
       inMode += dt;
       cooldown = Math.max(0, cooldown - dt);
+      const aspect = Number.isFinite(frame?.aspect) && (frame?.aspect ?? 0) > 0 ? frame!.aspect! : fallbackAspect;
       const ev = frameEvidence(pose, aspect);
 
       if (!ev) {
@@ -307,11 +332,16 @@ export function createFramingClassifier(opts: ClassifierOptions = {}): FramingCl
         const need = cam || (!opts.kiosk && present <= T.firstWindowSeconds) ? T.enterUpperFirstSeconds
           : opts.kiosk ? T.enterUpperSecondsKiosk : T.enterUpperSeconds;
         toUpper = leak(toUpper, legsOut, dt);
-        if (toUpper >= need && cooldown <= 0) go('upper', 'legs-out');
+        // 冷却期间桶可以继续积累，但真正切换的这一帧仍必须有 legs-out 证据。
+        // 否则候选刚消失、桶还没漏到门限下，又恰好冷却归零时，会用过期证据误切。
+        if (legsOut && toUpper >= need && cooldown <= 0) go('upper', 'legs-out');
       } else if (mode === 'upper') {
         const appearing = !legsOut;
-        toStep = leak(toStep, appearing || shrinking, dt);
-        if (toStep >= T.stepBackConfirmSeconds && cooldown <= 0) go('stepping-back', appearing ? 'legs-appearing' : 'shrinking');
+        const stepping = appearing || shrinking;
+        toStep = leak(toStep, stepping, dt);
+        // 刚切进 upper 就开始退后，是上一判断需要立刻纠正，不该再等那次切换留下的全局冷却。
+        // 仍然必须攒满同一份连续证据；底边抖动的漏桶与当前帧守卫都没有放宽。
+        if (stepping && toStep >= T.stepBackConfirmSeconds) go('stepping-back', appearing ? 'legs-appearing' : 'shrinking');
       } else {
         toFull = leak(toFull, legsIn, dt);
         // 退后完成不等冷却：人已经退到位了，再让他等一秒是在惩罚照做的人
@@ -488,18 +518,53 @@ export const smoothstep = (x: number): number => {
 // ── 景别：中景的混合 + 跟随 ──────────────────────────────────────────────────
 
 export interface ShotState {
-  /** 0 = 全景，1 = 中景（线性进度，用的时候套 smoothstep） */
+  /** 0 = 全景，1 = 中景（进度用的时候套 smoothstep） */
   progress: number;
+  /** 景别进度速度（1/秒）。保留它，目标反向时才能先刹车、再回头。 */
+  velocity: number;
   fx: Follow;
   fy: Follow;
+  /** screen-space 纵向基线与去抖状态。旧回放没有 screen 时不建立，继续走 world fallback。 */
+  vertical?: VerticalFollowState;
 }
 
-export const SHOT_REST: ShotState = { progress: 0, fx: { x: 0, v: 0 }, fy: { x: 0, v: 0 } };
+export interface VerticalFollowState {
+  /** 刚进入中景 / 换人后的同一锚点；screen 与 world 的相对变化相减，避免把蹲起算两次。 */
+  screenAnchor: number;
+  worldAnchor: number;
+  anchor: VerticalEvidence['anchor'];
+  cameraFraming: boolean;
+  /** 纵向锚点不可信多久了。短丢失冻结，超过门限平滑归中。 */
+  lost: number;
+  centerFilter: OneEuroState;
+  scaleFilter: OneEuroState;
+}
+
+export const SHOT_REST: ShotState = { progress: 0, velocity: 0, fx: { x: 0, v: 0 }, fy: { x: 0, v: 0 } };
+
+/**
+ * 主身份换人时只清这个人的跟随记忆，不重启正在进行的景别过渡。
+ * 保留当前画面位置避免交接帧跳变；旧人的速度、滤波与纵向基线全部丢掉。
+ */
+export function resetShotIdentity(s: ShotState): ShotState {
+  const finite = (v: number, fallback = 0): number => Number.isFinite(v) ? v : fallback;
+  return {
+    progress: Math.max(0, Math.min(1, finite(s.progress))),
+    velocity: finite(s.velocity),
+    fx: { x: finite(s.fx?.x), v: 0 },
+    fy: { x: finite(s.fy?.x), v: 0 },
+  };
+}
 
 export interface ShotInput {
   shot: Shot;
   /** 上半身相对静止站姿的偏移（米）：x = 头胸相对骨盆的横向（前倾），y = 头的高度差。null = 这一帧没有骨架 */
   offset: { x: number; y: number } | null;
+  /**
+   * pelvis/chest 的 screen-space 纵向证据与同名 world 高度。`undefined` = 输入没有 screen（旧回放，沿用 offset.y）；
+   * `null` = 本帧证据丢失（先冻结再归中）。
+   */
+  vertical?: VerticalMeasurement | null;
   /** `prefers-reduced-motion` */
   reduced: boolean;
   /**
@@ -510,6 +575,87 @@ export interface ShotInput {
   hold: boolean;
 }
 
+/** screen 证据与**同一具 human skeleton、同名关节**的 world 高度配对后的帧输入。 */
+export interface VerticalMeasurement extends VerticalEvidence {
+  worldY: number;
+  /** false = 横向身份门还在 hold-jump；纵向不得先接受另一个人。 */
+  accepted: boolean;
+  /** 上游相机开始 / 停止自行取景会改 screen 坐标系，切换时重立相对基线。 */
+  cameraFraming: boolean;
+}
+
+function verticalGoal(
+  state: VerticalFollowState | undefined,
+  evidence: VerticalMeasurement | null | undefined,
+  active: boolean,
+  fallback: number,
+  dt: number,
+): { state?: VerticalFollowState; goal: number; screenDriven: boolean } {
+  const T = AUTOFRAME;
+  if (!active) return { goal: 0, screenDriven: evidence !== undefined || state !== undefined };
+  // 旧回放没有 screen：不能凭空发明画面位置，保留这一版之前的 world-relative 跟随。
+  if (evidence === undefined) return { goal: Number.isFinite(fallback) ? fallback : 0, screenDriven: false };
+  if (evidence && (!evidence.quality || !evidence.accepted)) {
+    // 坏光不是人走了：无限期冻结，不被一个低置信位置拖走。身份门 hold-jump 时丢掉旧基线，
+    // 但位置仍冻结；门确认新身份后第一帧会在当前位置重立基线，不追那次跳变。
+    if (!evidence.accepted) return { goal: NaN, screenDriven: true };
+    if (state) return { state: { ...state, lost: 0 }, goal: NaN, screenDriven: true };
+    // screen 链存在却没有可信基线：继续以中线为目标。这里若复活 world fallback，
+    // 长丢失刚归中的镜头会在坏光重现时突然追一份不可与 screen 对齐的旧坐标。
+    return { goal: 0, screenDriven: true };
+  }
+  if (!evidence || !Number.isFinite(evidence.worldY)) {
+    // `undefined` 已在上面单独保留给旧回放；null 是现代 screen 证据明确丢失。
+    // 基线过期后必须继续归中，不能退回另一套坐标系。
+    if (!state) return { goal: 0, screenDriven: true };
+    const lost = state.lost + dt;
+    if (lost < T.verticalHoldSeconds) return { state: { ...state, lost }, goal: NaN, screenDriven: true };
+    // 长丢失后忘掉旧人的基线，再平滑回到中线；新证据回来会从新锚点重新立零点。
+    return { goal: 0, screenDriven: true };
+  }
+
+  const previousY = state?.centerFilter.x;
+  const previousScale = state?.scaleFilter.x;
+  const jumped = !!state && (
+    evidence.anchor !== state.anchor
+    || evidence.cameraFraming !== state.cameraFraming
+    || Math.abs(evidence.y - previousY!) > T.verticalJump
+    || lateralScaleJump(evidence.scale, previousScale!)
+  );
+  if (!state || jumped) {
+    const centerFilter = oneEuroStep(undefined, evidence.y, dt, T.verticalCenterJitter);
+    const scaleFilter = oneEuroStep(undefined, evidence.scale, dt, T.verticalScaleJitter);
+    return {
+      state: {
+        screenAnchor: centerFilter.x,
+        worldAnchor: evidence.worldY,
+        anchor: evidence.anchor,
+        cameraFraming: evidence.cameraFraming,
+        lost: 0,
+        centerFilter,
+        scaleFilter,
+      },
+      goal: 0,
+      screenDriven: true,
+    };
+  }
+
+  const centerFilter = oneEuroStep(state.centerFilter, evidence.y, dt, T.verticalCenterJitter);
+  const scaleFilter = oneEuroStep(state.scaleFilter, evidence.scale, dt, T.verticalScaleJitter);
+  // 同一关节的 world 上移会让它在画面里上移（screen.y 变小）；两者抵消后剩下的才是
+  // world 骨架因落地而丢掉的整体画面位移。否则蹲起会被 world 动作 + screen 跟随算两次。
+  const worldDelta = evidence.worldY - state.worldAnchor;
+  const imageError = centerFilter.x - state.screenAnchor
+    + worldDelta * (scaleFilter.x / PEOPLE.torsoMeters);
+  const corrected = deadZone(imageError, T.verticalDeadZoneImage, T.verticalBandImage);
+  return {
+    state: { ...state, lost: 0, centerFilter, scaleFilter },
+    // screen.y 向下为正；相机画面中心上移（+Y）后，身体在输出里同样向下，保持镜子的方向。
+    goal: corrected * (PEOPLE.torsoMeters / Math.max(PEOPLE.minScale, scaleFilter.x)),
+    screenDriven: true,
+  };
+}
+
 /**
  * 一步景别。时间与状态驱动，**不依赖任何 CSS 过渡或动画结束事件**
  *（ui/controls.css、shell/notice.css 里写着的 1.7 fps 教训：静止态不许等一段动画走完才成立）。
@@ -517,22 +663,70 @@ export interface ShotInput {
 export function stepShot(s: ShotState, input: ShotInput, dt: number): ShotState {
   const target = input.shot === 'upper' ? 1 : 0;
   const T = AUTOFRAME;
-  const secs = input.reduced ? T.shotSecondsReduced : T.shotSeconds;
-  const progress = stepToward(s.progress, target, dt, secs);
+  const t = Number.isFinite(dt) && dt > 0 ? dt : 0;
+  let progress: number;
+  let velocity: number;
+  if (input.reduced) {
+    progress = stepToward(s.progress, target, t, T.shotSecondsReduced);
+    velocity = 0;
+  } else {
+    // 闭式临界阻尼：不是逐帧欧拉积分，同一段时间在 15/30/60/120Hz 下走近同一条轨迹。
+    // 与旧的 stepToward 不同，速度属于状态；目标反向时先耗掉旧速度，不会当帧翻号。
+    const x0 = Math.min(1, Math.max(0, Number.isFinite(s.progress) ? s.progress : 0));
+    const rawVelocity = Number.isFinite(s.velocity) ? s.velocity : 0;
+    const v0 = Math.max(-T.shotMaxSpeed, Math.min(T.shotMaxSpeed, rawVelocity));
+    if (t <= 0) {
+      progress = x0;
+      velocity = v0;
+    } else {
+      const w = Math.max(1e-6, T.shotOmega);
+      const e0 = x0 - target;
+      const k = Math.exp(-w * t);
+      const c = v0 + w * e0;
+      progress = target + (e0 + c * t) * k;
+      velocity = (v0 - w * c * t) * k;
+
+      const limit = T.shotMaxSpeed * t;
+      if (progress - x0 > limit) { progress = x0 + limit; velocity = Math.min(velocity, T.shotMaxSpeed); }
+      else if (x0 - progress > limit) { progress = x0 - limit; velocity = Math.max(velocity, -T.shotMaxSpeed); }
+      velocity = Math.max(-T.shotMaxSpeed, Math.min(T.shotMaxSpeed, velocity));
+
+      if (progress >= 1) { progress = 1; velocity = Math.min(0, velocity); }
+      else if (progress <= 0) { progress = 0; velocity = Math.max(0, velocity); }
+      // 端点附近 smoothstep 已把剩余画面差压到不可见；精确收口，免得舞台永久为尾数重算。
+      if (Math.abs(target - progress) <= T.shotSettlePosition && Math.abs(velocity) <= T.shotSettleVelocity) {
+        progress = target;
+        velocity = 0;
+      }
+    }
+  }
   // 减少动态：中景不跟随，偏移收回 0（一个固定机位的中景）。写明的例外：这一下允许是一次切
-  if (input.reduced) return { progress, fx: { x: 0, v: 0 }, fy: { x: 0, v: 0 } };
-  if (input.hold) return { progress, fx: { ...s.fx, v: 0 }, fy: { ...s.fy, v: 0 } };
+  if (input.reduced) return { progress, velocity, fx: { x: 0, v: 0 }, fy: { x: 0, v: 0 } };
   const follow = target === 1 && input.offset;
   const gx = follow ? input.offset!.x : 0;
-  const gy = follow ? input.offset!.y : 0;
+  const vertical = verticalGoal(s.vertical, input.vertical, target === 1, follow ? input.offset!.y : 0, t);
+  const gy = vertical.goal;
+  if (input.hold) {
+    return {
+      progress, velocity, fx: { ...s.fx, v: 0 }, fy: { ...s.fy, v: 0 },
+      ...(vertical.state ? { vertical: vertical.state } : {}),
+    };
+  }
   // 回全景时不要死区也不要稳定延迟：死区会让偏移停在离 0 还有 4cm 的地方，下一次进中景就从一个旧偏移起步
   const base: Omit<FollowParams, 'range'> = follow
     ? { deadZone: T.followDeadZone, band: T.followBand, omega: T.followOmega, maxSpeed: T.followMaxSpeed, settle: T.followSettleSeconds, jitter: T.followJitter }
     : { deadZone: 0, band: 1e-6, omega: T.followOmega, maxSpeed: T.followMaxSpeed };
+  // screen-space 纵向已经在画面单位里去抖并过死区，这里只做临界阻尼、限速和范围夹取；
+  // 再套一层 4cm 米制死区，会重新吞掉近处那一小段动作。
+  const verticalParams: Omit<FollowParams, 'range'> = vertical.screenDriven
+    ? { deadZone: 0, band: 1e-6, omega: T.followOmega, maxSpeed: T.followMaxSpeed }
+    : base;
   return {
     progress,
+    velocity,
     fx: stepFollow(s.fx, gx, dt, { ...base, range: T.followRangeX }),
-    fy: stepFollow(s.fy, gy, dt, { ...base, range: T.followRangeY }),
+    fy: stepFollow(s.fy, gy, dt, { ...verticalParams, range: T.followRangeY }),
+    ...(vertical.state ? { vertical: vertical.state } : {}),
   };
 }
 
@@ -637,7 +831,7 @@ export function stepCrop(c: Crop, input: CropInput, dt: number): Crop {
 export type Side = 'left' | 'right';
 
 export interface LateralEvidence {
-  /** 根的画面横坐标（原图 0..1）：胯中点；胯没有坐标时退到两肩中点。**只看胯**：前倾时胯不动，迈步时胯才动 */
+  /** 根的画面横坐标（原图 0..1）：成对可信的胯中点；近处胯被裁时退到成对可信的肩中点。 */
   x: number;
   /** 躯干长（画面高度单位，`torsoScale()`） */
   scale: number;
@@ -645,10 +839,10 @@ export interface LateralEvidence {
   out: number;
   /** 哪一侧出了画（观众自己的左右）。两边都出 = null：那是离得太近，不是走偏了 */
   side: Side | null;
-  /** 追踪质量够（`qualityScale ≥ 1`）。不够 = 冻结，不往一个坏光下的坐标漂 */
+  /** 实际驱动坐标的肩 / 胯锚点质量够（`qualityScale ≥ 1`）。不够 = 冻结，不往坏光坐标漂 */
   quality: boolean;
   /**
-   * 至少一个躯干点可信地在画内。false = 位置全靠 MediaPipe 外推：**侧边照样报**（人确实在那一侧的边外），
+   * 胯或肩至少有一对可信，且其中一点在画内。false = 位置全靠 MediaPipe 外推：**侧边照样报**（人确实在那一侧的边外），
    * 但位置不作数 —— 没有侧边时控制器把它当成跟丢。
    */
   trusted: boolean;
@@ -662,8 +856,9 @@ export interface LateralEvidence {
  * 越界按**坐标**算，不按可信点数：MediaPipe 对画外的点给低可见度，数可信点的话半个人出了左边也数不出一个（docs/49 §6.2 S4）。
  */
 export function lateralEvidence(pose: RawPose | null | undefined, aspect = 16 / 9): LateralEvidence | null {
-  const score = Number.isFinite(pose?.score) ? pose!.score : 0;
-  if (!pose || score <= CAPTURE.minScore) return null;
+  if (!posePresent(pose)) return null;
+  const score = Number.isFinite(pose.score) ? pose.score : 0;
+  const torsoEvidence = poseTorsoEvidence(pose);
   const s = pose.screen;
   if (!s?.length) return null;
   const has = (l: Landmark | undefined): l is Landmark => !!l && Number.isFinite(l.x) && Number.isFinite(l.y);
@@ -671,10 +866,19 @@ export function lateralEvidence(pose: RawPose | null | undefined, aspect = 16 / 
   if (!has(sL) || !has(sR)) return null;
   const hips = has(hL) && has(hR);
   const torso = hips ? [sL, sR, hL, hR] : [sL, sR];
-  // 位置可不可信：至少一个躯干点可信地在画内（画外的肩和胯可见度只有 0.2，胯中点一出左边就只剩画内那一只肩）
-  const trusted = torso.some((l) => trustedLandmark(l) && inFrame(l));
-  const x = hips ? (hL.x + hR.x) / 2 : (sL.x + sR.x) / 2;
-  const scale = torsoScale(sL, sR, hips ? hL : null, hips ? hR : null, aspect);
+  const shouldersTrusted = trustedLandmark(sL) && trustedLandmark(sR) && (inFrame(sL) || inFrame(sR));
+  const hipsTrusted = hips && trustedLandmark(hL) && trustedLandmark(hR) && (inFrame(hL) || inFrame(hR));
+  // 坐标“存在”不等于可以驱动根。近处胯被裁时 MediaPipe 仍会给两个有限、但低置信的外推点：
+  // 用它们会让身体突然冲向画边。可信胯仍优先（不把前倾当迈步），胯不可信才用可信肩。
+  const trusted = hipsTrusted || shouldersTrusted;
+  // 弱胯 + 强肩时不能让强肩替一个实际由弱胯驱动的坐标“担保质量”。那一帧直接改用强肩。
+  const useHips = hipsTrusted && (torsoEvidence.hips >= REFINE.qualityStart || torsoEvidence.shoulders < REFINE.qualityStart);
+  const x = useHips
+    ? (hL.x + hR.x) / 2
+    : shouldersTrusted
+      ? (sL.x + sR.x) / 2
+      : hips ? (hL.x + hR.x) / 2 : (sL.x + sR.x) / 2;
+  const scale = torsoScale(sL, sR, useHips ? hL : null, useHips ? hR : null, aspect);
   const xs = torso.map((l) => l.x * aspect);
   const lo = Math.min(...xs), hi = Math.max(...xs);
   // 侧身时躯干宽度缩到几乎为 0：分母给一个按躯干长折算的下限，免得一点抖动就是"一半出画"
@@ -686,7 +890,56 @@ export function lateralEvidence(pose: RawPose | null | undefined, aspect = 16 / 
   const edge = outL >= f && outR < f ? 0 : outR >= f && outL < f ? 1 : null;
   // 画面的哪条边 → 观众的哪一侧：按 MIRROR_X 折，和身体往哪边走同一个符号（docs/04 §1 唯一定义处）
   const side: Side | null = edge === null ? null : MIRROR_X * (edge - 0.5) > 0 ? 'right' : 'left';
-  return { x, scale, out: Math.max(outL, outR), side, quality: qualityScale(score) >= 1, trusted };
+  const anchorQuality = useHips ? torsoEvidence.hips : torsoEvidence.shoulders;
+  return { x, scale, out: Math.max(outL, outR), side, quality: qualityScale(Math.max(score, anchorQuality)) >= 1, trusted };
+}
+
+// ── 纵向：画面里的 pelvis/chest → 中景移轴 ──────────────────────────────────
+
+/**
+ * 中景纵向跟随的一帧原始证据。胯完整可信时用 pelvis；近处胯常在桌面 / 画面下方，
+ * 那时退到两肩中点 chest。头最先被裁，不拿它做整体位置。
+ */
+export interface VerticalEvidence {
+  /** 同一锚点的画面 y（向下为正） */
+  y: number;
+  /** 胯完整可信时用 pelvis；近处胯被裁时退到 chest。消费方必须配同名 world 关节。 */
+  anchor: 'pelvis' | 'chest';
+  /** 躯干长（画面高度单位），把画面位移折成米 */
+  scale: number;
+  /** `qualityScale ≥ 1`；false 时控制器冻结，不追坏光下的坐标 */
+  quality: boolean;
+}
+
+/**
+ * `undefined` = 这类输入根本没有 screen（旧回放，继续使用 world fallback）；
+ * `null` = 本来有 screen，但这一帧没有可靠 pelvis/chest（冻结后归中）；其余 = 可用证据。
+ */
+export function verticalEvidence(
+  pose: RawPose | null | undefined,
+  aspect = 16 / 9,
+): VerticalEvidence | null | undefined {
+  if (!pose) return null;
+  const screen = pose.screen;
+  if (!screen?.length) return undefined;
+  if (!posePresent(pose)) return null;
+  const score = Number.isFinite(pose.score) ? pose.score : 0;
+  const torsoEvidence = poseTorsoEvidence(pose);
+  const sL = screen[SHOULDER_L], sR = screen[SHOULDER_R];
+  // 这里只量纵向：人在画面左右边缘时，x 出界不该让一条完全可靠的 y 证据消失。
+  const inY = (l: Landmark): boolean => l.y >= -PREVIEW.edgeMargin && l.y <= 1 + PREVIEW.edgeMargin;
+  if (!trustedLandmark(sL) || !trustedLandmark(sR) || !inY(sL) || !inY(sR)) return null;
+  const hL = screen[HIP_L], hR = screen[HIP_R];
+  const hipsTrusted = trustedLandmark(hL) && trustedLandmark(hR) && inY(hL) && inY(hR);
+  const hips = hipsTrusted && (torsoEvidence.hips >= REFINE.qualityStart || torsoEvidence.shoulders < REFINE.qualityStart);
+  const scale = torsoScale(sL, sR, hips ? hL : null, hips ? hR : null, aspect);
+  if (!Number.isFinite(scale) || scale <= 0) return null;
+  return {
+    y: hips ? (hL.y + hR.y) / 2 : (sL.y + sR.y) / 2,
+    anchor: hips ? 'pelvis' : 'chest',
+    scale,
+    quality: qualityScale(Math.max(score, hips ? torsoEvidence.hips : torsoEvidence.shoulders)) >= 1,
+  };
 }
 
 /** 横向根偏移此刻在做什么。HUD 与工作台原样显示 */
@@ -700,9 +953,16 @@ export interface LateralState {
   /** 最后一次被接受的根的画面横坐标与尺度（换人判断用）。NaN = 还没有 */
   accepted: number;
   scale: number;
-  /** 一帧跳得太远的那个新位置，和它稳定了多久 */
+  /** 一帧跳得太远的那个新位置与尺度，和这组身份证据稳定了多久 */
   pending: number;
+  pendingScale: number;
   pendingFor: number;
+  /** 画面中心与躯干尺度各自的 One Euro 状态；先稳住它们，不能先做 `center / scale` 放大噪声 */
+  centerFilter?: OneEuroState;
+  scaleFilter?: OneEuroState;
+  /** 当前画面死区投影到舞台后的米数；给测试与取景靶场看，不是另一份调参 */
+  deadZone: number;
+  band: number;
   /** 没有横向证据多久了（秒） */
   lost: number;
   side: Side | null;
@@ -710,8 +970,21 @@ export interface LateralState {
 }
 
 export const LATERAL_REST: LateralState = {
-  x: { x: 0, v: 0 }, target: 0, accepted: NaN, scale: NaN, pending: NaN, pendingFor: 0, lost: 0, side: null, why: 'center',
+  x: { x: 0, v: 0 }, target: 0, accepted: NaN, scale: NaN,
+  pending: NaN, pendingScale: NaN, pendingFor: 0, deadZone: 0, band: 0,
+  lost: 0, side: null, why: 'center',
 };
+
+/**
+ * 换主身份时清掉旧人的画面坐标、尺度与滤波器，但保留此刻已经画出来的根位置。
+ * 下一帧会从同一像素位置向新人的目标平滑移动，不会瞬移到中线。
+ */
+export function resetLateralIdentity(s: LateralState): LateralState {
+  return {
+    ...LATERAL_REST,
+    x: { x: Number.isFinite(s.x?.x) ? s.x.x : 0, v: 0 },
+  };
+}
 
 export interface LateralInput {
   evidence: LateralEvidence | null;
@@ -724,7 +997,7 @@ export interface LateralInput {
   aspect?: number;
   /**
    * 此刻是不是中景（`FramingDecision.shot === 'upper'`）。中景死区更小、弹簧更快
-   * （`AUTOFRAME.lateralDeadZoneUpper` / `lateralOmegaUpper`）——全景那一档的迟钝
+   * （`AUTOFRAME.lateralDeadZoneUpperImage` / `lateralOmegaUpper`）——全景那一档的迟钝
    * 是为了不抢"等身 + 相机距离不动"这条主张的戏，中景本身已经是自适应取景，不受它约束。
    */
   upper?: boolean;
@@ -754,52 +1027,83 @@ export function stepLateral(s: LateralState, input: LateralInput, dt: number): L
   const t = Number.isFinite(dt) && dt > 0 ? dt : 0;
   const ev = input.evidence;
   const aspect = input.aspect ?? 16 / 9;
-  let { target, accepted, scale, pending, pendingFor, lost } = s;
+  let { target, accepted, scale, pending, pendingScale, pendingFor, centerFilter, scaleFilter, lost } = s;
   let why: LateralWhy;
   let goal: number;
   if (!input.enabled) {
-    target = 0; accepted = NaN; scale = NaN; pending = NaN; pendingFor = 0; lost = 0;
+    target = 0; accepted = NaN; scale = NaN; pending = NaN; pendingScale = NaN; pendingFor = 0; lost = 0;
+    centerFilter = undefined; scaleFilter = undefined;
     why = 'yield'; goal = 0;
   } else if (!ev || (!ev.side && !ev.trusted)) {
     // 没有证据，或者位置全靠外推、又不在任何一边外（被桌子整个挡住）：跟丢
     lost += t;
-    pending = NaN; pendingFor = 0;
-    if (lost >= T.lateralHoldSeconds) { target = 0; accepted = NaN; scale = NaN; why = 'center'; goal = 0; } else { why = 'hold-lost'; goal = NaN; }
+    pending = NaN; pendingScale = NaN; pendingFor = 0;
+    if (lost >= T.lateralHoldSeconds) {
+      target = 0; accepted = NaN; scale = NaN; centerFilter = undefined; scaleFilter = undefined;
+      why = 'center'; goal = 0;
+    } else { why = 'hold-lost'; goal = NaN; }
   } else if (!ev.side && !ev.quality && input.cameraFraming) {
     // 判别条件 + 兜底：我们自己的质量读数不够，但摄像头确认在自己取景——
     // 信它更稳，回中线好过冻在一个低置信度的坐标上（见 LateralInput.cameraFraming 的注释）
     lost = 0;
-    target = 0; accepted = NaN; scale = NaN; why = 'center'; goal = 0;
+    target = 0; accepted = NaN; scale = NaN; pending = NaN; pendingScale = NaN; pendingFor = 0; why = 'center'; goal = 0;
+    centerFilter = undefined; scaleFilter = undefined;
   } else if (ev.side || !ev.quality) {
     lost = 0;
+    // 出画 / 坏光打断“同一组新身份连续稳定”的证据，回来后必须重新计时。
+    pending = NaN; pendingScale = NaN; pendingFor = 0;
     why = ev.side ? 'hold-edge' : 'hold-light';
     goal = NaN;
   } else {
     lost = 0;
     const jumped = Number.isFinite(accepted)
-      && (Math.abs(ev.x - accepted) > T.lateralJump || (Number.isFinite(scale) && Math.abs(ev.scale / scale - 1) > T.identityJump));
+      && (Math.abs(ev.x - accepted) > T.lateralJump || lateralScaleJump(ev.scale, scale));
     let accept = !jumped;
     if (jumped) {
-      if (Number.isFinite(pending) && Math.abs(ev.x - pending) <= T.lateralJump) pendingFor += t;
-      else { pending = ev.x; pendingFor = 0; }
+      const samePending = Number.isFinite(pending) && Number.isFinite(pendingScale)
+        && Math.abs(ev.x - pending) <= T.lateralJump
+        && !lateralScaleJump(ev.scale, pendingScale);
+      if (samePending) pendingFor += t;
+      else { pending = ev.x; pendingScale = ev.scale; pendingFor = 0; }
       accept = pendingFor >= T.lateralJumpConfirmSeconds;
     }
     if (accept) {
-      accepted = ev.x; scale = ev.scale; pending = NaN; pendingFor = 0;
-      target = imageToStageX(ev.x, ev.scale, aspect);
+      // 中心和尺度必须先各自稳定，再做 `center / scale` 的透视投影。反过来会把远处的
+      // 两份小噪声相乘；米制死区还会让同样的画面移动近处不响应、远处过度响应。
+      const freshIdentity = !Number.isFinite(accepted) || jumped;
+      centerFilter = oneEuroStep(freshIdentity ? undefined : centerFilter, ev.x, t, T.lateralCenterJitter);
+      scaleFilter = oneEuroStep(freshIdentity ? undefined : scaleFilter, ev.scale, t, T.lateralScaleJitter);
+      accepted = ev.x; scale = ev.scale; pending = NaN; pendingScale = NaN; pendingFor = 0;
+      const currentImageX = stageToImageX(s.x.x, scaleFilter.x, aspect);
+      const imageError = (centerFilter.x - currentImageX) * aspect;
+      const imageDeadZone = input.upper ? T.lateralDeadZoneUpperImage : T.lateralDeadZoneImage;
+      const correctedImageX = currentImageX + deadZone(imageError, imageDeadZone, T.lateralBandImage) / aspect;
+      target = imageToStageX(correctedImageX, scaleFilter.x, aspect);
       why = 'follow'; goal = target;
     } else {
       why = 'hold-jump'; goal = NaN;
     }
   }
-  // 回中线 / 让位时不要死区：死区会让身体停在离中线还有 5cm 的地方（和景别回全景同一条理由）
+  // 回中线 / 让位时不要死区：死区会让身体停在中线旁边（和景别回全景同一条理由）
   const centering = why === 'center' || why === 'yield';
-  const deadZone = centering ? 0 : input.upper ? T.lateralDeadZoneUpper : T.lateralDeadZone;
+  const measuredScale = scaleFilter?.x ?? scale;
+  // 开机第一帧就跟丢时还没有任何 accepted scale；状态与 HUD 仍必须保持有限。
+  const projectionScale = Number.isFinite(measuredScale)
+    ? Math.max(PEOPLE.minScale, measuredScale)
+    : PEOPLE.minScale;
+  const metresPerImageHeight = PEOPLE.torsoMeters / projectionScale;
+  const deadZoneMetres = centering ? 0
+    : (input.upper ? T.lateralDeadZoneUpperImage : T.lateralDeadZoneImage) * metresPerImageHeight;
+  const band = centering ? 1e-6 : T.lateralBandImage * metresPerImageHeight;
   const omega = input.upper ? T.lateralOmegaUpper : T.lateralOmega;
   const x = stepFollow(s.x, goal, t, {
-    deadZone, band: centering ? 1e-6 : T.lateralBand, omega,
+    // 横向死区已经在画面空间处理；这里的弹簧只负责连续性、前馈、限速与舞台余量。
+    deadZone: 0, band: 1e-6, omega,
     range: Math.max(0, Number.isFinite(input.room) ? input.room : 0),
-    maxSpeed: T.lateralMaxSpeed, lead: T.lateralLead, leadMax: T.lateralLeadMax, jitter: T.lateralJitter,
+    maxSpeed: T.lateralMaxSpeed, lead: T.lateralLead, leadMax: T.lateralLeadMax,
   });
-  return { x, target, accepted, scale, pending, pendingFor, lost, side: ev?.side ?? null, why };
+  return {
+    x, target, accepted, scale, pending, pendingScale, pendingFor,
+    centerFilter, scaleFilter, deadZone: deadZoneMetres, band, lost, side: ev?.side ?? null, why,
+  };
 }

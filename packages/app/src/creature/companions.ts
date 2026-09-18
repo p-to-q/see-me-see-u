@@ -15,8 +15,8 @@ import { createMotion, type MotionMachine as Motion } from '../../../core/src/mo
 import { createPresence, type PresenceMachine } from '../../../core/src/presence.ts';
 import { createFramingClassifier, decide, stepFollow, stepToward, type FramingClassifier, type Follow } from '../../../core/src/autoframe.ts';
 import { holdLegs } from '../../../core/src/leghold.ts';
-import { blendSkeletons, remapSkeleton, type BodyPlan } from '../../../core/src/bodyplan.ts';
-import { lineup, tintFor, type PeopleFrame } from '../../../core/src/people.ts';
+import { blendSkeletons, groundSkeleton, remapSkeleton, type BodyPlan } from '../../../core/src/bodyplan.ts';
+import { isFreshReacquisition, lineup, tintFor, type PeopleFrame } from '../../../core/src/people.ts';
 import { AUTOFRAME, PEOPLE, PRESENCE, REFINE } from '../../../core/src/tuning.ts';
 import type { Skeleton } from '../../../core/src/types.ts';
 import type { Companion } from './creature.ts';
@@ -51,6 +51,8 @@ interface Entry {
 
 export interface CompanionContext {
   dt: number;
+  /** 这一次 update 是否正在消费一份新推理；`reacquired` 只能在这一次生效。 */
+  freshInference: boolean;
   /** 这一帧主身体的方案与漂移（伴随身体跟主身体同一个形体，docs/50 §3.1：同一条船） */
   plan: BodyPlan;
   drift: number;
@@ -64,7 +66,7 @@ export interface CompanionContext {
 }
 
 export interface CompanionResult {
-  companions: Companion[];
+  companions: readonly Companion[];
   /** 主身体这一帧的站位（米）。单人 = 0 */
   primaryX: number;
   /** 台上身体（主 + 伴随，含正在溶掉的）横向占多宽（米），给舞台取景 */
@@ -76,6 +78,8 @@ export interface CompanionResult {
 }
 
 export interface Companions {
+  /** 已经在中线的唯一主身体：返回共享结果；其他状态返回 null 交给完整管线。 */
+  stableSingle(frame: PeopleFrame): CompanionResult | null;
   update(frame: PeopleFrame, ctx: CompanionContext): CompanionResult;
   /** 主身体交接：把这个人自己的滤波器交出来（没有 = null，调用方新建一套） */
   takePipes(id: number): PersonPipes | null;
@@ -93,7 +97,14 @@ export function createCompanions(opts: { seed: () => number }): Companions {
   const entries = new Map<number, Entry>();
   let primaryX: Follow = { x: 0, v: 0 };
   const spring = { deadZone: PEOPLE.slotDeadZone, band: PEOPLE.slotDeadZone, omega: PEOPLE.slotOmega, range: PEOPLE.maxOffset };
+  const centerSpring = { ...spring, deadZone: 0, band: 0 };
   const view = new Map<number, { presence: string; legHold: number; x: number }>();
+  // 自动模式默认会建多人管线，但绝大多数帧仍只有一位主身体。这个结果不可变、可复用：
+  // 只有第二人拿到身体、旧主仍在退场，或主身体还在从多人站位回中线时才走下面的完整路径。
+  const singleResult: CompanionResult = Object.freeze({
+    companions: Object.freeze([]) as readonly Companion[],
+    primaryX: 0, groupWidth: 0, groupHeight: 0, visible: 1,
+  });
 
   function entryFor(id: number): Entry {
     let e = entries.get(id);
@@ -110,8 +121,23 @@ export function createCompanions(opts: { seed: () => number }): Companions {
     return e;
   }
 
+  const stableSingle = (frame: PeopleFrame): CompanionResult | null => {
+    const solePrimary = frame.primary !== null
+      && frame.selected.length === 1
+      && frame.selected[0] === frame.primary;
+    if (!solePrimary || entries.size > 0 || primaryX.x !== 0 || primaryX.v !== 0) return null;
+    view.clear();
+    return singleResult;
+  };
+
   return {
+    stableSingle,
     update(frame, ctx) {
+      const solePrimary = frame.primary !== null
+        && frame.selected.length === 1
+        && frame.selected[0] === frame.primary;
+      const single = stableSingle(frame);
+      if (single) return single;
       const dt = ctx.dt;
       const tracks = new Map(frame.tracks.map((t) => [t.id, t]));
       // 台上的身体：主身体在前，其余按拿到身体的先后，截到预算
@@ -141,7 +167,7 @@ export function createCompanions(opts: { seed: () => number }): Companions {
         const p = e.presence.update(detected, dt);
         if (detected && t) {
           // 丢了一阵又被认回来：这个人的时间状态清掉，不在"之前"和"之后"之间插值（和主身体同一条，docs/50 §2.4）
-          if (t.reacquired) {
+          if (isFreshReacquisition(ctx.freshInference, t)) {
             e.pipes.refiner?.reset(); e.pipes.stabilizer.reset(); e.pipes.vitality.reset();
             e.motion.reset(); e.classifier.reset(); e.legHold = 0;
           }
@@ -149,14 +175,15 @@ export function createCompanions(opts: { seed: () => number }): Companions {
           const cooked = e.pipes.refiner && ctx.refineOn ? e.pipes.refiner.apply(raw, dt) : raw;
           const tracked = e.pipes.stabilizer.apply(buildSkeleton(mediapipeToWorld(cooked), cooked.world, cooked.t), dt);
           if (e.pipes.refiner && ctx.refineOn) clampFold(tracked);
-          const reading = e.classifier.update(raw, dt);
+          const reading = e.classifier.update(raw, dt, { aspect: ctx.aspect });
           e.legHold = stepToward(e.legHold, decide('auto', reading).holdLegs ? 1 : 0, dt, AUTOFRAME.legBlendSeconds);
           const human = holdLegs(tracked, e.legHold);
           const features = e.motion.update(human, dt);
           const planned = ctx.drift >= 1 ? remapSkeleton(human, ctx.plan)
             : ctx.drift <= 0 ? remapSkeleton(human, 'rig')
               : blendSkeletons(remapSkeleton(human, 'rig'), remapSkeleton(human, ctx.plan), ctx.drift);
-          e.skeleton = ctx.vitalityOn ? e.pipes.vitality.apply(planned, features, dt, ctx.drift > 0 ? ctx.plan : 'rig') : planned;
+          const lively = ctx.vitalityOn ? e.pipes.vitality.apply(planned, dt) : planned;
+          e.skeleton = groundSkeleton(lively, ctx.drift > 0 ? ctx.plan : 'rig');
         }
         const target = targets.get(id);
         if (target !== undefined) e.x = stepFollow(e.x, target, dt, spring);
@@ -167,7 +194,17 @@ export function createCompanions(opts: { seed: () => number }): Companions {
       }
       // 主身体：单人时永远在中线；有伴随身体时和他们一起排
       const pTarget = frame.primary !== null ? targets.get(frame.primary) : undefined;
-      primaryX = stepFollow(primaryX, seen.length > 1 && pTarget !== undefined ? pTarget : 0, dt, spring);
+      const grouped = seen.length > 1 && pTarget !== undefined;
+      primaryX = stepFollow(primaryX, grouped ? pTarget : 0, dt, grouped ? spring : centerSpring);
+      // 死区适合防人体抖动，但单人回中线不能永久停在死区边上：
+      // 连续收回到 1mm 内再精确归零，下一帧才能回到无分配的稳定单人路径。
+      if (!grouped
+        && Math.abs(primaryX.x) <= PEOPLE.slotRestEpsilon
+        && Math.abs(primaryX.v) <= PEOPLE.slotRestSpeedEpsilon) primaryX = { x: 0, v: 0 };
+      if (solePrimary && entries.size === 0 && primaryX.x === 0 && primaryX.v === 0) {
+        view.clear();
+        return singleResult;
+      }
 
       const companions: Companion[] = [];
       // 舞台取景的包围盒按左右对称算（`stage/framing.ts`），所以宽度 = 离中线最远那一具 × 2 + 一个身位
@@ -209,6 +246,7 @@ export function createCompanions(opts: { seed: () => number }): Companions {
     reset() {
       entries.clear();
       primaryX = { x: 0, v: 0 };
+      view.clear();
     },
     get entries() { return view; },
   };

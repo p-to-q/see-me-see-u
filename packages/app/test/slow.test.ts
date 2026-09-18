@@ -133,10 +133,27 @@ async function withServer(loop: ReturnType<typeof createSlowLoop>, fn: (base: st
     req.url = (req.url ?? '/').replace(/^\/__slow/, '') || '/';   // connect 的挂载点会剥掉前缀
     void handler(req, res);
   });
-  await new Promise<void>((r) => server.listen(0, r));
-  const port = (server.address() as { port: number }).port;
+  // 客户端固定走 127.0.0.1，服务端也必须明确绑 IPv4。`listen(0)` 在不同宿主上可能只绑 ::，
+  // 全负载测试里曾偶发得到一次没有 HTTP 回执的 `fetch failed`，隔离复跑又消失。
+  await new Promise<void>((resolveListen, rejectListen) => {
+    const failed = (error: Error) => rejectListen(error);
+    server.once('error', failed);
+    server.listen(0, '127.0.0.1', () => {
+      server.off('error', failed);
+      resolveListen();
+    });
+  });
+  const address = server.address();
+  assert.ok(address && typeof address === 'object', '测试 HTTP server 没有取得监听地址');
+  const port = address.port;
   try { await fn(`http://127.0.0.1:${port}/__slow`); }
-  finally { await new Promise<void>((r) => server.close(() => r())); }
+  finally {
+    // undici 会保留 keep-alive socket；显式清掉，不能让一条测试的连接寿命漏到下一条。
+    server.closeAllConnections();
+    await new Promise<void>((resolveClose, rejectClose) => server.close((error) => {
+      if (error) rejectClose(error); else resolveClose();
+    }));
+  }
 }
 
 test('HTTP：POST 提交 → GET 轮询 → GET glb；坏请求都是结构化 JSON 错误', async () => {

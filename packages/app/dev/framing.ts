@@ -8,7 +8,7 @@
  *  - **原图**（没镜像）：33 个点（实心 = 可信）、小屏裁切的**目标窗口**（虚线）、窗口中心的**死区**（小方框）、**实际窗口**（实线）；
  *    从左右走出画时，出去的那条边加粗。
  *  - **舞台横向**（屏幕视角，镜像之后）：余量（浅色带）、目标（虚线刻度）、死区（身体两侧的细线）、身体此刻的位置。
- *  - **最近 20 秒**：模式色带 + 放大倍数 / 景别进度 / 横向偏移 / 腿的曲线。
+ *  - **最近 20 秒**：模式色带 + 放大倍数 / 景别进度与速度 / 横向偏移 / 纵向移轴 / 腿的曲线。
  *
  * 默认播合成时间线（`core/test/framing-people.ts` 的 `SCRIPTS`，和 node 测试、`scripts/framing/trace.ts` 同一份），
  * 按「用摄像头」才请求权限 —— 和正式程序同一条规矩：不点就不问。
@@ -43,6 +43,8 @@ let policyChoice: FramingPolicy | 'script' = isFramingPolicy(q.get('framing')) ?
 let kiosk = q.get('kiosk') === '1';
 let reduced = q.get('reduced') === '1';
 let camFraming = q.get('camframing') === 'on';
+let planDrift = q.get('drift') === '1' ? 1 : 0;
+let companions = q.get('companions') === '1' ? 1 : 0;
 let forceHold = false;
 let sim = createSim({ kiosk, keep: loop ? 1200 : Infinity });
 let capture: Capture | null = null;
@@ -71,6 +73,8 @@ bindBox('kiosk', () => kiosk, (v) => { kiosk = v; }, true);
 bindBox('reduced', () => reduced, (v) => { reduced = v; });
 bindBox('hold', () => forceHold, (v) => { forceHold = v; });
 bindBox('camframing', () => camFraming, (v) => { camFraming = v; });
+bindBox('drift', () => planDrift > 0, (v) => { planDrift = v ? 1 : 0; });
+bindBox('companions', () => companions > 0, (v) => { companions = v ? 1 : 0; });
 $<HTMLButtonElement>('cam').addEventListener('click', async () => {
   const { createCapture } = await import('../src/capture/capture.ts');
   const c = await createCapture('webcam');
@@ -146,7 +150,7 @@ function drawStage(f: SimFrame): void {
   sctx.beginPath(); sctx.moveTo(X(tx), y - 34); sctx.lineTo(X(tx), y + 34); sctx.stroke();
   sctx.setLineDash([]);
   // 身体（0.5m 宽的一块）与它两侧的死区
-  const dz = AUTOFRAME.lateralDeadZone;
+  const dz = f.lateral.deadZone;
   sctx.fillStyle = f.lateral.why === 'follow' ? '#e6e6e6' : '#e8a33d';
   sctx.fillRect(X(f.lateral.x - 0.25), y - 16, X(f.lateral.x + 0.25) - X(f.lateral.x - 0.25), 32);
   sctx.strokeStyle = '#5aa9e6';
@@ -170,7 +174,9 @@ function drawPlot(trace: readonly SimFrame[]): void {
   const lines: Array<[string, (f: SimFrame) => number]> = [
     ['#ffffff', (f) => (f.crop.zoom - 1) / Math.max(1e-6, AUTOFRAME.previewZoom - 1)],
     ['#e8a33d', (f) => f.eased],
+    ['#d86fe8', (f) => 0.5 + f.velocity / (2 * AUTOFRAME.shotMaxSpeed)],
     ['#5aa9e6', (f) => 0.5 + f.lateral.x / 4],
+    ['#45d6c8', (f) => 0.5 + f.panY / (2 * AUTOFRAME.followRangeY)],
     ['#7bc47f', (f) => f.legHold],
   ];
   for (const [color, get] of lines) {
@@ -194,7 +200,10 @@ function frame(): void {
   const s = capture ? { pose: capture.latest(), policy: 'auto' as const, hold: false } : scriptAt(segs, t);
   t += dt;
   const policy = policyChoice === 'script' ? s.policy : policyChoice;
-  const f = sim.step({ pose: s.pose, dt, policy, reduced, hold: forceHold || s.hold, cameraFraming: camFraming });
+  const f = sim.step({
+    pose: s.pose, dt, policy, reduced, hold: forceHold || s.hold,
+    cameraFraming: camFraming, planDrift, plan: planDrift > 0 ? 'quadruped' : 'rig', companions,
+  });
   $('src').textContent = capture ? '摄像头' : `${scriptName} ${(t % total).toFixed(1)} / ${total.toFixed(1)}s`;
   drawView(s.pose, f);
   drawStage(f);
@@ -204,8 +213,9 @@ function frame(): void {
   W.__framingJumps = jumps;
   const M = AUTOFRAME.maxStep as Record<string, number>;
   const [a, b] = formatFramingRows({
-    reading: { mode: f.mode, why: f.why, inMode: 0, evidence: null, trend: NaN, cooldown: 0, cameraFraming: camFraming },
-    decision: { policy, mode: f.mode, shot: f.shot, holdLegs: f.legHold > 0, upperIsIntended: f.shot === 'upper' },
+    reading: f.reading,
+    decision: f.decision,
+    effective: f.effective,
     legHold: f.legHold, shot: f.eased,
     lateral: { x: f.lateral.x, room: f.room, why: f.lateral.why, side: f.lateral.side },
   });
@@ -213,9 +223,9 @@ function frame(): void {
   for (const [text, bad] of [
     [a, false], [b, false],
     [`小屏：${f.see.state}/${f.see.reason}${f.see.side ? `（观众的${f.see.side === 'left' ? '左' : '右'}边）` : ''} · 裁切 ${f.crop.active ? '开' : '关'}${f.crop.snap ? ' · 诚实退回中' : ''} · zoom ${f.crop.zoom.toFixed(3)} · 中心 (${f.crop.cx.toFixed(3)}, ${f.crop.cy.toFixed(3)})`, false],
-    [`舞台：景别 ${f.shot} ${(f.eased * 100).toFixed(0)}% · fov ${f.fov.toFixed(2)}° · 移轴 ${f.panX.toFixed(3)}m · 腿 ${f.legHold.toFixed(2)}`, false],
+    [`舞台：景别 ${f.shot}/${f.effective.shotWhy} ${(f.eased * 100).toFixed(0)}% · 速度 ${f.velocity >= 0 ? '+' : ''}${f.velocity.toFixed(2)}/s · fov ${f.fov.toFixed(2)}° · 移轴 (${f.panX.toFixed(3)}, ${f.panY.toFixed(3)})m · 腿 ${f.legHold.toFixed(2)}`, false],
     ...Object.entries(jumps).map(([k, v]) => [`每 16ms 最大 ${k}: ${v.value.toFixed(4)}（上限 ${M[k]}）@ ${v.t.toFixed(2)}s`, v.value > M[k] + 1e-9] as [string, boolean]),
-    ['曲线：白 = 放大倍数 · 琥珀 = 景别 · 蓝 = 横向偏移 · 绿 = 腿；顶上色带：灰 full / 琥珀 upper / 蓝 stepping-back', false],
+    ['曲线：白 = 放大倍数 · 琥珀 = 景别 · 紫 = 景别速度（中线为 0）· 蓝 = 横向偏移 · 青 = 纵向移轴 · 绿 = 腿；顶上色带：灰 full / 琥珀 upper / 蓝 stepping-back', false],
   ] as Array<[string, boolean]>) {
     const el = document.createElement('div');
     el.textContent = text;

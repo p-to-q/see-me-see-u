@@ -15,7 +15,7 @@
  * 屏幕上就会出现"空场里有人在动"—— 那是 P21 里最贵的那种仪表：
  * 它报的数是真的，只是**真在另一个时刻**。
  *
- * 所以判据只有一条：**这一帧有没有人**（`score > CAPTURE.minScore`，
+ * 所以判据只有一条：**这一帧有没有人**（`posePresent()`：整身平均或可靠躯干对），
  * 和 `main.ts` 的 `detected`、`preview-state.ts` 的 `empty` 是同一条线 ——
  * 三处不许各画一条）。没有人，除了推理频率之外全部写 `—`：
  * 推理是**机器自己**的节拍，空场里它照样在跑，那个数此刻仍然是真的。
@@ -31,6 +31,7 @@ import { CAPTURE, PREVIEW, REFINE } from '../../../core/src/tuning.ts';
 import { qualityScale } from '../../../core/src/refine.ts';
 import { outOfFrame } from './preview-state.ts';
 import { lateralEvidence } from '../../../core/src/autoframe.ts';
+import { posePresent } from '../../../core/src/pose-signal.ts';
 import type { Flags } from '../shell/kiosk.ts';
 
 /**
@@ -78,6 +79,8 @@ export interface ReadoutInput {
    * 这个开关也原样递过去：从画面下边出去的腿不是"部分出画"，头被切照样是。缺省 false
    */
   upperIsIntended?: boolean;
+  /** 摄像头画面宽 / 高；WRN12 与取景/小屏共用。 */
+  aspect?: number;
 }
 
 export interface Readout {
@@ -202,7 +205,7 @@ export function readOut(input: ReadoutInput): Readout {
   }
   const pose = input.pose;
   const score = Number.isFinite(pose?.score) ? pose!.score : 0;
-  const present = pose !== null && score > CAPTURE.minScore;
+  const present = posePresent(pose);
 
   // 推理频率**不跟着 present 作废**：空场里模型照样在跑，那个数此刻仍然是真的。
   // 它同时是这块读数唯一一行"机器自己"的数 —— 全灰的时候它证明机器没死。
@@ -310,7 +313,7 @@ export function assess(input: ReadoutInput, inferred = true): Assessment {
 
   const pose = input.pose;
   const score = Number.isFinite(pose?.score) ? pose!.score : 0;
-  const present = pose !== null && score > CAPTURE.minScore;
+  const present = posePresent(pose);
   // **没有人就没有身体上的告警**：空场里说"关节丢失"是假话 —— 没有人可丢
   if (present) {
     const seen = visibleJoints(pose);
@@ -318,7 +321,7 @@ export function assess(input: ReadoutInput, inferred = true): Assessment {
     if (seen !== null && total > 0 && seen < total / 2) {
       levels.joints = 'alarm'; hit.add('ALM01');
     } else if (pose!.screen?.length
-      && (lateralEvidence(pose)?.side || outOfFrame(pose!.screen, input.upperIsIntended) >= PREVIEW.outOfFramePoints)) {
+      && (lateralEvidence(pose, input.aspect)?.side || outOfFrame(pose!.screen, input.upperIsIntended) >= PREVIEW.outOfFramePoints)) {
       // 从左右走出去的也是部分出画，和小屏同一把尺子（`lateralEvidence`，按躯干坐标判，docs/49 §6.2 S4）。
       // **出画不给「关节」那一行上色。** 出画的点照样是看得见的点：截图上 33/33 被涂成琥珀，
       // 读起来是"全都看见了，但有问题"—— 一行数和它的颜色自相矛盾。出画这件事没有哪一行在量，

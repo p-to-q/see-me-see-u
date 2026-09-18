@@ -34,74 +34,81 @@
  * 和 `?act=untether` 都照常进得来。
  */
 import type { Bone, Skeleton, Vec3 } from '../../../core/src/types.ts';
+import { SKELETON, UNTETHER } from '../../../core/src/tuning.ts';
 import type { Act } from './act.ts';
 
-/** 摇曳的两个频率（Hz）。刻意不成整数比：合起来的周期长到读不出重复 */
-const SWAY_HZ = 0.11;
-const BREATH_HZ = 0.19;
-/** 水平摆幅，按身高的比例（离地最高处）。再大就不像"站着"，像在跳舞 */
-const SWAY = 0.035;
-/** 纵向起伏（呼吸）的幅度，按身高的比例 */
-const BREATH = 0.012;
 const TAU = Math.PI * 2;
-
-/** 姿态基准：观众交出身体那一刻的那副骨架。没有它就什么都不做 */
-let base: Skeleton | null = null;
-/** 上场以来的秒数。**不从 `w.t` 读**，那是会话时钟，上场第一帧就会跳一大段相位 */
-let age = 0;
 
 /**
  * 位移场：同一个点永远得到同一个位移，所以骨头两端一起被搬走、
  * 形状不会被撕开。强度随离地高度线性增长（脚不动，头摆得最多）。
  */
 function drift(p: Vec3, h: number, t: number): Vec3 {
-  const up = Math.max(0, Math.min(1.4, p[1] / Math.max(0.2, h)));
-  const s = Math.sin(TAU * SWAY_HZ * t) * SWAY * h * up;
-  const z = Math.sin(TAU * SWAY_HZ * t * 0.7 + 1.1) * SWAY * 0.6 * h * up;
-  const y = Math.sin(TAU * BREATH_HZ * t) * BREATH * h * up;
+  const up = Math.max(0, Math.min(UNTETHER.heightWeightCap, p[1] / Math.max(UNTETHER.minHeightMeters, h)));
+  const s = Math.sin(TAU * UNTETHER.swayHz * t) * UNTETHER.swayHeightRatio * h * up;
+  const z = Math.sin(TAU * UNTETHER.swayHz * t * UNTETHER.depthFrequencyRatio + UNTETHER.depthPhaseRadians)
+    * UNTETHER.swayHeightRatio * UNTETHER.depthAmplitudeRatio * h * up;
+  const y = Math.sin(TAU * UNTETHER.breathHz * t) * UNTETHER.breathHeightRatio * h * up;
   return [p[0] + s, p[1] + y, p[2] + z];
 }
 
-export const untether: Act = {
-  id: 'untether',
-  label: '归还（它自己动）',
-  kind: 'body',
-  weight: 0,
-  // 永远不自动上场 —— 只由 `director.force()` 进来（右下角那一行 / `?act=untether`）
-  canEnter: () => false,
+/**
+ * 每个 Director 都要拿自己的实例。`base` / `age` 若在模块级共享，双屏或联机的第二具身体
+ * 会把第一具的基准姿态覆盖掉；单舞台时看不见，扩成多舞台时却会直接串人。
+ */
+export function createUntether(): Act {
+  /** 姿态基准：观众交出身体那一刻的那副骨架。没有它就什么都不做 */
+  let base: Skeleton | null = null;
+  /** 上场以来的秒数。**不从 `w.t` 读**，那是会话时钟，上场第一帧就会跳一大段相位 */
+  let age = 0;
 
-  enter(w) {
-    age = 0;
-    base = w.skeleton;
-  },
+  return {
+    id: 'untether',
+    label: '归还（它自己动）',
+    kind: 'body',
+    weight: 0,
+    instantiate: createUntether,
+    // 永远不自动上场 —— 只由 `director.force()` 进来（右下角那一行 / `?act=untether`）
+    canEnter: () => false,
 
-  update(w, dt) {
-    // 上场那一帧可能正好丢追踪。补一次基准，而不是僵在那里等（P3）。
-    if (!base) base = w.skeleton;
-    const sk = base;
-    if (!sk) return;
-    const step = Number.isFinite(dt) && dt > 0 ? Math.min(dt, 1 / 15) : 1 / 60;
-    age += step;
+    enter(w) {
+      age = 0;
+      base = w.skeleton;
+    },
 
-    const h = sk.height > 0 ? sk.height : 1.7;
-    // **构造一份新的**，不就地改 —— `w.skeleton` 是共享的（docs/16 §7b），
-    // 而 `base` 本身就是某一帧的 `w.skeleton`。
-    const joints: Record<string, Vec3> = {};
-    for (const k in sk.joints) joints[k] = drift(sk.joints[k], h, age);
-    const bones: Bone[] = sk.bones.map((b) => {
-      const p0 = drift(b.p0, h, age);
-      const p1 = drift(b.p1, h, age);
-      // 位移场是连续的，两端搬的量略有差别 —— 重新量一次长度，
-      // 否则挂载数学会照着旧长度拉伸部件（和 resist.ts 同一条理由）。
-      return { ...b, p0, p1, length: Math.hypot(p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2]) };
-    });
+    update(w, dt) {
+      // 上场那一帧可能正好丢追踪。补一次基准，而不是僵在那里等（P3）。
+      if (!base) base = w.skeleton;
+      const sk = base;
+      if (!sk) return;
+      const step = Number.isFinite(dt) && dt > 0
+        ? Math.min(dt, UNTETHER.maxStepSeconds)
+        : UNTETHER.fallbackStepSeconds;
+      age += step;
 
-    w.creature.pose({ ...sk, joints, bones, t: sk.t + age }, w.presence, step);
-    w.note('归还：它自己在动');
-  },
+      const h = sk.height > 0 ? sk.height : SKELETON.referenceHeight;
+      // **构造一份新的**，不就地改 —— `w.skeleton` 是共享的（docs/16 §7b），
+      // 而 `base` 本身就是某一帧的 `w.skeleton`。
+      const joints: Record<string, Vec3> = {};
+      for (const k in sk.joints) joints[k] = drift(sk.joints[k], h, age);
+      const bones: Bone[] = sk.bones.map((b) => {
+        const p0 = drift(b.p0, h, age);
+        const p1 = drift(b.p1, h, age);
+        // 位移场是连续的，两端搬的量略有差别 —— 重新量一次长度，
+        // 否则挂载数学会照着旧长度拉伸部件（和 resist.ts 同一条理由）。
+        return { ...b, p0, p1, length: Math.hypot(p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2]) };
+      });
 
-  // 把 note 擦掉。`follow` 从不写 note，所以不擦的话 `?debug=1` 的 HUD 上
-  // 会一直挂着「归还：它自己在动」——**身体已经交回去了，仪表还在说没有**。
-  // 一个说的是上一场的仪表就不是仪表（docs/02 P21）。
-  exit(w) { base = null; age = 0; w.note(''); },
-};
+      w.creature.pose({ ...sk, joints, bones, t: sk.t + age }, w.presence, step);
+      w.note('归还：它自己在动');
+    },
+
+    // 把 note 擦掉。`follow` 从不写 note，所以不擦的话 `?debug=1` 的 HUD 上
+    // 会一直挂着「归还：它自己在动」——**身体已经交回去了，仪表还在说没有**。
+    // 一个说的是上一场的仪表就不是仪表（docs/02 P21）。
+    exit(w) { base = null; age = 0; w.note(''); },
+  };
+}
+
+/** 玩法目录里的原型；正式运行时 `createDirector()` 会为自己实例化一份。 */
+export const untether: Act = createUntether();

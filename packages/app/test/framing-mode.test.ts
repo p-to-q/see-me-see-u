@@ -15,6 +15,7 @@ import { blendFit, boundsOfPlan, fitFrame, upperFit } from '../src/stage/framing
 import { readFlags } from '../src/shell/kiosk.ts';
 import { CONTROLS, stagePatch } from '../src/ui/control-table.ts';
 import { formatFramingRows } from '../src/shell/hud.ts';
+import { resolveEffectiveFraming } from '../src/stage/effective-framing.ts';
 import { createFramingClassifier, decide } from '../../core/src/autoframe.ts';
 import { person, SEATED, STOOD_UP_CLOSE, WHOLE } from '../../core/test/framing-people.ts';
 
@@ -96,10 +97,17 @@ test('HUD：模式、理由、在模式里的秒数、膝踝数与门限、尺�
   const c = createFramingClassifier();
   let r = c.update(person(WHOLE), 1 / 30);
   for (let i = 0; i < 60; i++) r = c.update(person(SEATED), 1 / 30);
-  const [a, b] = formatFramingRows({ reading: r, decision: decide('auto', r), legHold: 1, shot: 1 });
+  const decision = decide('auto', r);
+  const effective = resolveEffectiveFraming(decision, { plan: 'rig', planDrift: 0, hasCompanions: false, cameraFraming: false });
+  const [a, b] = formatFramingRows({ reading: r, decision, effective, legHold: 1, shot: 1 });
   assert.match(a, /^upper ← legs-out \d+\.\ds/);
   assert.match(b, /膝踝 0\/4 \(≥3 全 ≤1 半\)/);
   assert.match(b, /尺度 \d\.\d\d \(≤0\.88 退\)/);
-  const [, none] = formatFramingRows({ reading: c.update(null, 1 / 30), decision: decide('full', r), legHold: 0, shot: 0 });
+  const full = decide('full', r);
+  const [, none] = formatFramingRows({
+    reading: c.update(null, 1 / 30), decision: full,
+    effective: resolveEffectiveFraming(full, { plan: 'rig', planDrift: 0, hasCompanions: false, cameraFraming: false }),
+    legHold: 0, shot: 0,
+  });
   assert.equal(none, '无人');
 });

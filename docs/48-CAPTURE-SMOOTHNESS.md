@@ -51,9 +51,10 @@
 走观众的那条路：展签「开始」→ 选择页回车 → 舞台上用回放跑 6 秒 → 点「摄像头」。
 页内探针只观察不改应用：rAF 时间戳、`longtask`、`long-animation-frame`（带脚本归因）、
 `getUserMedia` 返回时刻、小屏幕 `<video>` 出现与第一帧、读数第一次 `is-present`。
-无头 Chrome 默认把 rAF 卡在 30Hz，所以**解开帧率**（`--disable-frame-rate-limit`）：
-帧间隔因此量的是"这一帧的活有多重"，不是显示器节拍 —— p50 2–3ms 是这台机器上一帧的底，
-p95/p99 和 >25ms 的计数才是卡顿。
+无头 Chrome 默认把 rAF 卡在 30Hz；本页下表当时为了量“这一帧的活有多重”，用
+`--disable-gpu-vsync --disable-frame-rate-limit` 解开过帧率。p50 2–3ms 因此是这台机器上一帧的底，
+p95/p99 和 >25ms 的计数才是卡顿。**这不是观众环境**：§10.6 后来证明无限帧率会在 Chrome/Metal 上制造
+正常 60/120Hz 路径没有的停摆。`measure.ts` 现在默认跟显示器节拍；只有做本节这类帧成本归因时才显式写 `UNBOUNDED=1`。
 
 ### 2.1 启动（从按下「摄像头」算起，毫秒）
 
@@ -161,7 +162,15 @@ worker（155KB）、`vision_bundle`（153KB）、两份 11.7MB 的 wasm 都不�
     `import()` 有缓存、不会再执行胶水层。无头 Chrome 当场撞到（抠图起不来），同一个坑也会让 GPU→CPU 回落起不来。
     修法是每次创建前从缓存的模块上把 `default` 装回去（`test/pose-worker-factory.test.ts`）。
 - 降级路径：worker 起不来 / `?worker=off` → 原来的主线程推理（MediaPipe 改成动态 import，worker 那条路上主线程一个字节都不下）。
+  运行中改 `numPoses` 时，`setOptions()` 异步重建图的窗口内不调用 `detectForVideo()`；普通成功 / 拒绝收口后，下一份到期视频帧恢复。
+  worker 与主线程共用 applied / desired / in-flight / deadline owner：等待超过 `CAPTURE.peopleReconfigureTimeoutMs=2500` 不会只放开 busy
+  继续碰一份可能仍在 mutation 的图，而是终止 worker，或隔离主线程 landmarker、等旧 Promise 真 settle 后再 close；当前 Capture 标 lost，
+  外层继续 replay。迟到结果没有状态权。这个 2.5s 是低于一次自动探测窗的安全界，**未在真 MediaPipe 慢挂上调过**。
   worker 中途死了 → 重新拿（最多 2 次）；一帧 2 秒没回来 → 当它丢了。
+- **2026-09-18，ImageSegmenter 退出启动和稳态快回路。** 上面的 §1 / §2 数字是当时“启动即建第二张图、之后持续 2Hz 抠图”的历史测量，
+  不是这次改动后的新测量。现在只有慢回路武装时才解析模型并发 `segmenter-init`，每位观众只请求一张；generation 隔离换人后的迟到回执，
+  取走 / 取消均明确转移或释放 `ImageBitmap`，worker 的 MediaPipe result 在回调 `finally` 中 close。初始化失败在同一 worker 内不重试，避免 1Hz
+  慢回路轮询变成反复建图。`?worker=off` 明确不建分割图：牺牲慢回路，保住主线程姿态。**尚未重跑 §2 的真浏览器启动字节、耗时与长期内存。**
 
 ### 3.2 回放一直驱动身体，直到第一次推理完成
 
@@ -196,7 +205,7 @@ worker（155KB）、`vision_bundle`（153KB）、两份 11.7MB 的 wasm 都不�
 | **推理 · GPU delegate 失败** | `backend=CPU`、警告 | 路径在，本机没触发 | worker 里回落 CPU（修了工厂坑之后才真的能回落）；不再被当成"摄像头坏了" |
 | **推理 · 停滞 / worker 死了** | 推理 Hz、姿态时钟 `stalled` | 单测 | 在途超时、重拿 worker、姿态保持→淡出；读数 ALM 02 |
 | 渲染 · 面数 / draw call | HUD | `BUDGET` + `outline-budget.test.ts`（已有） | 调速器第 4/5 级减代价 |
-| 渲染 · 后期链 | — | 未单独量 | 调速器第 4 级（`stage.setPost`） |
+| 渲染 · 后期链 | — | 未单独量 | 调速器第 5 级（`stage.setPostSuspended`） |
 | 渲染 · 首次用到某个物种/材质时编译管线 | 进舞台头几帧的帧循环长任务 | 基线进舞台 +56ms 一次 136ms、+5.7s 一次 115ms（归因 `safe-frame`） | **没做**：见 §8 |
 | 渲染 · 墨色采样 GPU 读回 | — | `ink-sampler.ts` 头：读回中位 4.6ms，已拆到下一帧 | 调速器第 1 级暂停 |
 | **造物 · 忒修斯替换 / 升档 remorph** | 帧循环自己的长任务 | 基线 +2.05s 一次 102ms；**改后剩下的长任务全在这里**：暖缓存 36–38s 四次 75–153ms，冷缓存 30–47s 55–90ms（全部归因 `safe-frame`） | 调速器第 2 级延后替换（最多 4 秒，不取消）；**替换本身的代价没动**：§8 第 1 条 |
@@ -208,7 +217,7 @@ worker（155KB）、`vision_bundle`（153KB）、两份 11.7MB 的 wasm 都不�
 | 资源 · 长时间运行的内存 | 堆地板 | docs/37：30 分钟地板不抬（改前） | worker 多一份 wasm 堆；**改后没重浸泡**：见 §8 |
 | 环境 · 标签页在后台 / 切回来 | `visibilityState`、单帧大间隔 | `frame-spike.test.ts`、`governor.test.ts` | 调速器不判；dt 钳位；姿态时钟停滞→淡出 |
 | 环境 · 过热降频 / 集显 / 慢机器 | 帧间隔 | CPU 4× 两场（§2.2；CDP 降不了 GPU） | 调速器 |
-| 环境 · 高 DPI | 帧间隔 | DPR 3 两场（§2.2） | 调速器第 5 级 |
+| 环境 · 高 DPI | 帧间隔 | DPR 3 两场（§2.2） | 调速器第 4 级 |
 | 环境 · 多显示器 / 不同刷新率 / VRR | 节拍估计 | `governor.test.ts` 30/60/120/144Hz + 抖动 | 节拍取第 10 百分位，下限 240Hz；丢帧另有 25ms 绝对下限 |
 | 灾难 · WebGPU device lost | `onDeviceLost` | `device-lost.test.ts` | 说一句「正在恢复」→ 直接重载（吃重载闸）；`destroyed` 不管 |
 | 灾难 · 摄像头中途断了 | track `ended` | 路径在，没实拔 | 换回回放 + 说一句 |
@@ -223,9 +232,10 @@ worker（155KB）、`vision_bundle`（153KB）、两份 11.7MB 的 wasm 都不�
 | 1 | 角上字的墨色采样 | `stage.setInk` → `ink-sampler` 暂停 | 否 |
 | 2 | 忒修斯替换延后（≤ `swapDeferMax` 4s） | `swapShed` → `createDeferral` 闸 → 仍是 `creature.replace` | 否（晚几秒） |
 | 3 | 推理降到 15Hz | `WebcamCapture.setCadence` + 姿态时钟 | 几乎否 |
-| 4 | 后期 | `stage.setPost`（控件条「渲染」、降级阶梯第 1 级同一个） | 是 → 右下角说一次「降级渲染」 |
-| 5 | 像素比降到 1 | `renderer.setPixelRatio` | 是 |
+| 4 | 像素比降到 1 | `renderer.setPixelRatio` | 是，但切换本身没有长帧 |
+| 5 | 后期临时挂起 | `stage.setPostSuspended`（不覆盖控件条的永久意愿） | 是 → 右下角说一次「降级渲染」 |
 | 6 | 读数停刷 | `uiShed` | 是（读数停住） |
+| 7 | 只留主身体 | `people.shed` | 是（多人时伴随身体溶掉） |
 
 判据与不闪（数都在 `core/src/tuning.ts` 的 `GOVERNOR`）：节拍 = 最近 10 秒帧间隔的第 10 百分位（不低于 1000/240ms）；
 丢帧 = 帧间隔 > max(节拍 × 1.7, 25ms)；过载 = 2 秒窗口里丢帧 > 8% 或长任务 ≥ 2；
@@ -298,13 +308,16 @@ worker（155KB）、`vision_bundle`（153KB）、两份 11.7MB 的 wasm 都不�
    Retina 上基线静止 p95 62ms，像素比降到 1 之后 12ms（§2.2）。**1.5 的实测（§10.4，同一台机器、`DPR=3`、暖缓存、seed 7）：
    静止 p95 9.5 / p99 18.7ms · >25ms 26 帧，大动作 p95 7.4 / p99 11.0ms · >25ms 10 帧**（原上限 2 时 62.3 / 95.0 · 189 和 77.4 / 99.9 · 220）。
    调速器那一场仍然走到了「后期」—— 触发它的是换件 / 升档那几帧的长任务，不是分辨率（§10）。
-2. **换件 / 升档那一帧 —— 拆开了，修了一半（§10）**。JS 那一半是首次用到的节点构建和帧循环里现做的镜像副本，
-   后者已挪进空闲切片；**帧里几乎没有 JS 样本的那几次 59–75ms 没修** —— 最可能是 GPU 进程里首次用到的管线编译。
-   下一步是在新桶第一次被画之前，把它编进**后期那一趟**的渲染上下文（`PassNode.compileAsync` 不能直接用，理由在 §10.3），
-   以及覆盖"借远处物种的件、先占位几何再重建桶"那条这一轮没跑到的路。
-3. **调速器拨的开关本身的代价 —— 量了，修了一半（§10.4）**：改像素比那一帧不是长任务。
-   **放下后期**那一帧是直出管线第一次被用（没修前首次放下 213–535ms）；直出现在在空闲里预编译，首次放下一半落到 <100ms，
-   另一半仍是 210–257ms（放下落在升档那一串中间、预编译还没赶上）。**拿回后期**那一帧在每个构建上都顿（95–848ms），没修。
+2. ~~**升档那一帧**~~ **已修（§10.8–§10.9）**。固定 `seed=7` 的干净基线里前两次升档 3 场
+   **6/6** 命中 74–133ms；分段实验把因果收窄到未来 live Mesh 的第一次真实后期 `stage.render()`，不是
+   `stage.pulse`，也不是 `remorph` 的 0.5–5.4ms 同步段。正式实现等资源队列清空后，用将来会被采用的同一个 Mesh
+   每帧一个桶走画外真实 render，并把未采用桶保留到目标槽位真的上场。修后 3 场共 9 个 tier 事件窗无一条 ≥50ms LoAF；
+   tier 1 最坏帧间隔 33.4 / 33.3 / 16.8ms，tier 2、3 全是 16.8ms。`compileAsync` 反例仍保留：它不等价，不能换回来。
+3. **调速器拨的开关本身的代价 —— 拿回已修，放下已绕行但 L5 未消根（§10.4、§10.10–§10.11）**：
+   **拿回后期**原来重建整条链，固定事件窗基线为 100–467ms；调速器改走只绕过渲染、不拆链的临时挂起位后，
+   普通与 DPR=3 各 3 场共 6 次恢复全是 16.8ms、零 LoAF。**放下后期**已有直出预编译，且 Q3 的升档长帧已经移除，
+   但同 6 场仍有 68–85ms LoAF。现在先放下无长帧的 DPR，3 场 L4 都是 16.8ms / 零 LoAF；只有继续过载到 L5 才会碰到
+   70–73ms LoAF。这降低了观众碰到它的概率，没有把 L5 的底层 first-use 成本假装成已解决。
 4. **模型托管**：线上 `/models/*.task` 是 404，每次先白跑一个 HEAD，然后从 Google CDN 取 5.8MB（`max-age=3600`，一小时后重下）。
    放进 dist 并给长缓存是最直接的一步 —— 但 `webcam.ts` 文件头写着"模型不进仓库"，这是作品负责人的决定，不是这条线的。
 5. **GLB 解码挪出主线程**（meshopt 解码进 worker 或切片进空闲时间）：没量。
@@ -320,22 +333,27 @@ worker（155KB）、`vision_bundle`（153KB）、两份 11.7MB 的 wasm 都不�
 ```bash
 python3 scripts/capture-smoothness/figure.py assets/demo/pose-jumpingjacks.json /tmp/figure.y4m   # 合成人形，不是真人录像
 npm run build && (cd packages/app && npx vite preview --port 4391)
-node scripts/capture-smoothness/measure.ts http://localhost:4391 /tmp/run swap 45 1 1   # 最后两个数：CPU 降速倍数、是否复用缓存
-DPR=3 node …      # 高 DPI
-QUERY=worker=off node …   # 降级路径
-BYTES=1 BYTES_ONLY=1 node … swap 10 1 0   # 首屏字节
-TRACE=1 node …    # 带 trace（会拖慢页面，数字不进结论）
+VIDEO_FIXTURE=/tmp/figure.y4m node scripts/capture-smoothness/measure.ts http://localhost:4391 /tmp/run swap 45 1 1   # 真实显示节拍；最后两个数是 CPU 降速倍数、是否复用缓存
+UNBOUNDED=1 VIDEO_FIXTURE=/tmp/figure.y4m node scripts/capture-smoothness/measure.ts http://localhost:4391 /tmp/cost swap 45 1 1   # 只用于帧成本归因
+DPR=3 VIDEO_FIXTURE=/tmp/figure.y4m node …      # 高 DPI
+QUERY=worker=off VIDEO_FIXTURE=/tmp/figure.y4m node …   # 降级路径
+BYTES=1 BYTES_ONLY=1 VIDEO_FIXTURE=/tmp/figure.y4m node … swap 10 1 0   # 首屏字节
+TRACE=1 UNBOUNDED=1 VIDEO_FIXTURE=/tmp/figure.y4m node …    # 带 trace（会拖慢页面，数字不进结论）
 node scripts/capture-smoothness/summarize.ts /tmp/run
 ```
 
-`measure.ts` 读的 y4m 路径是脚本同目录下的 `figure.y4m`，先把生成的文件放过去。
+`VIDEO_FIXTURE` 不传时仍读脚本同目录下的 `figure.y4m`；文件不存在会在启动 Chrome 前直接报出缺的路径，
+不再让一场没有假摄像头的运行悄悄走到 `NotFoundError`。
 
 ---
 
 ## 10 · 帧循环里剩下的长任务：拆开、修掉、重量（2026-09-14 第二轮）
 
 §8 第 2、3 条的续篇。**所有数字仍然是无头 Chrome + 假摄像头 + 合成人形，没有真人、真显示器**（§9 的限制照旧）。
-每一场都是 `QUERY=seed=7`、暖缓存、从按下「摄像头」起录；A/B 用同一个种子，所以升档和换件落在同一批时刻。
+选择页那条 B 场写了 `QUERY=seed=7`、暖缓存、从按下「摄像头」起录。**2026-09-17 复核发现当时的
+`deeplink` 分支没有把 `QUERY` 拼进 URL**，所以 M/A/R 虽然命令行写了 seed，页面实际仍是随机种子；旧文中
+“A/B 同一个种子、升档和换件落在同一批时刻”的说法不成立。探针现已让 swap / deeplink 共用 `QUERY`，
+但下面历史数字不重写成更强的证据。
 
 ### 10.1 怎么拆的
 
@@ -344,8 +362,10 @@ node scripts/capture-smoothness/summarize.ts /tmp/run
 - `attribute.ts`：**按 `long-animation-frame` 的真实窗口切**，不按"连续忙碌的样本"切 ——
   解开帧率之后帧和帧之间的空闲不到 2ms，按忙碌段切会把几十个普通帧连成一段"300ms 长任务"（第一版就是这么错的）。
   每一帧里的样本按调用栈分到：节点构建 / 管线 / GLB 解码 / 镜像 / 上传 / GC / 装配 / 其他。
-- `GOV_AT="20:4,26:5,34:0"`：借 `?debug=1` 的 `__governorProbe` 在按下后第 20 秒把调速器**强制**拨到 L4（关后期）、
-  26 秒 L5（像素比）、34 秒拨回 L0 —— 拨开关本身的代价要在没有别的负载混进来的时候单独量。
+- `GOV_AT="20:4,26:5,34:0"`：借 `?debug=1` 的 `__governorProbe` 在按下后第 20 秒把调速器**强制**拨到
+  当前 L4（降像素比）、26 秒 L5（临时绕过后期）、34 秒拨回 L0。这个顺序与 `GOVERNOR_LADDER`
+  同源；本节下面那张“L4 关后期 / L5 像素比”是**调换顺序之前的历史取证**，不是今天的操作说明。
+  拨开关本身的代价要在没有别的负载混进来的时候单独量。写错层级 / 时刻现在会在开 Chrome 前直接失败。
 - `[governor]` / `[theseus]` / `[tier]` 三种调试行都带页面时刻 `@秒`，和 `long-animation-frame` 的 `startTime` 是同一个钟。
 
 ### 10.2 量到的来源（改前，B 场）
@@ -365,9 +385,10 @@ node scripts/capture-smoothness/summarize.ts /tmp/run
 
 ### 10.3 改了什么
 
-1. ~~**关后期不拆链**~~ **试了，撤回了，行为保持原样**（`stage.setPost` 仍然 `post.dispose()`）。
+1. ~~**关后期不拆链**~~ **当时试了，撤回了，行为保持原样**（`stage.setPost` 仍然 `post.dispose()`）。
    "不拆"那一版拿回后期两次里一次 417ms；我一度以为是它造成的、就撤了 —— 之后在没改过的 main 上量到拿回后期同样顿 154–848ms（下表），
-   **那一下原来就有，和拆不拆无关**。两次样本分不出谁好，所以不改原来的行为；撤回那条提交的说明写错了原因，以这里为准。
+   **那一下原来就有**。两次样本当时分不出谁好，所以没有改行为；撤回那条提交的说明写错了原因，以这里为准。
+   2026-09-17 在固定事件时刻、正常显示节拍下补齐对照后，证据改判：重建链正是恢复长帧的充分条件，正式修法见 §10.10。
 2. **空闲里预编译直出那条路**（`stage.warmDirect` = `renderer.compileAsync(scene, camera)`，逐个对象让出主线程）。
    什么时候编由 `stage/warm-plan.ts` 决定（纯的）：后期开着、桶集合（`creature.stats.buckets`）稳定 `WARM.settleMs`、
    这一帧自己没丢帧、离上一次开编至少 `WARM.minGapMs`；同一份内容失败 3 次就不再试。
@@ -376,9 +397,10 @@ node scripts/capture-smoothness/summarize.ts /tmp/run
 3. **左侧肢体的镜像副本在空闲里先做好**（`assets/idle-queue.ts` + `library.ts` 的 `premirror`）：
    件到货、`emit` 作废旧副本之后排进空闲队列，每个空闲时段最多 8ms；帧循环里 `mirrored()` 命中缓存。
 
-没做的（为什么）：**GPU 进程那一侧的首次管线编译**（10.2 最后一行）需要在新桶第一次被画之前把它编进**后期那一趟**的渲染上下文。
+没做的（为什么）：**GPU 进程那一侧的首次管线编译**（10.2 最后一行）当时认为需要在新桶第一次被画之前把它编进**后期那一趟**的渲染上下文。
 `PassNode.compileAsync` 在整个编译 await 完之后才把渲染目标还回去，中间的帧会画进后期的目标，不能直接用；
-要自己在同步那一段里设目标、开编、立刻还原，还要为"还没出现过的桶"造探针网格。这一块留给 §8 第 2 条。
+要自己在同步那一段里设目标、开编、立刻还原，还要为"还没出现过的桶"造探针网格。**后来按这条做了，实机反证见 §10.8；
+这条路径已经关闭，不再作为待实现方案。**
 
 ### 10.4 改前 / 改后
 
@@ -392,7 +414,8 @@ A 场 = 这一轮的全部改动（在合并了导航那条线之后的 main 上
 静止 / 大动作两段都是"摄像头在跑、弧线在走"，可比。**
 
 四个场：**B** = 这一轮之前（选择页那条路，porcelain）；**M** = 当前 main 原样（深链 porcelain、不按）—— 真正的对照；
-**A** = 预编译 + 镜像空闲 + "不拆链"；**R** = 最终提交（预编译 + 镜像空闲，拆链照旧）。M / A / R 走同一条路、同一个种子。
+**A** = 预编译 + 镜像空闲 + "不拆链"；**R** = 最终提交（预编译 + 镜像空闲，拆链照旧）。M / A / R 走同一条路，
+但因上述探针 bug **不是同一个种子**；这组数据只能说明现象存在和改动没有明显数量级退化，不能证明严格因果。
 
 **调速器拨开关那一帧**（`switch-cost.ts`：每一行 `[governor] @秒` 之后 1.5 秒里最长的帧；强制拨在深链场里多半是空拨 —— 调速器自己十几秒内就走到了 L5 —— 所以只算它自己拨的）：
 
@@ -457,19 +480,137 @@ STEPS=1 QUERY=seed=7 node scripts/capture-smoothness/measure.ts http://localhost
 `NATIVE_SAMPLE=1` 时再加渲染 / GPU 进程各 3 秒的原生栈（`stall.txt`、`sample-*.txt`）。**它是探针的断言，不是产品里的保护** ——
 产品里帧循环停了，调速器也跟着停（它长在帧循环上），这种卡法它看不见。
 
+**第四轮复核（2026-09-17）：这不是已经证实的观众路径 P0，而是探针压力模式的限制。**
+
+前三轮连 `HEADED=1` 都无条件带着 `--disable-gpu-vsync --disable-frame-rate-limit`；所谓“真窗口”仍在 128–205fps 把 GPU 持续打满，
+并不等于一台正常 60/120Hz 浏览器。干净 HEAD、同一个 `seed=7 / autonomous / fake camera` 改回显示器节拍后：
+
+| 口径 | 场次 | 实际 rAF | 最大帧间隔 | 结果 |
+|---|---:|---:|---:|---|
+| 本地无头 Chrome | 3/3 | 58.5–58.7fps | 150.0–183.3ms | 全部跑完；最终 HUD 60fps、pose live |
+| 本地真窗口 Chrome（ProMotion） | 3/3 | 106.6–112.3fps | 125.1–266.5ms | 全部跑完；最终 HUD 112–120fps、pose live |
+| 线上当前构建，无头 Chrome | 1/1 | 约 60fps | 200ms | 跑完（主题不是 autonomous，只作旁证） |
+
+同一天用无限帧率重跑仍会停，并且有一场在点摄像头**之前**就触发产品的帧停顿重载；关同文档 View Transition、延后 chooser dispose、
+共享 device、保留 renderer 等候选都没有形成“只改这一项就稳定消失”的结果。今天失败时 `Debugger.pause` 多数完全不回答，
+也和上表第三轮“定时器活着、停在 poll”不是同一份原生状态。因此不能拿这些场次授权删除过渡或改 GPU 生命周期。
+
+探针现在做四件事防止再次误判：默认显示器节拍，帧成本压力测试才显式 `UNBOUNDED=1`；
+`invocation.json` 在开 Chrome 之前先写，失败诊断也有来历；`run.json` 写 commit / dirty、计划与最终 URL / QUERY、
+mode、DPR、CPU / 网络节流、冷暖缓存、操作时序、实际服务的带 hash 脚本 URL、fps / 最大间隔 / Chrome 版本；
+摄像头行按 `data-action="camera"` 定位且要求恰好一个，不再猜“第三个 DOM”；
+入口出现后的任何顶层重载直接写 `reload.txt` 并以 exit 4 失败，不能把产品自愈后的第二次启动算成第一次成功。产品的 4 秒重载兜底继续保留，
+但 Q1 不再作为观众必撞的 P0。这里仍然**没有真摄像头**；将来若在正常节拍 + 真窗口下再次稳定复现，再从那份新证据重开。
+
 ### 10.7 这一轮没做的
 
-- **§10.6 的卡死没修**：原因没定位到代码行，见上面的复现和下一步。
-- **拿回后期那一帧的顿**（95–848ms，每个构建都有，§10.4 表）：没拆、没修。候选修法是空闲里预先重建后期链、或预先按当前像素比建好它的渲染目标。
+- §10.6 在 2026-09-17 被复核为无限帧率压力模式的限制；生产代码没有为这条实验改生命周期，探针口径与重载判定已修。
+- ~~**拿回后期那一帧的顿**（95–848ms，每个构建都有，§10.4 表）~~：已按 §10.10 修复；永久关闭仍拆链，只有调速器临时挂起保留。
+- ~~**升档 / 换件的 59–75ms** 只在旧的无限帧率口径里量到。~~ 已用显示节拍 + 固定 seed 重跑，结果与被撤回的预热实验见 §10.8。
 - §10.3 第 1 条说明过：那条 revert 提交（`dispose the post chain on drop again; keeping it cost 410-417ms on restore`）的理由写错了，
   拿回后期的顿在没改过的 main 上一样有，**以 §10.3 为准**；历史不改写。
+
+### 10.8 Q3 复核：现象成立，材质预热路线不成立（2026-09-17）
+
+口径先钉死：Chrome 152.0.7977.83，无头但保留真实显示节拍，porcelain，固定 `seed=7`，同一份合成人形 y4m、暖 profile，
+每场 45 秒；事件窗取 `[tier]` / `[theseus]` 当帧到之后 1.5 秒。不是 `UNBOUNDED=1`，也不是历史上漏传 `QUERY` 的 deeplink。
+
+**干净基线 3 场**：前两次升档的窗分别是 **133 / 81ms、115 / 94ms、119 / 74ms**，即 6/6 ≥50ms；
+同三场共 6 次忒修斯替换，6/6 没有 ≥50ms LoAF。第一场 133ms 的 profile 里，`other=95ms`、装配 7ms、上传 6ms、GC 4ms；
+堆栈碰到 renderer / node builder，但其余时间没有可归因的 JS 样本。**这能确认升档窗，不足以单独证明 GPU 首编译。**
+
+随后做了两种只用于实验、均未提交的预热实现：
+
+1. 为未来档位在空闲切片建立真实 Mesh / 材质桶，保留同一 Mesh 身份到正式升档；在后期的 render target / MRT 上对离场对象调用
+   `renderer.compileAsync(object, camera, scene)`。3 场同口径事件窗仍是 **118 / 68ms、110 / 109ms、103 / 65ms**，仍然 6/6；
+   每场另有 73 条 `Async render pipeline creation failed`，核心错误是
+   `Color target has no corresponding fragment stage output but writeMask ... is not zero`。
+2. 为排除“对象根没走完整 PassNode 接线”，把同一离场对象同步挂进真实 scene，再在相同 RT/MRT 上 `compileAsync(scene, camera)`。
+   错误没有消失（77 条，连当前 mass/basic 管线也报）；一场探针降到 53.7fps、最大帧间隔 166.6ms，15.9 秒走到 governor L3，
+   还多出数段非升档长任务。单场不能给性能差值下因果结论，但足够判定这条预热路径**不安全且不等价于真实后期 render**。
+
+结论：Q3 的升档长帧成立；“整次换件都卡”不成立；“一定是 GPU 首编译”仍是假说；three r186 当前
+`PostProcessing` / `PassNode` / MRT 组合不能用上述 `compileAsync` 手法作等价预热。探针、调度、future bucket 生命周期、测试和 tuning
+全部撤回，生产代码保持实验前原样。下一步只做可归因实验：将升档事件拆成 `remorph` 同步建桶、`stage.pulse`、材质/着色变体、
+第一次真实 render 四段；每次只切一段，仍用这套 seed / 事件窗跑 3 场，哪一段随开关稳定消失才改哪一段。
+
+### 10.9 Q3 归因与修复：第一次真实后期 render（2026-09-17）
+
+仍用 §10.8 的 porcelain / `seed=7` / 合成人形 y4m / 正常显示节拍；分段实验每个变量 3 场。先把“升档”拆开：
+
+1. 关 `stage.pulse`，长帧仍在；整段跳过 `remorph`，6/6 升档窗不再有 ≥50ms LoAF。可疑面缩到 `remorph` 的下游。
+2. 在一帧里分别计 `director.update`、`stage.update`、`stage.render`：tier 1 的 render 是 **93.5 / 91.4 / 96.0ms**，
+   对应 LoAF **113 / 112 / 116ms**；tier 2 的 render 是 **53.1 / 52.6 / 51.2ms**。同帧的 `remorph` 只有 0.6–5.2ms，
+   director 到 `creature.pose` 也只有 0.6–3.6ms。长段就是第一次 `stage.render()`。
+3. 正式升档当帧先把刚体根藏起来，500ms 后再显示：升档当帧 render 降到 0.5–1.0ms，长段原封不动搬到首次显示那帧
+   （tier 1 **95.0 / 96.9 / 92.5ms**；tier 2 **97.2 / 56.9 / 58.7ms**）。这排除了“升档时钟本身”。
+4. 另造一具相同 genome 的 Creature 放画外先画，正式身体仍有 27–119ms：只同几何 / 材质不够。改成让**正式会上场的同一个
+   InstancedMesh 对象**走一次真实后期 render，tier 1 三场都降到 1.6–1.7ms；再把它切成每帧一个桶，结果仍是 1.5–1.6ms，
+   而启动最大帧间隔回到与基线相同的 83–109ms 量级。因果条件是“同一 live RenderObject + 真实 PassNode/MRT render”。
+
+正式实现因此只动已有的 Creature 桶池和 tier 0 空档：资源 `pending / queued` 都归零后，按正式 seed、主题、被替换槽位与降级状态
+生成 tier 1–3 genome；建立将来会被正式 `pose()` 采用的同一批 Mesh，每个显示帧只暴露一个桶，把根节点暂移到视野外后走正常
+`stage.render()`，`finally` 中无条件收起并恢复根节点。相邻档位沿用同一桶时只画一次；未上场桶不走普通 180 帧 TTL，直到该对象
+真的被 `pose()` 采用。换观众、换描边、准备赶不上升档或 render 失败都解除保留，正式升档继续走原来的现编译兜底。固定 `?tier=`、
+团块、点场与没有开场团块的路径不启动这条准备；没有新依赖，没有改冻结契约。
+
+**生产实现 3 场复核**（Chrome 152.0.7977.83，隔离冷 profile，每场 30 秒）：59.6 / 59.6 / 59.7fps，三次全局最大帧间隔
+100.0 / 83.3 / 99.9ms，都落在约 3 秒的启动首次内容段；9 个 tier 事件窗没有一条 ≥50ms LoAF。tier 1 的事件窗最大帧间隔为
+**33.4 / 33.3 / 16.8ms**，tier 2 与 tier 3 的六个窗全部 **16.8ms**；三场零 exception、零 WebGPU validation error。
+原来 6/6 的 74–133ms 升档长帧不再出现。原始目录是 `/private/tmp/smu-q3-production-{1,2,3}`；它是本机临时证据，不进仓库。
+
+这里仍没有真人、真摄像头、120Hz 外接显示器或 30 分钟浸泡证据；这几项不影响“Q3 的因果与修复”结论，但仍属于 §8 第 7、8 条。
+
+### 10.10 Q2 归因与修复：调速器把临时让路写成了永久关闭（2026-09-17）
+
+固定 `porcelain / seed=7 / 合成人形 y4m / 正常显示节拍`，在记录开始后 18 秒强制 L4、24 秒恢复 L0。
+改前 3 场恢复窗的最大 rAF 间隔是 **466.7 / 99.9 / 100.0ms**，对应 LoAF **116 / 117 / 119ms**、
+blocking **51 / 52 / 54ms**。其中一场 profile 的恢复 LoAF 是 122ms；采样栈落在 `_renderObjectDirect → getNodeBuilderState`
+一带，约 41ms 是 node build，说明开销在恢复后的第一次真实后期 render，不在 governor 状态机。
+
+根因不是“后期应该永远不释放”，而是一个 API 混了两种所有权：控件条 / 永久降级的 `setPost(false)` 应该释放显存；
+调速器只想短暂直出，却也走了同一个入口，于是 `post.dispose()`，恢复时在帧循环里重建整条 PassNode / RenderTarget 链。
+只把 `dispose()` 删掉又会让用户明确关闭后仍占显存，也会把“用户在临时降级中打开后期”的意愿写成永久 `false`。
+
+正式实现把它拆成两个正交状态：
+
+- `setPost(on)` 仍是永久资源开关；关闭必定 `dispose`，失败闸也重置，用户 / 降级语义不变；
+- `setPostSuspended(suspended)` 只决定这一帧走后期还是直出，不建、不拆、不换后期链；
+- 控件显示 `postWanted`（用户选择），`stage.post` 仍报告实际渲染状态，给 warm-plan / HUD 使用；
+- 用户在挂起期间开关后期只改永久意愿，恢复挂起位不会覆盖它。
+
+**正式生产构建复核**（Chrome 152.0.7977.83，隔离冷 profile，每场 30 秒）：普通 DPR 3 场为
+59.5 / 59.7 / 59.4fps，DPR=3 再走 L5→L0 的 3 场为 59.7 / 59.5 / 59.6fps；6 次恢复窗最大 rAF 间隔
+全部 **16.8ms**，全部没有 LoAF，零 exception、零 WebGPU validation error。全局 83.3–100.1ms 的最大间隔都在启动段，
+不在恢复窗。原始目录是 `/private/tmp/smu-q2-final-{1,2,3}` 与 `/private/tmp/smu-q2-final-dpr-{1,2,3}`，不进仓库。
+
+边界没有藏起来：同 6 场的**放下**窗仍有 68–85ms LoAF（最大 rAF 间隔 49.9–66.6ms）；它是下一件独立的性能问题，
+不是这次“恢复不重建链”的验收条件。
+
+### 10.11 Q2 绕行：先降 DPR，持续过载才挂起后期（2026-09-17）
+
+最新生产构建的放下窗 profile 把开销继续收窄到“第一次真实直出”：L4 事件窗的 rAF 间隔为 50.0ms，LoAF 72ms；
+safe-frame 约 13ms、node build 约 3ms，其余不在 JavaScript 栈上。同一页面用 `L4 → L0 → L4` 重复切换，第一次为 50.0ms / 66ms LoAF，
+第二次为 33.3ms / 零 LoAF，证明是直出路径的首用成本，不是每次切换都会重复的状态机成本。
+
+试过在帧循环开始前用当前场景各走一次直出 / 后期，3 场正式事件窗仍为 33.3 / 50.0 / 50.0ms，LoAF 63 / 70 / 67ms；profile 显示随后被接管的
+未来 live Mesh 不在这次开机编译里。为所有未来桶额外真实直出会把双重 render 或同样的长帧搬到更早，因果不够好，所以这个实验已撤回。
+
+正式改动只重排已有阶梯：`ink → swaps → inference → dpr → post → ui → people`。DPR 本来就是降 GPU 代价的开关，切换本身不产生长帧；
+如果一档 GPU 余量足以恢复，调速器不再碰后期。只有持续过载才进 L5，而且那时已先降了像素数。
+
+**生产构建固定 `L4@18s → L5@21s → L0@27s` 三场复核**：全局 59.7 / 59.6 / 59.7fps，L4 三次全是 **16.8ms**、零 LoAF；
+L5 三次仍是 **49.9 / 49.9 / 50.0ms** rAF 间隔、**73 / 72 / 70ms** LoAF；L0 恢复为 **16.8 / 16.8 / 16.7ms**、零 LoAF。
+三场零 exception、零 WebGPU validation error。原始目录是 `/private/tmp/smu-q2-reorder-{1,2,3}`，不进仓库。
+这是一个已验证的避险次序，不是 L5 底层 first-use 已消根；只有真显示器上自然过载仍经常走到 L5，才值得用更侵入的方案换它。
 
 ### 10.5 守卫（先红后绿，红的那一次在提交里）
 
 | 测试 | 守什么 |
 |---|---|
 | `test/warm-plan.test.ts` | 内容稳定才编、同一份只编一次、后期关着 / 画面在丢帧时不编、开编间隔、失败退避有上限 |
-| `test/warm-wire.test.ts` | `warmDirect` 用 `compileAsync` 编舞台的 scene / camera；帧循环按 warm-plan 调它并把结果交回；`setPost(false)` 仍然拆链（"不拆"那一版的守卫先红后绿过，撤回时改成守原样） |
+| `test/warm-wire.test.ts` | 永久关闭仍拆后期链，调速器挂起不建 / 不拆；用户意愿不被挂起位覆盖；`warmDirect` 仍只负责直出管线；未来档位等资源清空、用正式 genome、每帧一桶走真实后期 render；根节点在 `finally` 恢复；换观众 / 着色 / 赶不上升档三条撤回路径都在 |
+| `test/tier-bucket-warm.test.ts` | 一次只暴露一个桶；正式 `pose()` 复用预备过的同一个 Mesh 对象；队尾桶跨过 180 帧 TTL 仍活到采用；取消后又能按原 TTL 回收 |
 | `test/idle-queue.test.ts` | 同 key 只做一次、切片预算用完就停并再请求、顺序不变、一件炸了不拖垮、切片为 0 至少做一件、clear 丢掉没做的 |
 
 `test/swap-budget.test.ts`（draw ≤ 40、面 ≤ 250k）没动，照旧绿。
