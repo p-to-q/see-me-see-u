@@ -3,8 +3,8 @@
  *
  * ## 它补的是哪一个洞
  *
- * 骨架那条线已经落过一次地了（`skeleton.ts` / `stabilize.ts` / `bodyplan.ts` /
- * `vitality.ts` 末尾那一段）：整具骨架沿 Y 平移，让最低的**关节**回到 y=0
+ * 骨架那条线已经在全部骨架变换之后由 `bodyplan.ts/groundSkeleton()` 收过一次地：
+ * 整具骨架沿 Y 平移，让最低的**关节**回到 y=0
  * —— 人形按脚关节，没有脚的方案按整具最低关节（`bodyplan.ts` 的 `groundsByLowestJoint`）。
  * 那一层没有错，它只是**只认关节**。而关节是骨架里的一个点，不是网格的底面：
  *

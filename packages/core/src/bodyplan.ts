@@ -122,6 +122,29 @@ const BONE_JOINTS: Record<BoneId, [string, string]> = {
   footL: ['ankleL', 'footIdxL'], footR: ['ankleR', 'footIdxR'],
 };
 
+function groundLevel(joints: Record<string, Vec3>, groundAll = false): number {
+  let lo = Infinity;
+  const keys = groundAll ? Object.keys(joints) : ['footIdxL', 'footIdxR', 'ankleL', 'ankleR'];
+  for (const n of keys) {
+    const y = joints[n]?.[1];
+    if (Number.isFinite(y) && y < lo) lo = y;
+  }
+  return Number.isFinite(lo) ? lo : 0;
+}
+
+function ground(joints: Record<string, Vec3>, bones: Bone[], groundAll = false): number {
+  // 落地：最低的脚回到 y=0（docs/04 §3.5 的同一条规矩，重映射之后必须再来一次）。
+  // groundAll：有些拓扑已经没有"脚"这个概念了（radial 把四肢拆成了绕核心的弧），
+  // 拿脚当基准会让半个身体沉到地板下面 —— 这时候基准换成整体最低点。
+  const lo = groundLevel(joints, groundAll);
+  if (Math.abs(lo) > 1e-9) {
+    for (const k in joints) joints[k] = [joints[k][0], joints[k][1] - lo, joints[k][2]];
+    for (const b of bones) { b.p0 = [b.p0[0], b.p0[1] - lo, b.p0[2]]; b.p1 = [b.p1[0], b.p1[1] - lo, b.p1[2]]; }
+    return -lo;
+  }
+  return 0;
+}
+
 function rebuild(sk: Skeleton, joints: Record<string, Vec3>, groundAll = false): Skeleton {
   const conf = new Map(sk.bones.map((b) => [b.id, b.confidence]));
   const bones: Bone[] = [];
@@ -130,19 +153,7 @@ function rebuild(sk: Skeleton, joints: Record<string, Vec3>, groundAll = false):
     const p0 = sane(joints[a] ?? b.p0), p1 = sane(joints[c] ?? b.p1);
     bones.push({ id: b.id, p0, p1, length: dist(p0, p1), roll: 0, confidence: conf.get(b.id) ?? b.confidence });
   }
-  // 落地：最低的脚回到 y=0（docs/04 §3.5 的同一条规矩，重映射之后必须再来一次）。
-  // groundAll：有些拓扑已经没有"脚"这个概念了（radial 把四肢拆成了绕核心的弧），
-  // 拿脚当基准会让半个身体沉到地板下面 —— 这时候基准换成整体最低点。
-  let lo = Infinity;
-  const keys = groundAll ? Object.keys(joints) : ['footIdxL', 'footIdxR', 'ankleL', 'ankleR'];
-  for (const n of keys) {
-    const y = joints[n]?.[1];
-    if (Number.isFinite(y) && y < lo) lo = y;
-  }
-  if (lo !== Infinity && Math.abs(lo) > 1e-9) {
-    for (const k in joints) joints[k] = [joints[k][0], joints[k][1] - lo, joints[k][2]];
-    for (const b of bones) { b.p0 = [b.p0[0], b.p0[1] - lo, b.p0[2]]; b.p1 = [b.p1[0], b.p1[1] - lo, b.p1[2]]; }
-  }
+  ground(joints, bones, groundAll);
   const head = joints.headCenter?.[1] ?? sk.height;
   return { ...sk, bones, joints, height: Math.max(0.1, head - 0), warmingUp: sk.warmingUp };
 }
@@ -528,12 +539,27 @@ export function planKind(plan: BodyPlan = 'rig'): string {
  * 这个方案的落地基准是**整具骨架的最低关节**（而不是脚）吗。
  *
  * 这是 `PLANS_WITHOUT_FEET` 唯一的判据函数 —— **不要再建第二张表**。
- * 凡是"把骨架整体沿 Y 平移到地面"的地方（`bodyplan.ts` 的 `rebuild()`、
- * `vitality.ts` 末尾那一段）都必须先问它一次，否则 `radial` / `inverted`
+ * 凡是"把骨架整体沿 Y 平移到地面"的地方（`bodyplan.ts` 的 `rebuild()` 与
+ * `groundSkeleton()`）都必须先问它一次，否则 `radial` / `inverted`
  * 会被按着一组**长在身体顶上**的关节往下拽。
  */
 export const groundsByLowestJoint = (plan: BodyPlan = 'rig'): boolean =>
   PLANS_WITHOUT_FEET.includes(planKind(plan));
+
+/**
+ * 一串骨架变换全部结束后的唯一落地收口。输入已经贴地时原样返回同一个对象，
+ * 所以正常人形路径只多四个 Y 比较，不为一条恒等式分配整副骨架。
+ */
+export function groundSkeleton(sk: Skeleton, plan: BodyPlan = 'rig'): Skeleton {
+  if (!sk?.joints || !Array.isArray(sk.bones)) return sk;
+  const groundAll = groundsByLowestJoint(plan);
+  if (Math.abs(groundLevel(sk.joints, groundAll)) <= 1e-9) return sk;
+  const joints: Record<string, Vec3> = {};
+  for (const key in sk.joints) joints[key] = [...sk.joints[key]];
+  const bones = sk.bones.map((bone) => ({ ...bone, p0: [...bone.p0] as Vec3, p1: [...bone.p1] as Vec3 }));
+  ground(joints, bones, groundAll);
+  return { ...sk, joints, bones };
+}
 
 /** 这个 spec 会不会真的改变比例？全是 1 就别白跑一趟 */
 const changesProportion = (s: BodyPlanSpec): boolean =>

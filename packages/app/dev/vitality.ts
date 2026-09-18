@@ -1,7 +1,7 @@
 /**
  * 生命力 A/B 靶场。
  *
- * 为什么是 2D 画骨架线而不是真渲染：要看的是**延迟的形状**，不是材质和光。
+ * 为什么是 2D 画骨架线而不是真渲染：要看的是**局部余势的形状**，不是材质和光。
  * 骨架线把它暴露得最清楚，而且不吃 WebGPU —— 无头环境里也能出图。
  */
 import { createVitality } from '../../core/src/vitality.ts';
@@ -19,15 +19,8 @@ const BASE: Record<string, Vec3> = {
 };
 
 /**
- * `BASE` 经 `buildSkeleton` 之后最低的脚关节离地多高。
- *
- * **这个数原来没人减。** `buildSkeleton(BASE)` 把最低的脚放在 90mm 高处，于是这一页喂给
- * `vitality` 的目标骨架是**悬空**的；而 `vitality` 第 4 步按契约把输出贴回地面 ——
- * 整具骨架往下挪 90mm，骨盆也跟着挪。下面那行"骨盆落后"读到的 91mm 于是全是这一次贴地，
- * 一毫米水平方向的落后都没有（2026-09-14 在 node 里逐帧拆过：水平 0.00mm）。
- * 真实输入来自稳定器，稳定器的输出契约是"永远贴地"，所以线上从来没有这 90mm ——
- * 是这台靶场自己的目标不守契约，仪表把它读成了"骨盆不实时"。
- * 侧室那条线据此拒绝过把这一页展出（docs/23 §S9.1）；拒绝的判据没错，数是错的。
+ * `BASE` 经 `buildSkeleton` 之后最低的脚关节离地多高。靶场先遵守稳定器的贴地契约，
+ * 避免把输入自己的高度误读成 vitality 造成的位移。
  */
 const FLOOR = (() => {
   const b = buildSkeleton(BASE, [], 0).joints;
@@ -78,7 +71,7 @@ function frame(): void {
   const dt = 1 / 60;
   t += dt;
   const target = poseAt(t);
-  const alive = vit.apply(target, null, dt);
+  const alive = vit.apply(target, dt);
 
   trailOff.push(target); if (trailOff.length > TRAIL) trailOff.shift();
   trailOn.push(alive); if (trailOn.length > TRAIL) trailOn.shift();
@@ -94,13 +87,12 @@ function frame(): void {
     draw(ctx, trail[trail.length - 1], 1, color);
   }
 
-  // 数值：末端和根部各自落后目标多少
+  // 数值：手部末端有局部余势；胸口和骨盆必须逐帧等于目标
   const d = (k: string) => Math.hypot(
     alive.joints[k][0] - target.joints[k][0],
     alive.joints[k][1] - target.joints[k][1],
     alive.joints[k][2] - target.joints[k][2]);
-  // 骨盆拆成两个方向：「实时」说的是水平方向不落后；竖直方向的挪动是贴地和呼吸，
-  // 不是延迟。混成一个数的话，下一个不守贴地契约的输入又会被读成"骨盆不实时"。
+  // 骨盆拆成两个方向，现场能直接分辨横向 carrier 与竖直落地有没有被误改。
   const pa = alive.joints.pelvis, pt = target.joints.pelvis;
   const pelvisH = Math.hypot(pa[0] - pt[0], pa[2] - pt[2]);
   const pelvisV = Math.abs(pa[1] - pt[1]);
@@ -109,9 +101,9 @@ function frame(): void {
 
   if (Math.round(t * 60) % 20 === 0) {
     num.innerHTML =
-      `<div>lagSeconds <b>${VITALITY.lagSeconds}</b> · lagCurve <b>${VITALITY.lagCurve}</b> · breathHz <b>${VITALITY.breathHz}</b></div>` +
+      `<div>hand lagSeconds <b>${VITALITY.lagSeconds}</b> · lagCurve <b>${VITALITY.lagCurve}</b> · autonomous joints <b>off</b></div>` +
       `<div>指尖落后峰值 <b>${(peakTip * 100).toFixed(1)} cm</b> · 胸口落后峰值 <b>${(peakChest * 100).toFixed(1)} cm</b></div>` +
-      `<div>骨盆水平落后 <b>${(pelvisH * 1000).toFixed(2)} mm</b>（应当 ≈ 0）· 竖直 ${(pelvisV * 1000).toFixed(2)} mm（贴地与呼吸，不是延迟）· 比值 指尖/胸口 <b>${(peakTip / Math.max(1e-9, peakChest)).toFixed(1)}×</b></div>`;
+      `<div>骨盆水平落后 <b>${(pelvisH * 1000).toFixed(2)} mm</b> · 竖直 <b>${(pelvisV * 1000).toFixed(2)} mm</b>（都应当 ≈ 0）· 指尖/胸口 <b>${(peakTip / Math.max(1e-9, peakChest)).toFixed(1)}×</b></div>`;
   }
   requestAnimationFrame(frame);
 }

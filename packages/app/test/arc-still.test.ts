@@ -17,6 +17,7 @@ import { ACTS, createDirector, type World } from '../src/acts/index.ts';
 import { untether } from '../src/acts/untether.ts';
 import { createArc, ARC_ACTS, type ArcState } from '../../core/src/arc.ts';
 import { buildSkeleton } from '../../core/src/skeleton.ts';
+import { createVitality } from '../../core/src/vitality.ts';
 import type { Act } from '../src/acts/act.ts';
 import type { Skeleton, Vec3 } from '../../core/src/types.ts';
 
@@ -130,10 +131,14 @@ for (const [name, pose] of [['对称', STILL], ['举手偏站', STILL_ASYM]] as 
     // 整整 200 秒一个基准，名字换了四次，身体一毫米都不许动。
     const arc = createArc();
     const director = createDirector(ACTS);
+    const vitality = createVitality();
     const w = stillWorld(arc.state, pose);
     const seen = new Set<string>();
     const moved = selfMotion((world, dt) => {
       (world as StillWorld).arc = arc.update(true, dt);
+      // 按正式主线把身体先交给 vitality，再进 Director。旧测试绕过这一层，
+      // 因而它即使在静止时主动呼吸，下面仍会全绿。
+      (world as unknown as { skeleton: Skeleton }).skeleton = vitality.apply(pose, dt);
       director.update(world, dt);
       seen.add(director.currentId!);
     }, w, 200, 5);

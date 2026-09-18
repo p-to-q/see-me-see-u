@@ -24,7 +24,7 @@ import { createPresence } from '../../core/src/presence.ts';
 import { posePresent } from '../../core/src/pose-signal.ts';
 import { arcPresent, createArc, type ArcState } from '../../core/src/arc.ts';
 import { makeGenome, toPlaceholderGenome } from '../../core/src/genome.ts';
-import { blendSkeletons, remapSkeleton, type BodyPlan } from '../../core/src/bodyplan.ts';
+import { blendSkeletons, groundSkeleton, remapSkeleton, type BodyPlan } from '../../core/src/bodyplan.ts';
 import { mulberry32 } from '../../core/src/rng.ts';
 import { createPeopleTracker, isFreshReacquisition, shiftSkeleton, type PeopleFrame } from '../../core/src/people.ts';
 import { createProbeState, stepProbe } from '../../core/src/people-probe.ts';
@@ -1249,13 +1249,13 @@ async function boot(): Promise<void> {
           : blendSkeletons(remapSkeleton(humanSk, 'rig'), remapSkeleton(humanSk, plan), drift);
       // 刚体挂载做不出"弯"，但一串各自延迟不同的刚体看起来就是在弯 ——
       // 这是参照作品那句 "wiggles, shifts, and bends" 唯一能不做蒙皮就拿到的部分。
-      // 方案要一起递进去：vitality 末尾还要落一次地，而"拿谁当基准"随方案变
-      // （没有脚的方案按整具最低关节，见 core/bodyplan.ts 的 groundsByLowestJoint）
-      // 漂移一开始就按**目标方案**的基准落地：`inverted` / `radial` 的脚已经不是脚了，
-      // 漂到一半再换基准会让整具身体跳一下 —— 宁可在漂移的第一帧换，那时它还在人形上。
-      lastSkeleton = vitalityOn
-        ? vitality.apply(planned, lastFeatures, dt, drift > 0 ? plan : 'rig')
+      // 它只延迟当前肘之后的方向，不碰实时躯干、肘、腿或身体方案已经完成的落地。
+      const lively = vitalityOn
+        ? vitality.apply(planned, dt)
         : planned;
+      // 两端各自贴地不代表中间插值仍贴地；局部余势也可能改写无脚方案的最低关节。
+      // 所有骨架变换做完后只在这里收一次地面，vitality 不再暗中拥有第二套落地规则。
+      lastSkeleton = groundSkeleton(lively, drift > 0 ? plan : 'rig');
       // 站位：多人时主身体和伴随身体一起排（docs/50 §4.2），单人时是横向根偏移（docs/49 §6.3 二）。
       // 平移在生命力之后：它的状态链上存的是没挪过的那一份。偏移为 0 时 `shiftSkeleton` 原样返回同一个对象
       lastBase = lastSkeleton;

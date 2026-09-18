@@ -15,7 +15,7 @@ import { createMotion, type MotionMachine as Motion } from '../../../core/src/mo
 import { createPresence, type PresenceMachine } from '../../../core/src/presence.ts';
 import { createFramingClassifier, decide, stepFollow, stepToward, type FramingClassifier, type Follow } from '../../../core/src/autoframe.ts';
 import { holdLegs } from '../../../core/src/leghold.ts';
-import { blendSkeletons, remapSkeleton, type BodyPlan } from '../../../core/src/bodyplan.ts';
+import { blendSkeletons, groundSkeleton, remapSkeleton, type BodyPlan } from '../../../core/src/bodyplan.ts';
 import { isFreshReacquisition, lineup, tintFor, type PeopleFrame } from '../../../core/src/people.ts';
 import { AUTOFRAME, PEOPLE, PRESENCE, REFINE } from '../../../core/src/tuning.ts';
 import type { Skeleton } from '../../../core/src/types.ts';
@@ -182,7 +182,8 @@ export function createCompanions(opts: { seed: () => number }): Companions {
           const planned = ctx.drift >= 1 ? remapSkeleton(human, ctx.plan)
             : ctx.drift <= 0 ? remapSkeleton(human, 'rig')
               : blendSkeletons(remapSkeleton(human, 'rig'), remapSkeleton(human, ctx.plan), ctx.drift);
-          e.skeleton = ctx.vitalityOn ? e.pipes.vitality.apply(planned, features, dt, ctx.drift > 0 ? ctx.plan : 'rig') : planned;
+          const lively = ctx.vitalityOn ? e.pipes.vitality.apply(planned, dt) : planned;
+          e.skeleton = groundSkeleton(lively, ctx.drift > 0 ? ctx.plan : 'rig');
         }
         const target = targets.get(id);
         if (target !== undefined) e.x = stepFollow(e.x, target, dt, spring);
