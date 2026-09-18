@@ -8,7 +8,7 @@
 frame(tMs: number):
   dt = clamp((tMs - last)/1000, 1/240, 1/15)   // 必须 clamp：切标签页回来会给出 3 秒的 dt
   raw       = capture.latest()                  // 非阻塞，可能是 null（推理比渲染慢）
-  detected  = raw != null && raw.score > 0.5
+  detected  = posePresent(raw)                    // 整身平均或可靠躯干对；score 仍是整身质量
   presence  = presenceMachine.update(detected, dt)
   if raw:
     skeleton = stabilizer.apply(buildSkeleton(mediapipeToWorld(raw)), dt)
@@ -23,6 +23,9 @@ frame(tMs: number):
 
 **推理与渲染解耦**：MediaPipe 在自己的节奏上跑（≥30Hz），渲染 60fps。
 渲染永远用"最新可得"的 pose，绝不等推理。姿态滤波吸收两者的速率差。
+
+`RawPose.score` 是 33 点 visibility 的平均，表达整身完整度，不是唯一的 presence 判据。
+近距离裁掉下肢时，`posePresent()` 允许成对肩 / 胯达到现有质量线；精修降速、置信读数和告警仍使用原始 score。
 
 ## 2. Capture 接口
 

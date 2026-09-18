@@ -15,7 +15,7 @@
  * 屏幕上就会出现"空场里有人在动"—— 那是 P21 里最贵的那种仪表：
  * 它报的数是真的，只是**真在另一个时刻**。
  *
- * 所以判据只有一条：**这一帧有没有人**（`score > CAPTURE.minScore`，
+ * 所以判据只有一条：**这一帧有没有人**（`posePresent()`：整身平均或可靠躯干对），
  * 和 `main.ts` 的 `detected`、`preview-state.ts` 的 `empty` 是同一条线 ——
  * 三处不许各画一条）。没有人，除了推理频率之外全部写 `—`：
  * 推理是**机器自己**的节拍，空场里它照样在跑，那个数此刻仍然是真的。
@@ -31,6 +31,7 @@ import { CAPTURE, PREVIEW, REFINE } from '../../../core/src/tuning.ts';
 import { qualityScale } from '../../../core/src/refine.ts';
 import { outOfFrame } from './preview-state.ts';
 import { lateralEvidence } from '../../../core/src/autoframe.ts';
+import { posePresent } from '../../../core/src/pose-signal.ts';
 import type { Flags } from '../shell/kiosk.ts';
 
 /**
@@ -204,7 +205,7 @@ export function readOut(input: ReadoutInput): Readout {
   }
   const pose = input.pose;
   const score = Number.isFinite(pose?.score) ? pose!.score : 0;
-  const present = pose !== null && score > CAPTURE.minScore;
+  const present = posePresent(pose);
 
   // 推理频率**不跟着 present 作废**：空场里模型照样在跑，那个数此刻仍然是真的。
   // 它同时是这块读数唯一一行"机器自己"的数 —— 全灰的时候它证明机器没死。
@@ -312,7 +313,7 @@ export function assess(input: ReadoutInput, inferred = true): Assessment {
 
   const pose = input.pose;
   const score = Number.isFinite(pose?.score) ? pose!.score : 0;
-  const present = pose !== null && score > CAPTURE.minScore;
+  const present = posePresent(pose);
   // **没有人就没有身体上的告警**：空场里说"关节丢失"是假话 —— 没有人可丢
   if (present) {
     const seen = visibleJoints(pose);

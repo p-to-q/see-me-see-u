@@ -22,10 +22,11 @@
  *  - 结论要能读出来：每一次读数都带 `why` 和证据，HUD 与 `/dev/framing.html` 直接显示它。
  */
 import type { Landmark, RawPose } from './types.ts';
-import { AUTOFRAME, CAPTURE, PEOPLE, PREVIEW, REFINE } from './tuning.ts';
+import { AUTOFRAME, PEOPLE, PREVIEW, REFINE } from './tuning.ts';
 import { qualityScale } from './refine.ts';
 import { MIRROR_X } from './skeleton.ts';
 import { oneEuroStep, type OneEuroState } from './filter.ts';
+import { posePresent, poseTorsoEvidence } from './pose-signal.ts';
 
 /** 分类器判出来的状态。`stepping-back` 是过渡态：人正在往后退，景别先给全景，腿先别急着放开 */
 export type FramingMode = 'full' | 'upper' | 'stepping-back';
@@ -123,7 +124,7 @@ export interface FramingEvidence {
   upper: boolean;
   /** 头肩点（0–12）里可信但在画外的个数 */
   upperOut: number;
-  /** 追踪质量够不够（`refine.ts` 的 `qualityScale`，和小屏同一把尺子）。不够 = 这一帧不作数 */
+  /** 头肩任务的追踪质量够不够：整身平均或成对肩点过 `qualityScale`。不够 = 这一帧不作数 */
   quality: boolean;
   /** 肩宽（画面高度为单位，x 按宽高比折算）。NaN = 量不到 */
   shoulder: number;
@@ -138,9 +139,10 @@ export interface FramingEvidence {
  * @param aspect 摄像头画面宽 / 高。x 坐标乘它才和 y 同一个单位（1280×720 = 16/9）
  */
 export function frameEvidence(pose: RawPose | null, aspect = 16 / 9): FramingEvidence | null {
-  const score = Number.isFinite(pose?.score) ? pose!.score : 0;
-  if (!pose || score <= CAPTURE.minScore) return null;
-  const quality = qualityScale(score) >= 1;
+  if (!posePresent(pose)) return null;
+  // 这里只需要可靠地读头肩与腿是否被裁；画外腿不该把可靠肩线平均成“坏光”。
+  const rawScore = Number.isFinite(pose.score) ? pose.score : 0;
+  const quality = qualityScale(Math.max(rawScore, poseTorsoEvidence(pose).shoulders)) >= 1;
   const screen = pose.screen?.length ? pose.screen : null;
 
   if (!screen) {
@@ -819,7 +821,7 @@ export interface LateralEvidence {
   out: number;
   /** 哪一侧出了画（观众自己的左右）。两边都出 = null：那是离得太近，不是走偏了 */
   side: Side | null;
-  /** 追踪质量够（`qualityScale ≥ 1`）。不够 = 冻结，不往一个坏光下的坐标漂 */
+  /** 实际驱动坐标的肩 / 胯锚点质量够（`qualityScale ≥ 1`）。不够 = 冻结，不往坏光坐标漂 */
   quality: boolean;
   /**
    * 胯或肩至少有一对可信，且其中一点在画内。false = 位置全靠 MediaPipe 外推：**侧边照样报**（人确实在那一侧的边外），
@@ -836,8 +838,9 @@ export interface LateralEvidence {
  * 越界按**坐标**算，不按可信点数：MediaPipe 对画外的点给低可见度，数可信点的话半个人出了左边也数不出一个（docs/49 §6.2 S4）。
  */
 export function lateralEvidence(pose: RawPose | null | undefined, aspect = 16 / 9): LateralEvidence | null {
-  const score = Number.isFinite(pose?.score) ? pose!.score : 0;
-  if (!pose || score <= CAPTURE.minScore) return null;
+  if (!posePresent(pose)) return null;
+  const score = Number.isFinite(pose.score) ? pose.score : 0;
+  const torsoEvidence = poseTorsoEvidence(pose);
   const s = pose.screen;
   if (!s?.length) return null;
   const has = (l: Landmark | undefined): l is Landmark => !!l && Number.isFinite(l.x) && Number.isFinite(l.y);
@@ -850,12 +853,14 @@ export function lateralEvidence(pose: RawPose | null | undefined, aspect = 16 / 
   // 坐标“存在”不等于可以驱动根。近处胯被裁时 MediaPipe 仍会给两个有限、但低置信的外推点：
   // 用它们会让身体突然冲向画边。可信胯仍优先（不把前倾当迈步），胯不可信才用可信肩。
   const trusted = hipsTrusted || shouldersTrusted;
-  const x = hipsTrusted
+  // 弱胯 + 强肩时不能让强肩替一个实际由弱胯驱动的坐标“担保质量”。那一帧直接改用强肩。
+  const useHips = hipsTrusted && (torsoEvidence.hips >= REFINE.qualityStart || torsoEvidence.shoulders < REFINE.qualityStart);
+  const x = useHips
     ? (hL.x + hR.x) / 2
     : shouldersTrusted
       ? (sL.x + sR.x) / 2
       : hips ? (hL.x + hR.x) / 2 : (sL.x + sR.x) / 2;
-  const scale = torsoScale(sL, sR, hipsTrusted ? hL : null, hipsTrusted ? hR : null, aspect);
+  const scale = torsoScale(sL, sR, useHips ? hL : null, useHips ? hR : null, aspect);
   const xs = torso.map((l) => l.x * aspect);
   const lo = Math.min(...xs), hi = Math.max(...xs);
   // 侧身时躯干宽度缩到几乎为 0：分母给一个按躯干长折算的下限，免得一点抖动就是"一半出画"
@@ -867,7 +872,8 @@ export function lateralEvidence(pose: RawPose | null | undefined, aspect = 16 / 
   const edge = outL >= f && outR < f ? 0 : outR >= f && outL < f ? 1 : null;
   // 画面的哪条边 → 观众的哪一侧：按 MIRROR_X 折，和身体往哪边走同一个符号（docs/04 §1 唯一定义处）
   const side: Side | null = edge === null ? null : MIRROR_X * (edge - 0.5) > 0 ? 'right' : 'left';
-  return { x, scale, out: Math.max(outL, outR), side, quality: qualityScale(score) >= 1, trusted };
+  const anchorQuality = useHips ? torsoEvidence.hips : torsoEvidence.shoulders;
+  return { x, scale, out: Math.max(outL, outR), side, quality: qualityScale(Math.max(score, anchorQuality)) >= 1, trusted };
 }
 
 // ── 纵向：画面里的 pelvis/chest → 中景移轴 ──────────────────────────────────
@@ -898,21 +904,23 @@ export function verticalEvidence(
   if (!pose) return null;
   const screen = pose.screen;
   if (!screen?.length) return undefined;
+  if (!posePresent(pose)) return null;
   const score = Number.isFinite(pose.score) ? pose.score : 0;
-  if (score <= CAPTURE.minScore) return null;
+  const torsoEvidence = poseTorsoEvidence(pose);
   const sL = screen[SHOULDER_L], sR = screen[SHOULDER_R];
   // 这里只量纵向：人在画面左右边缘时，x 出界不该让一条完全可靠的 y 证据消失。
   const inY = (l: Landmark): boolean => l.y >= -PREVIEW.edgeMargin && l.y <= 1 + PREVIEW.edgeMargin;
   if (!trustedLandmark(sL) || !trustedLandmark(sR) || !inY(sL) || !inY(sR)) return null;
   const hL = screen[HIP_L], hR = screen[HIP_R];
-  const hips = trustedLandmark(hL) && trustedLandmark(hR) && inY(hL) && inY(hR);
+  const hipsTrusted = trustedLandmark(hL) && trustedLandmark(hR) && inY(hL) && inY(hR);
+  const hips = hipsTrusted && (torsoEvidence.hips >= REFINE.qualityStart || torsoEvidence.shoulders < REFINE.qualityStart);
   const scale = torsoScale(sL, sR, hips ? hL : null, hips ? hR : null, aspect);
   if (!Number.isFinite(scale) || scale <= 0) return null;
   return {
     y: hips ? (hL.y + hR.y) / 2 : (sL.y + sR.y) / 2,
     anchor: hips ? 'pelvis' : 'chest',
     scale,
-    quality: qualityScale(score) >= 1,
+    quality: qualityScale(Math.max(score, hips ? torsoEvidence.hips : torsoEvidence.shoulders)) >= 1,
   };
 }
 

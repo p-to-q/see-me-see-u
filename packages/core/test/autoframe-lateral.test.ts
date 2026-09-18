@@ -96,6 +96,17 @@ test('近处胯被裁：低置信胯点不拖走根，改用成对可信的肩�
   assert.ok(last(result).x.x > -0.35, `低置信胯点把身体拖过头了：${last(result).x.x.toFixed(3)}m`);
 });
 
+test('近处弱胯 + 强肩：质量必须跟实际采用的肩锚点，不能让两对点互相冒名担保', () => {
+  const p = at(0.5, { score: 0.45, vis: 0.95 });
+  p.screen![11] = { ...p.screen![11], x: 0.7, visibility: 0.95 };
+  p.screen![12] = { ...p.screen![12], x: 0.7, visibility: 0.95 };
+  p.screen![23] = { ...p.screen![23], x: 0.2, visibility: 0.55 };
+  p.screen![24] = { ...p.screen![24], x: 0.2, visibility: 0.55 };
+  const ev = lateralEvidence(p);
+  assert.ok(ev?.quality);
+  assert.ok(Math.abs(ev.x - 0.7) < 1e-12, `实际没有退到强肩：${ev?.x}`);
+});
+
 test('贴边但整个人都在画里：不报侧边、照常跟随，走到舞台余量的边上为止', () => {
   const ev = lateralEvidence(at(0.08))!;
   assert.equal(ev.side, null, `整个人都在画里却报了 ${ev.side}（越界 ${ev.out}）`);
@@ -295,7 +306,7 @@ test('换人待确认期间一度出画或掉到低质量：回来后重新计�
   const candidate = () => at(0.45, { s: 0.8 });
   const s = run([
     ...hold(0.3, candidate),
-    ...hold(0.2, () => at(0.45, { s: 0.8, score: 0.58 })),
+    ...hold(0.2, () => at(0.45, { s: 0.8, score: 0.58, vis: 0.58 })),
     ...hold(0.3, candidate),
   ], {}, last(s0));
   assert.equal(last(s).why, 'hold-jump', '两段不足 0.5 秒的证据不该隔着坏帧相加');
@@ -347,14 +358,14 @@ test('中景（upper）：死区更小、弹簧更快——同一小步位移，
 
 test('光线塌了（score 掉到质量线以下）：冻结，不往坏光下的坐标漂', () => {
   const s0 = run(hold(3, () => at(0.4)));
-  const s = run(hold(2, () => at(0.6, { score: 0.58 })), {}, last(s0));
+  const s = run(hold(2, () => at(0.6, { score: 0.58, vis: 0.58 })), {}, last(s0));
   assert.ok(s.every((k) => k.why === 'hold-light'));
   assert.ok(Math.abs(last(s).x.x - last(s0).x.x) < 0.02, `坏光下漂了 ${(last(s).x.x - last(s0).x.x).toFixed(3)}`);
 });
 
 test('光线塌了 + 摄像头确认在自己取景：判别条件命中，回中线而不是冻在原地（作品负责人 2026-09-15 追加要求）', () => {
   const s0 = run(hold(3, () => at(0.4)));
-  const s = run(hold(2, () => at(0.6, { score: 0.58 })), { cameraFraming: true }, last(s0));
+  const s = run(hold(2, () => at(0.6, { score: 0.58, vis: 0.58 })), { cameraFraming: true }, last(s0));
   assert.ok(s.every((k) => k.why === 'center'), `该一路是 center，实际 ${[...new Set(s.map((k) => k.why))]}`);
   assert.ok(Math.abs(last(s).x.x) < 0.05, `该回到中线附近，实际 ${last(s).x.x.toFixed(3)}`);
   // 出画那一侧不受这个字段影响：那是不同的判别条件（见 LateralInput.cameraFraming 的注释）
@@ -366,7 +377,7 @@ test('回中线与让位会清空画面滤波器；短暂冻结保留它', () =>
   const following = last(run(hold(3, () => at(0.4))));
   assert.ok(following.centerFilter && following.scaleFilter, '跟随时没有建立滤波状态');
 
-  const held = last(run(hold(0.2, () => at(0.4, { score: 0.58 })), {}, following));
+  const held = last(run(hold(0.2, () => at(0.4, { score: 0.58, vis: 0.58 })), {}, following));
   assert.ok(held.centerFilter && held.scaleFilter, '短暂坏光冻结不该丢掉同一个人的滤波历史');
 
   const yielded = last(run([at(0.4)], { enabled: () => false }, following));
@@ -378,7 +389,7 @@ test('回中线与让位会清空画面滤波器；短暂冻结保留它', () =>
   assert.equal(lost.centerFilter, undefined);
   assert.equal(lost.scaleFilter, undefined);
 
-  const fallback = last(run([at(0.4, { score: 0.58 })], { cameraFraming: true }, following));
+  const fallback = last(run([at(0.4, { score: 0.58, vis: 0.58 })], { cameraFraming: true }, following));
   assert.equal(fallback.why, 'center');
   assert.equal(fallback.centerFilter, undefined);
   assert.equal(fallback.scaleFilter, undefined);

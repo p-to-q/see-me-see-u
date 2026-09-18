@@ -21,6 +21,7 @@ import { createVitality } from '../../core/src/vitality.ts';
 import { createBoneEnergy, createMotion } from '../../core/src/motion.ts';
 import { createEvolution } from '../../core/src/evolution.ts';
 import { createPresence } from '../../core/src/presence.ts';
+import { posePresent } from '../../core/src/pose-signal.ts';
 import { arcPresent, createArc, type ArcState } from '../../core/src/arc.ts';
 import { makeGenome, toPlaceholderGenome } from '../../core/src/genome.ts';
 import { blendSkeletons, remapSkeleton, type BodyPlan } from '../../core/src/bodyplan.ts';
@@ -1117,7 +1118,7 @@ async function boot(): Promise<void> {
     // `capture.latest()` 是缓存，若继续直接喂它，小屏 / 读数 / 取景会永远粘在最后一帧。
     const measured = measuredPose(live, poseClock.state);
     // "有没有人"：多人时任何一具身体的人此刻被看见就算（主身体被挡住一下，弧线不停、在场不掉，docs/50 §3.2）
-    const detected = (raw !== null && raw.score > CAPTURE.minScore)
+    const detected = posePresent(raw)
       || (crowd !== null && crowd.tracks.some((t) => t.selected && t.missing === 0));
     const p = presence.update(detected, dt);
     // 弧线吃的是**未经时间停滞缩放的 dt**（和 presence / evolution 同一条理由：

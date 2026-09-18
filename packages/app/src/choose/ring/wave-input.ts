@@ -28,6 +28,7 @@
 import { CAPTURE } from '../../../../core/src/tuning.ts';
 import { LM, landmarkConfidence, mediapipeToWorld } from '../../../../core/src/skeleton.ts';
 import type { RawPose } from '../../../../core/src/types.ts';
+import { posePresent } from '../../../../core/src/pose-signal.ts';
 import type { RingField } from './field.ts';
 import { createWaveReader, type HandSample, type WaveInput, type WaveOut } from './wave.ts';
 
@@ -112,7 +113,7 @@ export function startWaveInput(options: WaveDriverOptions): WaveDriver {
     }
 
     let ok = false;
-    if (raw && Number.isFinite(raw.score) && raw.score > CAPTURE.minScore) {
+    if (posePresent(raw)) {
       if (raw.t !== lastPoseT) {
         lastPoseT = raw.t;
         poses++;

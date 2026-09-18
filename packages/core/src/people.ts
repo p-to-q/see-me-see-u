@@ -19,8 +19,9 @@
  * 结论要读得出来（每条轨迹带 `cost` / `age` / `missing`，HUD 与 `/dev/people.html` 直接显示）。
  */
 import type { Landmark, RawPose } from './types.ts';
-import { CAPTURE, PEOPLE } from './tuning.ts';
+import { PEOPLE } from './tuning.ts';
 import { imageToStageX, inFrame, torsoScale, trustedLandmark } from './autoframe.ts';
+import { posePresent } from './pose-signal.ts';
 
 // ── 观测 ────────────────────────────────────────────────────────────────────
 
@@ -45,11 +46,11 @@ export interface PersonObs {
 const ok = (l: Landmark | undefined): l is Landmark => trustedLandmark(l) && inFrame(l as Landmark);
 
 /**
- * 一份姿态 → 一份观测。`null` = 这一份不作数：分太低、没有 `screen`、躯干量不到。
+ * 一份姿态 → 一份观测。`null` = 这一份不作数：没有人体证据、没有 `screen`、躯干量不到。
  * @param aspect 画面宽 / 高。x 乘它才和 y 同一个单位
  */
 export function observePerson(pose: RawPose | null | undefined, aspect = 16 / 9): PersonObs | null {
-  if (!pose || !(Number.isFinite(pose.score) && pose.score > CAPTURE.minScore)) return null;
+  if (!posePresent(pose)) return null;
   const s = pose.screen;
   if (!s?.length) return null;
   const sL = s[SHOULDER_L], sR = s[SHOULDER_R], hL = s[HIP_L], hR = s[HIP_R];

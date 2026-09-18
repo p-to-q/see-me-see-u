@@ -10,7 +10,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import {
-  createFramingClassifier, decide, frameEvidence, stepCrop, stepFollow, stepShot, verticalEvidence,
+  createFramingClassifier, decide, frameEvidence, lateralEvidence, stepCrop, stepFollow, stepShot, verticalEvidence,
   CROP_FULL, SHOT_REST, type ClassifierOptions, type FramingMode, type FramingWhy, type ShotState, type VerticalMeasurement,
 } from '../src/autoframe.ts';
 import { AUTOFRAME } from '../src/tuning.ts';
@@ -68,7 +68,7 @@ test('证据：坐在笔记本前 = 头肩在、腿不在；全身 = 四个膝�
   const cut = frameEvidence(person(STOOD_UP_CLOSE))!;
   assert.equal(cut.upper, false, `头被切了却判成上半身在画里（画外头肩点 ${cut.upperOut}）`);
   assert.equal(frameEvidence(null), null);
-  assert.equal(frameEvidence(person({ ...WHOLE, score: 0.3 })), null, '没过 minScore 就是没有人');
+  assert.equal(frameEvidence(person({ ...WHOLE, score: 0.3, vis: 0.3 })), null, '整身与躯干证据都不可信才是没有人');
 });
 
 test('纵向证据：同一副 world 骨架只在画面里整体下移，肩线读数跟着变；旧回放明确返回 undefined', () => {
@@ -83,6 +83,28 @@ test('纵向证据：同一副 world 骨架只在画面里整体下移，肩线�
   assert.ok(verticalEvidence(person({ ...SEATED, cx: 1.1, visOut: 0.95 })), '横向出界不该抹掉仍在画内的纵向证据');
   assert.equal(verticalEvidence({ ...a, screen: undefined }), undefined, '没有 screen 的回放不能编一个纵向位置');
   assert.equal(verticalEvidence(null), null);
+});
+
+test('近距离单人：低整身平均不再吞掉可靠头肩，自动进上半身且两轴都能跟', () => {
+  const close = person(SEATED);
+  const visibility = (i: number) => i <= 12 ? 0.95 : 0.1;
+  close.screen = close.screen!.map((l, i) => ({ ...l, visibility: visibility(i) }));
+  close.world = close.world.map((l, i) => ({ ...l, visibility: visibility(i) }));
+  close.score = (13 * 0.95 + 20 * 0.1) / 33;
+  assert.ok(close.score < 0.5, `测试前提：整身平均没有掉到门下 ${close.score}`);
+
+  const frame = frameEvidence(close);
+  assert.ok(frame);
+  assert.deepEqual({ upper: frame.upper, legs: frame.legs, quality: frame.quality }, { upper: true, legs: 0, quality: true });
+  const lateral = lateralEvidence(close);
+  assert.ok(lateral?.quality && lateral.trusted, '可靠肩线没有成为可用横向证据');
+  const vertical = verticalEvidence(close);
+  assert.ok(vertical?.quality);
+  assert.equal(vertical?.anchor, 'chest', '低质量胯不该压过可靠肩线');
+
+  const classified = timeline([custom(0.8, () => close)]);
+  assert.equal(classified.final, 'upper', classified.summary);
+  assert.equal(classified.switches[0]?.why, 'legs-out');
 });
 
 // ── 典型场景 ─────────────────────────────────────────────────────────────────

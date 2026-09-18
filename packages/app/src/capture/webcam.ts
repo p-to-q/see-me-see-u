@@ -39,6 +39,7 @@
 import type { PoseLandmarker } from '@mediapipe/tasks-vision';
 import type { RawPose } from '../../../core/src/types.ts';
 import { CAPTURE, PEOPLE } from '../../../core/src/tuning.ts';
+import { posePresent } from '../../../core/src/pose-signal.ts';
 import { notePresence } from '../shell/idle.ts';
 import { readFlags, type PoseModel } from '../shell/kiosk.ts';
 import type { Capture, CaptureStep } from './capture.ts';
@@ -694,7 +695,7 @@ export class WebcamCapture implements Capture {
       this.#inferredAt = m.stamp;
       this.#inferMs += (m.inferMs - this.#inferMs) * 0.2;
       // 顺手上报"有没有人"给无人降帧（shell/idle.ts）
-      notePresence((this.#latest?.score ?? 0) > CAPTURE.minScore, now);
+      notePresence(posePresent(this.#latest), now);
       this.#countTick(now);
       const done = this.#firstResult;
       this.#firstResult = null;
@@ -870,7 +871,7 @@ export class WebcamCapture implements Capture {
 
     // 顺手上报"有没有人"给无人降帧（shell/idle.ts）。
     // 这件事只有采集端知道，让它自己说，收口的 main.ts 就一行都不用改。
-    notePresence((this.#latest?.score ?? 0) > CAPTURE.minScore, now);
+    notePresence(posePresent(this.#latest), now);
 
     this.#countTick(now);
   }

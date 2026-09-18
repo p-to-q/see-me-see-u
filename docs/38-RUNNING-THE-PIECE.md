@@ -55,9 +55,10 @@ four that decide whether a given camera is fine:
 Two further thresholds worth knowing before you aim the camera, both from
 `CAPTURE`:
 
-- `minScore: 0.5` — below this average landmark visibility, the piece considers
-  the room **empty**. This is what drives entering, leaving, and the idle
-  frame-rate throttle.
+- `minScore: 0.5` — an average landmark visibility above this proves presence.
+  A close visitor can also prove presence with a reliable shoulder or hip pair,
+  so cropped legs no longer make the room look empty. The original average still
+  drives whole-body quality readouts and warnings.
 - `minJointConfidence: 0.4` — a single joint below this drops out of the motion
   statistics, which is what drives evolution. A visitor half behind a pillar
   grows more slowly, and that is the mechanism, not a bug.
@@ -307,7 +308,9 @@ The symptom is a screen that still works: `webcam.ts` never throws out of
 
 ### Nobody is detected
 
-The body will not stand up below `CAPTURE.minScore` (0.5 average visibility).
+The body needs either an average visibility above `CAPTURE.minScore` (0.5) or a
+reliable shoulder/hip pair. A low number can therefore mean cropped legs rather
+than an empty room; the little screen distinguishes that from poor tracking.
 In order of what actually fixes it on site:
 
 0. **Turn the little screen on: `?preview=on`.** It is the fastest way to tell

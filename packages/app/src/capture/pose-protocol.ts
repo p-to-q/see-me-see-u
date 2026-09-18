@@ -65,7 +65,8 @@ export function toLandmark(l: { x: number; y: number; z: number; visibility?: nu
 }
 
 /**
- * MediaPipe 不给"整体置信度"，只有逐点 visibility。取平均值当 score（docs/06 §1 用它判有没有人）。
+ * MediaPipe 不给"整体置信度"，只有逐点 visibility。取平均值当整身质量 score；
+ * presence 还会在 `core/src/pose-signal.ts` 检查可靠的肩 / 胯对，以免画外下肢把近距离人平均成“无人”。
  * 有些模型版本 visibility 恒为 0；那种情况下"检出了 33 个点"本身就是证据，记 1。
  */
 export function overallScore(
