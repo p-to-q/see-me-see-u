@@ -9,7 +9,7 @@
  * 它必须能在没有 GPU 的地方被读、被 diff、被单测。
  */
 import { attachMatrix, jointMatrix } from '../../../core/src/attach.ts';
-import { groundLift, liftMatrixInPlace, lowestPointOf, type PlacedExtent } from '../../../core/src/ground.ts';
+import { groundLift, liftMatrixInPlace, lowestPointOf, MAX_LIFT, type PlacedExtent } from '../../../core/src/ground.ts';
 import { IS_LEFT, SLOT_OF_BONE } from '../../../core/src/slots.ts';
 import { FOOT, MORPH, SKELETON, SLOT_FIT, SLOT_WIDTH } from '../../../core/src/tuning.ts';
 import { BONES } from '../../../core/src/skeleton.ts';
@@ -258,8 +258,19 @@ function groundToFloor(
       yield floorPoint;
     }
   })());
-  if (!lift) return;
-  for (const i of out) liftMatrixInPlace(i.matrix, lift);
+  if (lift) for (const i of out) liftMatrixInPlace(i.matrix, lift);
+
+  // 短命效果不能决定主体 lift，但它自己也不能穿地。
+  // 主体完成稳定落地后再逐件只往 +Y 补：一片墨屑碰地只停住自己，
+  // 绝不反向搬动头、躯干或别的人。量不到就不动，荒谬 AABB 沿用 MAX_LIFT 安全阀。
+  for (const i of out) {
+    if (i.groundsBody) continue;
+    scratch.matrix = i.matrix;
+    scratch.aabb = lib.metaOf(i.partId)?.aabb ?? null;
+    scratch.mirrored = i.mirrored;
+    const y = lowestPointOf(scratch);
+    if (y !== null && y < 0) liftMatrixInPlace(i.matrix, Math.min(-y, MAX_LIFT));
+  }
 }
 
 /** `groundToFloor` 的复用槽。单线程、同步遍历，不会有第二个使用者同时持有它 */

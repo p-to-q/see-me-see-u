@@ -2,8 +2,8 @@
  * 忒修斯替换那一下**长什么样**（`docs/44-THESEUS.md` §7）。纯函数：不碰 three，只出 `SlotRender[]`。
  *
  *   1. 旧件碎开：几片墨屑（旧件自己的几何，缩小）从骨轴向外散、缩没；
- *   2. 新件装上：**原样**是 graft 的组装动画 —— `graftCurve()` 就是交叉淡入里新件那一半，
- *      这里不另画一条曲线（`crossfadeRenders` 也调它）；
+ *   2. 新件装上：沿用 graft 的缩放曲线，但缺省**原位**长回来。
+ *      150mm 轴向飞入不再是所有槽位的隐式语法；未来单手 release 由显式策略授权；
  *   3. **描边不断**：旧件的"芯"保持原大，直到新件长到八成以上才让位。
  *      描边是每个实例自己的外壳，互相重叠的实例外壳彼此遮住，只剩并集的外沿 ——
  *      所以只要这一格在任何一刻都有一件足够大的实体，轮廓就是连续的。
@@ -26,7 +26,7 @@ import { JOINT_CAPS, type SlotRender } from './assemble.ts';
  */
 export const REPLACE_SECONDS = MORPH.crossfade;
 
-const clamp01 = (x: number): number => (x < 0 ? 0 : x > 1 ? 1 : x);
+const clamp01 = (x: number): number => Number.isFinite(x) ? (x < 0 ? 0 : x > 1 ? 1 : x) : 0;
 const smoothstep = (x: number): number => { const t = clamp01(x); return t * t * (3 - 2 * t); };
 
 /** graft 的组装动画（交叉淡入里新件那一半）：从轴向外 `assembleOffset` 吸附回位 */
@@ -143,7 +143,7 @@ function replaceOne(
   }
   const g = graftCurve(tt);
   list.push({
-    partId: to.partId, materialRole: to.materialRole, scale: g.scale * pres, offset: g.offset,
+    partId: to.partId, materialRole: to.materialRole, scale: g.scale * pres,
     groundsBody: false,
   });
   return list;

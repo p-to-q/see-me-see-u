@@ -66,6 +66,22 @@ test('theseus 事件: 描边不断 —— 任何一刻都有一件 ≥ 0.8 倍�
   assert.equal(shards.length, THESEUS.shards, 't=0.25 时应当有墨屑正在散开');
 });
 
+test('theseus 事件: 缺省替换在插座上发生，坏进度也有限', () => {
+  const from = { partId: 'old', materialRole: 'secondary' as const };
+  const to = { partId: 'new', materialRole: 'secondary' as const };
+  for (const key of ['footL', 'handR', 'spine', 'joint'] as SlotKey[]) {
+    for (const t of [0, 0.25, 0.5, 0.75, 1, Number.NaN, Infinity, -Infinity]) {
+      const list = replaceRenders(key, from, to, t);
+      const incoming = list.filter((r) => r.partId === to.partId);
+      if (t === 1) assert.ok(incoming.length > 0, `${key} 结束时没有新件`);
+      for (const r of list) assert.ok(Number.isFinite(r.scale), `${key} t=${String(t)} 产生了非有限 scale`);
+      for (const r of incoming) {
+        assert.equal(r.offset ?? 0, 0, `${key} t=${String(t)} 仍从插座外飞入`);
+      }
+    }
+  }
+});
+
 // ── 3 ────────────────────────────────────────────────────────────────────────
 function bucketsAndInstances(g: Genome, render: Partial<Record<SlotKey, SlotRender[]>>) {
   const byId = new Map(index!.parts.map((p) => [p.id, p]));
