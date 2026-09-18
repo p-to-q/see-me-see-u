@@ -600,10 +600,14 @@ function verticalGoal(
     // 但位置仍冻结；门确认新身份后第一帧会在当前位置重立基线，不追那次跳变。
     if (!evidence.accepted) return { goal: NaN, screenDriven: true };
     if (state) return { state: { ...state, lost: 0 }, goal: NaN, screenDriven: true };
-    return { goal: Number.isFinite(fallback) ? fallback : 0, screenDriven: true };
+    // screen 链存在却没有可信基线：继续以中线为目标。这里若复活 world fallback，
+    // 长丢失刚归中的镜头会在坏光重现时突然追一份不可与 screen 对齐的旧坐标。
+    return { goal: 0, screenDriven: true };
   }
   if (!evidence || !Number.isFinite(evidence.worldY)) {
-    if (!state) return { goal: Number.isFinite(fallback) ? fallback : 0, screenDriven: true };
+    // `undefined` 已在上面单独保留给旧回放；null 是现代 screen 证据明确丢失。
+    // 基线过期后必须继续归中，不能退回另一套坐标系。
+    if (!state) return { goal: 0, screenDriven: true };
     const lost = state.lost + dt;
     if (lost < T.verticalHoldSeconds) return { state: { ...state, lost }, goal: NaN, screenDriven: true };
     // 长丢失后忘掉旧人的基线，再平滑回到中线；新证据回来会从新锚点重新立零点。

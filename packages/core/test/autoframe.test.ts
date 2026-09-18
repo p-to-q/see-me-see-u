@@ -432,6 +432,30 @@ test('中景纵向：坏光 / 丢失先冻结再归中；大跳当换人重立�
   assert.ok(Math.abs((changed.vertical?.screenAnchor ?? 0) - verticalEvidence(jumpedPose)!.y) < 1e-12, '没有在新锚点重立基线');
 });
 
+test('中景纵向：长丢失已经忘掉 screen 基线后，坏光重现继续归中，不复活 world fallback', () => {
+  const good = verticalOf(person(SEATED));
+  let s = run(SHOT_REST, 45, {
+    shot: 'upper', offset: { x: 0, y: 0 }, vertical: good, reduced: false, hold: false,
+  });
+  s = run(s, 60, {
+    shot: 'upper', offset: { x: 0, y: 0 }, vertical: { ...good, y: good.y + 0.04 }, reduced: false, hold: false,
+  });
+  assert.ok(s.fy.x > 0.01, `测试前提：纵向没有移开 ${s.fy.x}`);
+
+  s = run(s, Math.ceil(AUTOFRAME.verticalHoldSeconds / DT) + 90, {
+    shot: 'upper', offset: { x: 0, y: -0.08 }, vertical: null, reduced: false, hold: false,
+  });
+  assert.equal(s.vertical, undefined, '长丢失后仍留着过期 screen 基线');
+  assert.ok(Math.abs(s.fy.x) < 0.005, `长丢失没有先归中：${s.fy.x}`);
+
+  const dim = { ...good, quality: false };
+  s = run(s, 90, {
+    shot: 'upper', offset: { x: 0, y: -0.08 }, vertical: dim, reduced: false, hold: false,
+  });
+  assert.ok(Math.abs(s.fy.x) < 0.005, `坏光重现复活了 world fallback：${s.fy.x}`);
+  assert.equal(s.vertical, undefined, '没有可信 screen 证据却重立了基线');
+});
+
 test('中景纵向：旧回放继续吃 world fallback；减少动态明确清空 screen-space 跟随', () => {
   const replay = run(SHOT_REST, 90, {
     shot: 'upper', offset: { x: 0, y: 0.06 }, vertical: undefined, reduced: false, hold: false,

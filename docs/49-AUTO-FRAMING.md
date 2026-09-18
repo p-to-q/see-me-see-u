@@ -377,8 +377,9 @@ URL 都是 `/?demo=1&debug=1&theme=porcelain&seed=7&theseus=off&arc=900&nopost=1
 落地后可能逐字相同。因此中景把可信 pelvis（近处被裁时退到 chest）的 `screen.y` 与 human skeleton 的**同名 world 关节**配对：
 进入中景时两边同时立基线，之后用 screen 位移扣掉 world 同步位移，剩下的才是落地丢掉的整体画面移动。这样蹲起不会被 world 动作 + screen 跟随算两次。
 残差按躯干尺度折成米，再走同一条临界阻尼 / 限速跟随。画面 y 向下为正，映到舞台相机中心 +Y 后身体在输出里同样向下，仍是镜子的方向。
-丢失先冻结，1 秒后归中；坏光无限期冻结；单帧跳 20% 画面高、锚点 / 摄像头取景状态改变、尺度跨过身份门都会重立基线，不把换人或坐标系切换读成运镜。
-全景、多人和减少动态不跟；没有 `screen` 的旧回放保留原来的 world-relative fallback。
+丢失先冻结，1 秒后归中；坏光在仍有可信旧基线时无限期冻结；基线已经过期后，明确丢失或坏光都继续归中，不复活另一套坐标系的 world fallback。
+单帧跳 20% 画面高、锚点 / 摄像头取景状态改变、尺度跨过身份门都会重立基线，不把换人或坐标系切换读成运镜。
+全景、多人和减少动态不跟；只有 `screen === undefined` 的旧回放保留原来的 world-relative fallback，现代链的 `screen === null` 不与它混用。
 
 **三、摄像头自带取景（S6）。** `?camframing=auto|on|off`，默认 `auto`（**不替谁打开**：§1.3 的结论是它对准脸、会裁腿）。
 
@@ -396,7 +397,7 @@ URL 都是 `/?demo=1&debug=1&theme=porcelain&seed=7&theseus=off&arc=900&nopost=1
 
 | 做什么 | 在哪 | 测试 |
 |---|---|---|
-| 中景把可信 pelvis/chest 的 `screen.y` 与同名 world 高度配对：相对基线、抵消蹲起、画面空间去抖 / 死区、按躯干尺度折米；坏光冻结、长丢失归中、身份大跳重立基线；工作台显示纵向移轴 | `autoframe.ts` 的 `verticalEvidence` / `stepShot`；`main.ts → stage.setShot`；`framing-sim.ts` | `autoframe.test.ts` 的同 world / screen+world 抵消 / 小位移 / 丢失 / 换人 / 旧回放；`framing-lateral.test.ts` 的舞台接线与连续性 |
+| 中景把可信 pelvis/chest 的 `screen.y` 与同名 world 高度配对：相对基线、抵消蹲起、画面空间去抖 / 死区、按躯干尺度折米；坏光冻结、长丢失归中，过期后 `null` / 坏光不复活 world fallback，身份大跳重立基线；工作台显示纵向移轴 | `autoframe.ts` 的 `verticalEvidence` / `stepShot`；`main.ts → stage.setShot`；`framing-sim.ts` | `autoframe.test.ts` 的同 world / screen+world 抵消 / 小位移 / 丢失 / 坏光重现 / 换人 / 旧回放；`framing-lateral.test.ts` 的舞台接线与连续性 |
 | 景别保留速度状态，目标反向时先刹再回；速度 / 位置限幅并在视觉端点精确吸附；`upper → stepping-back` 的连续纠错证据不再等上一次切换的冷却 | `autoframe.ts` 的 `stepShot` / 分类器；`tuning.ts` 的 `shotOmega` / `shotMaxSpeed` / 收口门限 | `autoframe.test.ts` 的反向与刚进上半身退后反证；`autoframe-continuity.test.ts` 的速度变化守卫与 15/30/60/120Hz 对照 |
 | 降级 hold 不再切景别（只冻结跟随）；小屏告警 0.2 秒**限速**退回整幅 | `autoframe.ts` 的 `stepShot` / `stepCrop` | `core/test/autoframe-continuity.test.ts`（随机决策序列，每 16ms 上限）；`autoframe.test.ts` 两条改写 |
 | 控制器的四个新参数：稳定延迟、限速、前馈、去抖 | `stepFollow`；`filter.ts` 的 `oneEuroStep` | `autoframe-controller.test.ts` 4 条 |
