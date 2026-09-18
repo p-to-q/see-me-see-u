@@ -295,6 +295,23 @@ function counting(calls: unknown[]): typeof globalThis.fetch {
 
 const settle = () => new Promise((res) => setTimeout(res, 0));
 
+function deferred<T>(): {
+  promise: Promise<T>;
+  resolve(value: T): void;
+  reject(reason: unknown): void;
+} {
+  let resolve!: (value: T) => void;
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; });
+  return { promise, resolve, reject };
+}
+
+const keptResponse = (n: number) => ({
+  ok: true,
+  status: 200,
+  json: async () => ({ ok: true, entry: { n } }),
+}) as Response;
+
 test('存档：弧线走完才写，一次，而且只写一次', async () => {
   const calls: unknown[] = [];
   const r = createVisitReporter({ species: 'porcelain', live: () => true, idle: (fn) => fn(), fetch: counting(calls) });
@@ -373,6 +390,141 @@ test('存档：换一个人就重新算一场，但写失败那道闸不解除',
   await settle();
   assert.equal(tries, 1, 'reset 把会话级那道闸解除了 —— §7.1 第 3 条是本次会话不再尝试');
   assert.equal(dead.phase, 'off');
+});
+
+test('存档：上一场迟到的 fetch 失败或非 2xx 不会关闭下一场', async () => {
+  for (const outcome of ['reject', '500'] as const) {
+    const first = deferred<Response>();
+    let calls = 0;
+    const r = createVisitReporter({
+      species: 'porcelain', live: () => true, idle: (fn) => fn(),
+      fetch: (async () => {
+        calls += 1;
+        return calls === 1 ? first.promise : keptResponse(22);
+      }) as never,
+    });
+
+    r.note(true);
+    assert.equal(r.phase, 'writing');
+    r.reset();
+    assert.equal(r.phase, 'idle');
+    if (outcome === 'reject') first.reject(new Error('old encounter offline'));
+    else first.resolve({ ok: false, status: 500, json: async () => ({}) } as Response);
+    await settle();
+    assert.equal(r.phase, 'idle', `${outcome}：上一场迟到的失败污染了下一场`);
+    assert.equal(r.n, null);
+
+    r.note(true);
+    await settle();
+    assert.equal(r.phase, 'kept', `${outcome}：下一场不能再写`);
+    assert.equal(r.n, 22);
+  }
+});
+
+test('存档：上一场迟到的成功或坏 JSON 不会改写下一场', async () => {
+  for (const outcome of ['success', 'bad-json'] as const) {
+    const body = deferred<{ ok: true; entry: { n: number } }>();
+    let calls = 0;
+    const r = createVisitReporter({
+      species: 'porcelain', live: () => true, idle: (fn) => fn(),
+      fetch: (async () => {
+        calls += 1;
+        if (calls > 1) return keptResponse(22);
+        return { ok: true, status: 200, json: () => body.promise } as Response;
+      }) as never,
+    });
+
+    r.note(true);
+    await settle();
+    assert.equal(r.phase, 'writing', '第一场还没等到 JSON 就不再 writing');
+    r.reset();
+    if (outcome === 'success') body.resolve({ ok: true, entry: { n: 11 } });
+    else body.reject(new SyntaxError('old encounter returned invalid JSON'));
+    await settle();
+    assert.equal(r.phase, 'idle', `${outcome}：上一场迟到的 body 改写了下一场`);
+    assert.equal(r.n, null, `${outcome}：上一场的序号落在下一场头上`);
+
+    r.note(true);
+    await settle();
+    assert.equal(r.phase, 'kept');
+    assert.equal(r.n, 22);
+  }
+});
+
+test('存档：上一场在第一处迟到拿到 404，仍完成那一场的既定降级但不碰新状态', async () => {
+  const first = deferred<Response>();
+  const urls: string[] = [];
+  const r = createVisitReporter({
+    species: 'porcelain', live: () => true, idle: (fn) => fn(), bases: ['/api', 'https://archive.example'],
+    fetch: (async (url: string) => {
+      urls.push(url);
+      if (urls.length === 1) return first.promise;
+      return keptResponse(11);
+    }) as never,
+  });
+
+  r.note(true);
+  r.reset();
+  first.resolve({ ok: false, status: 404, json: async () => ({}) } as Response);
+  await settle();
+  assert.deepEqual(urls, ['/api/visit', 'https://archive.example/visit'],
+    '走完整条弧线的旧相遇因 reset 丢掉了既定的 404 fallback');
+  assert.equal(r.phase, 'idle');
+  assert.equal(r.n, null);
+});
+
+test('存档：当前相遇只接受正的安全整数序号，坏回执静默关掉', async () => {
+  for (const serial of [undefined, null, 0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, '7']) {
+    const r = createVisitReporter({
+      species: 'porcelain', live: () => true, idle: (fn) => fn(),
+      fetch: (async () => ({
+        ok: true, status: 200,
+        json: async () => ({ ok: true, entry: { n: serial } }),
+      })) as never,
+    });
+    r.note(true);
+    await settle();
+    assert.equal(r.phase, 'off', `收下了坏序号 ${String(serial)}`);
+    assert.equal(r.n, null);
+  }
+});
+
+test('存档：空闲调度器抛错也不能逃出帧循环', () => {
+  let fetched = false;
+  const r = createVisitReporter({
+    species: 'porcelain', live: () => true,
+    idle: () => { throw new Error('scheduler unavailable'); },
+    fetch: (async () => { fetched = true; return keptResponse(1); }) as never,
+  });
+  assert.doesNotThrow(() => r.note(true));
+  assert.equal(r.phase, 'off');
+  assert.equal(fetched, false);
+});
+
+test('存档：reset 发生在 idle callback 之前，完成的旧相遇仍写出但不碰新状态', async () => {
+  const queued: Array<() => void> = [];
+  const calls: unknown[] = [];
+  const r = createVisitReporter({
+    species: 'porcelain', live: () => true,
+    idle: (fn) => { queued.push(fn); },
+    fetch: counting(calls),
+  });
+
+  r.note(true);
+  assert.equal(queued.length, 1);
+  r.reset();
+  queued.shift()?.();
+  await settle();
+  assert.equal(calls.length, 1, '已经走完整条弧线的观众因 idle callback 晚到而被丢掉');
+  assert.equal(r.phase, 'idle');
+  assert.equal(r.n, null, '旧相遇的序号落在下一位头上');
+
+  r.note(true);
+  queued.shift()?.();
+  await settle();
+  assert.equal(calls.length, 2, '当前相遇的空闲写入被旧 epoch 吞掉了');
+  assert.equal(r.phase, 'kept');
+  assert.equal(r.n, 2);
 });
 
 test('存档：404 和断网都是静默关掉，不重试', async () => {
