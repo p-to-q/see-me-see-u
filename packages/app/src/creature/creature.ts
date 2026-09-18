@@ -37,7 +37,7 @@ import {
 } from './shading.ts';
 import { ARC_OFF, arcWeights, rgbToHsl, type ArcWeights } from '../stage/look.ts';
 import { surfaceFor, type SurfaceSpec } from './surface.ts';
-import { crossfadeRenders, REPLACE_SECONDS, replaceRenders } from './replace-event.ts';
+import { crossfadeRenders, graftCurve, REPLACE_SECONDS, replaceRenders } from './replace-event.ts';
 import { passesOf, swapCeiling } from './swap-budget.ts';
 
 export interface CreatureStats {
@@ -224,6 +224,8 @@ export function createCreature(opt: CreatureOptions): Creature {
   const renderC: Partial<Record<SlotKey, SlotRender[]>> = {};
   /** 伴随身体交接槽位的稳定落地代理（不画） */
   const groundC: Partial<Record<SlotKey, SlotRender[]>> = {};
+  /** 伴随身体交接目标的稳定落地代理（与 groundC 的最低点连续插值） */
+  const groundToC: Partial<Record<SlotKey, SlotRender[]>> = {};
   /** 这一帧每个桶里主身体占几份（描边外壳只画这几份） */
   const primaryCounts = new Map<string, number>();
   /** 这一帧伴随身体实例的颜色，下标 = 实例序号 − 主身体实例数 */
@@ -265,6 +267,10 @@ export function createCreature(opt: CreatureOptions): Creature {
   const render: Partial<Record<SlotKey, SlotRender[]>> = {};
   /** 主身体交接槽位的稳定落地代理（不画） */
   const ground: Partial<Record<SlotKey, SlotRender[]>> = {};
+  /** 主身体交接目标的稳定落地代理 */
+  const groundTo: Partial<Record<SlotKey, SlotRender[]>> = {};
+  /** 每个槽位自己的交接进度；主身体和伴随身体共用同一条事件时间线 */
+  const groundProgress: Partial<Record<SlotKey, number>> = {};
 
   const unsubscribe = library.onGeometry((partId) => { dirtyParts.add(partId); });
 
@@ -539,17 +545,27 @@ export function createCreature(opt: CreatureOptions): Creature {
         // 交接的视觉实例会缩放、飞入、散开：它们不能决定整具身体的 lift。
         // 用交接前那件的满尺寸插座位置做代理；从空槽 graft 时才用目标件。
         const anchor = s?.from ?? s?.to;
-        if (anchor) ground[key] = [{
-          partId: anchor.partId, materialRole: anchor.materialRole, scale: pres,
-        }];
-        else delete ground[key];
+        if (s && anchor) {
+          ground[key] = [{ partId: anchor.partId, materialRole: anchor.materialRole, scale: pres }];
+          groundTo[key] = [{ partId: s.to.partId, materialRole: s.to.materialRole, scale: pres }];
+          // 主体基准和新件长回来共用同一条时间语义；调 graft 节奏时不得遗漏落地。
+          groundProgress[key] = graftCurve(s.t).scale;
+        } else {
+          delete ground[key];
+          delete groundTo[key];
+          delete groundProgress[key];
+        }
       }
 
       // 4. 装配（挂载数学全在 core/attach.ts 里）
       let instances: PartInstance[];
       try {
         instances = assemble(genome, sk, library, {
-          render, ground: active.size ? ground : undefined, maxInstances,
+          render,
+          ground: active.size ? ground : undefined,
+          groundTo: active.size ? groundTo : undefined,
+          groundProgress: active.size ? groundProgress : undefined,
+          maxInstances,
         });
       } catch (e) {
         console.error('[creature] assemble 失败，保持上一帧', e);
@@ -571,15 +587,22 @@ export function createCreature(opt: CreatureOptions): Creature {
             : s ? crossfadeRenders(key, s.from, s.to, s.t, cp)
               : pick ? [{ partId: pick.partId, materialRole: pick.materialRole, scale: cp }] : [];
           const anchor = s?.from ?? s?.to;
-          if (anchor) groundC[key] = [{
-            partId: anchor.partId, materialRole: anchor.materialRole, scale: cp,
-          }];
-          else delete groundC[key];
+          if (s && anchor) {
+            groundC[key] = [{ partId: anchor.partId, materialRole: anchor.materialRole, scale: cp }];
+            groundToC[key] = [{ partId: s.to.partId, materialRole: s.to.materialRole, scale: cp }];
+          } else {
+            delete groundC[key];
+            delete groundToC[key];
+          }
         }
         let extra: PartInstance[];
         try {
           extra = assemble(genome, c.skeleton, library, {
-            render: renderC, ground: active.size ? groundC : undefined, maxInstances,
+            render: renderC,
+            ground: active.size ? groundC : undefined,
+            groundTo: active.size ? groundToC : undefined,
+            groundProgress: active.size ? groundProgress : undefined,
+            maxInstances,
           });
         } catch {
           continue;   // 一具伴随身体摆不出来不拖垮主身体（P2）

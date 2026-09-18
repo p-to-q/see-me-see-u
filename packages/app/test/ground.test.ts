@@ -15,7 +15,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { assemble } from '../src/creature/assemble.ts';
-import { crossfadeRenders, replaceRenders } from '../src/creature/replace-event.ts';
+import { crossfadeRenders, graftCurve, REPLACE_SECONDS, replaceRenders } from '../src/creature/replace-event.ts';
 import { REFERENCE_POSE } from '../src/stage/framing.ts';
 import { BODY_PLANS, remapSkeleton, type BodyPlanId } from '../../core/src/bodyplan.ts';
 import { makeGenome } from '../../core/src/genome.ts';
@@ -201,6 +201,61 @@ test('落地：真实全槽位同件替换的芯 / 碎屑 / 飞入件不再让�
       }
     }
   }
+});
+
+test('落地：真实脚部 old→new 的 AABB 基准走完整交接，不在最后一帧跳 45mm', { skip: !REAL_INDEX }, (t) => {
+  const fromGenome = makeGenome(1, 3, REAL_INDEX!, { theme: 'wheelleg' });
+  const donor = makeGenome(1, 3, REAL_INDEX!, { theme: 'screenface' });
+  const key: SlotKey = 'footL';
+  const from = fromGenome.slots[key];
+  const to = donor.slots[key];
+  assert.ok(from && to, '真实夹具必须有新旧两只脚');
+  assert.notEqual(from.partId, to.partId, '夹具必须真的换件');
+
+  const genome: Genome = {
+    ...fromGenome,
+    slots: { ...fromGenome.slots, [key]: to },
+  };
+  const byId = new Map(REAL_INDEX!.parts.map((p) => [p.id, p]));
+  const source = {
+    metaOf(id: string): PartMeta {
+      const meta = byId.get(id);
+      assert.ok(meta, `parts.json 里找不到 ${id}`);
+      return meta;
+    },
+  };
+  const proxy = (pick: typeof from) => [{
+    partId: pick!.partId, materialRole: pick!.materialRole,
+  }];
+  const at = (u: number, continuous: boolean): number => headY(assemble(genome, REFERENCE_POSE, source, {
+    render: { [key]: replaceRenders(key, from, to, u) },
+    ground: { [key]: proxy(from) },
+    groundTo: continuous ? { [key]: proxy(to) } : undefined,
+    groundProgress: continuous ? { [key]: graftCurve(u).scale } : undefined,
+  }));
+  const done = headY(assemble(genome, REFERENCE_POSE, source));
+
+  // 对照组：旧实现把旧脚代理用到事件最后，下一帧直接切新脚。这个真资产组合会跳约 45mm。
+  const oldLast = at(1 - 1 / 72, false);
+  const oldJump = Math.abs(done - oldLast);
+  t.diagnostic(`旧代理终点跳变 ${(oldJump * 1000).toFixed(2)}mm`);
+  assert.ok(oldJump > 0.04, `夹具只量到 ${(oldJump * 1000).toFixed(2)}mm，不能证明修复有效`);
+
+  // 正式动画 1.2s @60Hz。落地基准按各槽位自己的进度连续走，终点必须等于正常装配。
+  const frames = Math.max(1, Math.round(REPLACE_SECONDS * 60));
+  let previous = at(0, true);
+  let worst = 0;
+  for (let frame = 1; frame <= frames; frame++) {
+    const current = at(frame / frames, true);
+    worst = Math.max(worst, Math.abs(current - previous));
+    previous = current;
+  }
+  t.diagnostic(`连续代理最坏单帧 ${(worst * 1000).toFixed(3)}mm / ${frames} 帧`);
+  assert.ok(worst <= 0.001, `落地代理单帧仍跳 ${(worst * 1000).toFixed(2)}mm`);
+  assert.ok(Math.abs(previous - done) < 1e-12, '交接终点必须逐位回到正式新身体的落地基准');
+
+  const bad = at(Number.NaN, true);
+  assert.ok(Number.isFinite(bad), '坏进度不能把帧循环送进 NaN');
 });
 
 test('落地：parts.json 缺失的占位身体在替换中仍有限、不泵动', () => {

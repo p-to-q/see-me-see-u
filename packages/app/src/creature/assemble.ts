@@ -9,7 +9,7 @@
  * 它必须能在没有 GPU 的地方被读、被 diff、被单测。
  */
 import { attachMatrix, jointMatrix } from '../../../core/src/attach.ts';
-import { groundLift, liftMatrixInPlace, type PlacedExtent } from '../../../core/src/ground.ts';
+import { groundLift, liftMatrixInPlace, lowestPointOf, type PlacedExtent } from '../../../core/src/ground.ts';
 import { IS_LEFT, SLOT_OF_BONE } from '../../../core/src/slots.ts';
 import { FOOT, MORPH, SKELETON, SLOT_FIT, SLOT_WIDTH } from '../../../core/src/tuning.ts';
 import { BONES } from '../../../core/src/skeleton.ts';
@@ -93,6 +93,13 @@ export interface AssembleOptions {
    * 未列出的槽位不会在这里重复装配：它们已由正常 render 实例参与落地。
    */
   ground?: Partial<Record<SlotKey, SlotRender[]>>;
+  /**
+   * 交接目标的稳定落地代理。和 `ground` 成对使用，按 `groundProgress[key]` 插值两件代理的
+   * **世界最低点**，而不是把旧 AABB 用到最后一帧再突然换成新 AABB。
+   * 未列出或量不到一端时退回可测量的一端；坏进度按 0，帧循环不抛。
+   */
+  groundTo?: Partial<Record<SlotKey, SlotRender[]>>;
+  groundProgress?: Partial<Record<SlotKey, number>>;
   /** 实例总数上限（docs/02 P5）。超了就丢弃多余的，绝不越预算 */
   maxInstances?: number;
 }
@@ -193,8 +200,29 @@ function translateInPlace(m: Mat4, dir: Vec3, dist: number): void {
  * 真正被缓存下来、不必每帧重算的是**局部包围盒本身** —— 它从 `PartMeta` 直接读，
  * 不分配、不遍历顶点。
  */
-function groundToFloor(out: PartInstance[], stable: PartInstance[], lib: MetaSource): void {
+function floorBySlot(parts: PartInstance[], lib: MetaSource, floors: Map<SlotKey, number>): void {
+  floors.clear();
+  for (const i of parts) {
+    scratch.matrix = i.matrix;
+    scratch.aabb = lib.metaOf(i.partId)?.aabb ?? null;
+    scratch.mirrored = i.mirrored;
+    const y = lowestPointOf(scratch);
+    if (y === null) continue;
+    const before = floors.get(i.slotKey);
+    if (before === undefined || y < before) floors.set(i.slotKey, y);
+  }
+}
+
+function groundToFloor(
+  out: PartInstance[], stable: PartInstance[], stableTo: PartInstance[],
+  progress: AssembleOptions['groundProgress'], lib: MetaSource,
+): void {
   if (!out.length) return;                        // mass 那一档一个部件都不实例化
+  const blend = !!progress && (stable.length > 0 || stableTo.length > 0);
+  if (blend) {
+    floorBySlot(stable, lib, fromFloors);
+    floorBySlot(stableTo, lib, toFloors);
+  }
   // 复用同一个对象喂给 groundLift：这条路在帧循环里，每帧 new 64 个临时对象
   // 就是每分钟给 GC 送 230k 个短命对象（P5：帧里不分配）
   const lift = groundLift((function* () {
@@ -205,11 +233,29 @@ function groundToFloor(out: PartInstance[], stable: PartInstance[], lib: MetaSou
       scratch.mirrored = i.mirrored;
       yield scratch;
     }
-    for (const i of stable) {
-      scratch.matrix = i.matrix;
-      scratch.aabb = lib.metaOf(i.partId)?.aabb ?? null;
-      scratch.mirrored = i.mirrored;
-      yield scratch;
+    if (!blend) {
+      for (const i of stable) {
+        scratch.matrix = i.matrix;
+        scratch.aabb = lib.metaOf(i.partId)?.aabb ?? null;
+        scratch.mirrored = i.mirrored;
+        yield scratch;
+      }
+      return;
+    }
+    // 每个交接槽位只贡献一个连续的最低点。全身仍取所有槽位的最小值，
+    // 所以多个同时交接的部位也各走自己的 t，不需要捏造一个全局进度。
+    for (const [key, from] of fromFloors) {
+      const to = toFloors.get(key) ?? from;
+      const raw = progress?.[key];
+      const t = Number.isFinite(raw) ? Math.max(0, Math.min(1, raw!)) : 0;
+      floorMatrix[13] = from + (to - from) * t;
+      yield floorPoint;
+    }
+    // 从空槽 graft 时生产接线会把 from=to；这里仍给独立调用者一个安全退路。
+    for (const [key, to] of toFloors) {
+      if (fromFloors.has(key)) continue;
+      floorMatrix[13] = to;
+      yield floorPoint;
     }
   })());
   if (!lift) return;
@@ -218,6 +264,14 @@ function groundToFloor(out: PartInstance[], stable: PartInstance[], lib: MetaSou
 
 /** `groundToFloor` 的复用槽。单线程、同步遍历，不会有第二个使用者同时持有它 */
 const scratch: PlacedExtent = { matrix: [], aabb: null, mirrored: false };
+const fromFloors = new Map<SlotKey, number>();
+const toFloors = new Map<SlotKey, number>();
+const floorMatrix: Mat4 = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+const floorPoint: PlacedExtent = {
+  matrix: floorMatrix,
+  aabb: { min: [0, 0, 0], max: [0, 0, 0] },
+  mirrored: false,
+};
 
 export function assemble(
   genome: Genome,
@@ -228,7 +282,8 @@ export function assemble(
   const out = place(genome, skeleton, lib, opt);
   // 代理只装配 opt.ground 明确列出的槽位，不把整具身体在帧里再算一遍。
   const stable = opt.ground ? place(genome, skeleton, lib, { render: opt.ground }, true) : [];
-  groundToFloor(out, stable, lib);
+  const stableTo = opt.groundTo ? place(genome, skeleton, lib, { render: opt.groundTo }, true) : [];
+  groundToFloor(out, stable, stableTo, opt.groundProgress, lib);
   return out;
 }
 
