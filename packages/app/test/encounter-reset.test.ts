@@ -61,7 +61,7 @@ test('encounter reset: 自然离场和成功换源只调用同一个完整清零
     '成功换输入源没有走同一个 encounter 边界');
 
   for (const required of [
-    'presence.reset()', 'arc.reset()', 'poseClock.reset()', 'framer.reset()',
+    'presence.reset()', 'arc.reset()', 'poseClock.reset()', 'framer.reset()', 'stage.resetShotIdentity()',
     'motion.reset()', 'boneEnergy.reset()', 'evolution.reset()', 'stabilizer.reset()',
     'refiner?.reset()', 'vitality.reset()', 'groundSense.reset()', 'swapGate.reset()',
     'slow.reset()', 'visits.reset()', 'people.tracker.reset()', 'people.bodies.reset()',

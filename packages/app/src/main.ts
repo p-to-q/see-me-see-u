@@ -13,7 +13,7 @@ import { buildSkeleton, mediapipeToWorld } from '../../core/src/skeleton.ts';
 import { createStabilizer } from '../../core/src/stabilize.ts';
 import { clampFold, createRefiner } from '../../core/src/refine.ts';
 import {
-  createFramingClassifier, decide, lateralEvidence, stepLateral, stepToward, verticalEvidence, LATERAL_REST,
+  createFramingClassifier, decide, lateralEvidence, resetLateralIdentity, stepLateral, stepToward, verticalEvidence, LATERAL_REST,
   type FramingDecision, type FramingPolicy, type LateralState, type VerticalMeasurement,
 } from '../../core/src/autoframe.ts';
 import { holdLegs } from '../../core/src/leghold.ts';
@@ -902,6 +902,7 @@ async function boot(): Promise<void> {
     framing = decide(framingPolicy, framer.current);
     legHold = 0;
     lateral = LATERAL_REST;
+    stage.resetShotIdentity();
 
     motion.reset();
     boneEnergy.reset();
@@ -961,6 +962,29 @@ async function boot(): Promise<void> {
     if (director.forced && flags.act !== HANDED_BACK_ACT) director.release(world);
     intent = intentFromFlags(flags);
     if (hud) console.info(`[arc] 归零（${reason === 'absence' ? '离场' : '输入源已切换'}）—— 下一位从第 I 乐章开始`);
+  };
+
+  /**
+   * 主通道仍在同一场里，但换成了另一个人（或同一个人失联后重新出现）。
+   * 会话弧线、演化、忒修斯与 seed 都属于整场，故意保留；人的逐帧历史必须一起断开，
+   * 否则接班第一帧会继承上一人的动能、触地、腿部模式和取景速度。
+   */
+  const resetPrimaryTemporal = (resetPipes: boolean): void => {
+    poseClock.reset();
+    if (resetPipes) {
+      refiner?.reset();
+      stabilizer.reset();
+      vitality.reset();
+    }
+    motion.reset();
+    boneEnergy.reset();
+    framer.reset();
+    framing = decide(framingPolicy, framer.current);
+    legHold = 0;
+    lateral = resetLateralIdentity(lateral);
+    groundSense.reset();
+    stage.resetShotIdentity();
+    lastFeatures = null;
   };
 
   /**
@@ -1094,9 +1118,8 @@ async function boot(): Promise<void> {
       : latest;
     // 主身体的人丢了一阵又被认回来：姿态时钟和滤波器不许在"之前"和"之后"之间插值（docs/50 §2.4）——
     // 中间可能隔着一次换姿势，甚至是另一个人被认成了他。插过去的结果是一具摊在地上的星形（2026-09-14 无头取证撞到的）
-    if (trackerHasPrimary && crowd?.tracks.some((t) => t.primary && isFreshReacquisition(inference !== null, t))) {
-      poseClock.reset(); refiner?.reset(); stabilizer.reset(); vitality.reset();
-    }
+    const primaryReacquired = trackerHasPrimary
+      && crowd?.tracks.some((t) => t.primary && isFreshReacquisition(inference !== null, t)) === true;
     if (people && crowd && trackerOwnsChannel && crowd.primary !== people.primary) {
       // 交接（docs/50 §3.3）：上一个主身体变成一具正在溶掉的伴随身体，停在他最后的样子和站位上；
       // 接班的人自己那一套滤波器换进主通道（他的身体已经在台上，不从零热身，也不吃上一个人的骨长）
@@ -1105,10 +1128,14 @@ async function boot(): Promise<void> {
         people.bodies.retire(people.primary, { refiner, stabilizer, vitality }, lastSkeleton, 0);
         const next = theirs ?? createPipes();
         refiner = next.refiner; stabilizer = next.stabilizer; vitality = next.vitality;
-        poseClock.reset();
         if (hud) console.info(`[people] 主身体 #${people.primary} → #${crowd.primary}`);
       }
       people.primary = crowd.primary;
+      // `null → 第一人` 也走同一条：通常全是初值，但短暂主通道空窗后也不能把旧人的状态带回来。
+      if (crowd.primary !== null) resetPrimaryTemporal(false);
+    } else if (primaryReacquired) {
+      // 同一个 id 从墓地窗口回来：滤波链本身也不能跨那段未知时间插值。
+      resetPrimaryTemporal(true);
     }
     // 身体吃的那一份：两次推理之间插值，推理停了先保持再交出 null（`capture/pose-clock.ts`）。
     // 此前这里直接是 `capture.latest()`：30Hz 的结果被 60–120Hz 的帧连着吃好几次，动作一大身体就一顿一顿地追。

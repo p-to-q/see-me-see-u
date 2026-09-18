@@ -542,6 +542,20 @@ export interface VerticalFollowState {
 
 export const SHOT_REST: ShotState = { progress: 0, velocity: 0, fx: { x: 0, v: 0 }, fy: { x: 0, v: 0 } };
 
+/**
+ * 主身份换人时只清这个人的跟随记忆，不重启正在进行的景别过渡。
+ * 保留当前画面位置避免交接帧跳变；旧人的速度、滤波与纵向基线全部丢掉。
+ */
+export function resetShotIdentity(s: ShotState): ShotState {
+  const finite = (v: number, fallback = 0): number => Number.isFinite(v) ? v : fallback;
+  return {
+    progress: Math.max(0, Math.min(1, finite(s.progress))),
+    velocity: finite(s.velocity),
+    fx: { x: finite(s.fx?.x), v: 0 },
+    fy: { x: finite(s.fy?.x), v: 0 },
+  };
+}
+
 export interface ShotInput {
   shot: Shot;
   /** 上半身相对静止站姿的偏移（米）：x = 头胸相对骨盆的横向（前倾），y = 头的高度差。null = 这一帧没有骨架 */
@@ -956,6 +970,17 @@ export const LATERAL_REST: LateralState = {
   pending: NaN, pendingScale: NaN, pendingFor: 0, deadZone: 0, band: 0,
   lost: 0, side: null, why: 'center',
 };
+
+/**
+ * 换主身份时清掉旧人的画面坐标、尺度与滤波器，但保留此刻已经画出来的根位置。
+ * 下一帧会从同一像素位置向新人的目标平滑移动，不会瞬移到中线。
+ */
+export function resetLateralIdentity(s: LateralState): LateralState {
+  return {
+    ...LATERAL_REST,
+    x: { x: Number.isFinite(s.x?.x) ? s.x.x : 0, v: 0 },
+  };
+}
 
 export interface LateralInput {
   evidence: LateralEvidence | null;

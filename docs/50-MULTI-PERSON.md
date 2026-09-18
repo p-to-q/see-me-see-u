@@ -172,6 +172,7 @@ cost   = dPos + 1.5·dScale + 0.6·dPose
 - 走掉的那个人的身体照常走溶解（它自己的在场状态走 `LEAVING`），**画在伴随身体的位置上**，溶完为止。
 - 弧线、忒修斯、存档：什么都没发生。"有没有人"一直是真的。
 - 滤波器状态（精化器、稳定器、生命力）**跟着人走**：交接时主通道换上接班那个人自己的那一套，不从零热身、不把上一个人的骨长带给他。
+- 主通道的逐帧状态（姿态时钟、整具 / 逐骨运动量、触地、腿部保持、Auto Framing 分类与纵横跟随）**不跟着通道走**：换人时一起断开，防止接班第一帧继承上一人的动作或锚点。镜头景别进度、镜头与身体此刻已经画出来的位置保留，只把速度、滤波和身份基线清掉，因此交接当帧不切镜、不瞬移；下一帧由接班人的证据平滑接管。
 - 所有人都走了：和今天一样 —— 在场判定走 `LEAVING` → `ARC.resetAfter` 之后弧线归零、换种子、身体回到原件（main.ts `arcState.justReset` 那一段，一行不改）。
 
 ---
@@ -366,7 +367,7 @@ draw call：任何人数下 = 一具身体（共用桶，`people-budget.test.ts`
 | `numPoses` 进 worker（开机消息 + 运行中 `options`），`others` 只在多于一个人时出现；主线程降级路径同形 | `capture/pose-worker.ts`、`pose-protocol.ts`、`webcam.ts` 的 `latestAll()` / `setPeople()` | `test/people-flag.test.ts` |
 | 回放上合成的第二、三个人（错开取帧、奇数位镜像、摆到两侧），只给演示与取证 | `capture/people-synth.ts`、`replay.ts` | 同上 |
 | 伴随身体共用主身体的桶：实例接在后面、`instanceColor` 上色、描边外壳只数主身体 | `creature/creature.ts` 的 `setCompanions` / `setOutlineWithCompanions` | `test/people-budget.test.ts`（N 具不开新桶） |
-| 每个人的滤波链、在场、腿、站位弹簧；交接时滤波器跟着人走，上一个主身体就地溶掉 | `creature/companions.ts` | 无头取证（§10） |
+| 每个人的滤波链、在场、腿、站位弹簧；交接时滤波器跟着人走，上一个主身体就地溶掉；主通道的运动 / 触地 / 取景身份状态同时断开 | `creature/companions.ts`、`main.ts`、`core/src/autoframe.ts` | `test/primary-handoff.test.ts`、`test/framing-lateral.test.ts`；无头取证（§10） |
 | 预算：几具放得下、描边留不留 | `creature/people-budget.ts` | `test/people-budget.test.ts` |
 | 主线接线：主身体换成跟踪器的那个人；"有人"看任何一具身体；多具时全景、取景框住最宽的跨度与最高的那一具 | `main.ts`、`stage/stage.ts` 的 `setGroup(width, height)` | `npm run check` |
 | 调速器第 7 级 `people`：只留主身体 | `shell/governor.ts`、`governor-wire.ts` | `test/governor{,-wire}.test.ts` |

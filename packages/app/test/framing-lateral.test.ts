@@ -18,7 +18,7 @@ import { DEFAULT_BOUNDS, fitFrame, lateralRoom, shotCamera } from '../src/stage/
 import { formatFramingRows } from '../src/shell/hud.ts';
 import { createPoseClock } from '../src/capture/pose-clock.ts';
 import {
-  createFramingClassifier, decide, lateralEvidence, smoothstep, stepLateral, stepShot, verticalEvidence,
+  createFramingClassifier, decide, lateralEvidence, resetLateralIdentity, resetShotIdentity, smoothstep, stepLateral, stepShot, verticalEvidence,
   LATERAL_REST, SHOT_REST, type LateralState, type ShotState, type VerticalMeasurement,
 } from '../../core/src/autoframe.ts';
 import { mulberry32 } from '../../core/src/rng.ts';
@@ -130,6 +130,35 @@ test('舞台纵向：world 骨架不变、只改 screen.y，进入中景后仍�
   assert.ok(after.panY > before.panY + 0.01, `screen.y 下移没有进入舞台：${before.panY} → ${after.panY}`);
   assert.ok(after.panY <= AUTOFRAME.followRangeY + 1e-12);
   assert.ok(worst <= AUTOFRAME.maxStep.pan + 1e-9, `纵向移轴一帧挪了 ${worst}m/16ms`);
+});
+
+test('换主身份：镜头与身体留在当前像素，旧人的纵横滤波、速度与锚点全部清掉', () => {
+  let shot: ShotState = SHOT_REST;
+  for (let i = 0; i < 90; i++) {
+    shot = stepShot(shot, {
+      shot: 'upper', offset: { x: 0.24, y: 0 }, vertical: verticalOf(person(SEATED)), reduced: false, hold: false,
+    }, 1 / 60);
+  }
+  assert.ok(shot.vertical && Math.abs(shot.fx.x) > 0, '前提：旧人的跟随状态已经建立');
+  const cameraBefore = shotCamera(DEFAULT_BOUNDS, 1.71, shot, 16 / 9);
+  const cleanShot = resetShotIdentity(shot);
+  const cameraAfter = shotCamera(DEFAULT_BOUNDS, 1.71, cleanShot, 16 / 9);
+  assert.deepEqual(cameraAfter, cameraBefore, '清身份记忆的当帧不该切镜头');
+  assert.equal(cleanShot.fx.v, 0);
+  assert.equal(cleanShot.fy.v, 0);
+  assert.equal(cleanShot.vertical, undefined);
+  assert.equal(cleanShot.fx.f, undefined);
+
+  const lateral = stepLateral(LATERAL_REST, {
+    evidence: lateralEvidence(at(0.82)), room: 1, enabled: true,
+  }, 1);
+  const cleanLateral = resetLateralIdentity(lateral);
+  assert.equal(cleanLateral.x.x, lateral.x.x, '交接帧身体不能瞬移回中线');
+  assert.equal(cleanLateral.x.v, 0);
+  assert.ok(Number.isNaN(cleanLateral.accepted));
+  assert.ok(Number.isNaN(cleanLateral.scale));
+  assert.equal(cleanLateral.centerFilter, undefined);
+  assert.equal(cleanLateral.pendingFor, 0);
 });
 
 test('连续性：任意景别 / hold 序列下，舞台相机的视角、移轴与横向余量每 16ms 的变化不超过上限', () => {

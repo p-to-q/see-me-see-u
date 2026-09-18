@@ -50,7 +50,7 @@ import {
   type BodyBounds,
 } from './framing.ts';
 import {
-  stepShot, SHOT_REST, type Shot, type ShotState, type VerticalMeasurement,
+  resetShotIdentity as resetShotIdentityState, stepShot, SHOT_REST, type Shot, type ShotState, type VerticalMeasurement,
 } from '../../../core/src/autoframe.ts';
 import { applyScene, isSceneId, pickScene, SCENES, type SceneId } from './scenes.ts';
 import { createInkSampler } from './ink-sampler.ts';
@@ -104,6 +104,8 @@ export interface Stage {
    * @param opts.vertical 同一人物的 screen.y 与 world 高度配对；null = 本帧丢失，缺省 = 旧回放没有 screen
    */
   setShot(shot: Shot, opts?: { reduced?: boolean; hold?: boolean; vertical?: VerticalMeasurement | null }): void;
+  /** 换主身份：保留当前镜头位置与景别过渡，只丢掉上一人的跟随速度、滤波与纵向基线。 */
+  resetShotIdentity(): void;
   /**
    * 台上一组身体占多宽、最高的那一具多高（米）。0, 0 = 单人（缺省）。
    * 多人时取景的包围盒至少是这么宽、这么高（docs/50 §4.3），相机距离照旧不动 ——
@@ -925,6 +927,11 @@ export function createStage(opt: StageOptions = {}): Stage {
       shotReduced = !!opts?.reduced;
       shotHold = !!opts?.hold;
       shotVertical = opts?.vertical;
+    },
+
+    resetShotIdentity() {
+      shotState = resetShotIdentityState(shotState);
+      shotVertical = null;
     },
 
     get shot() { return shotState; },

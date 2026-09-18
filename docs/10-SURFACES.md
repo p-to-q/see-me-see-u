@@ -6,7 +6,7 @@
 >
 > 规则：**动完代码就更新这张表。** 证据一栏必须是"跑过的命令"或"截图路径"，不能是"应该可以"。
 
-最后更新：2026-09-17
+最后更新：2026-09-18
 
 <details>
 <summary>改动史（每次动完代码追加一行）</summary>
@@ -23,6 +23,7 @@
 
 | 日期 | 这一版落地了什么 |
 |---|---|
+| 2026-09-18 | 多人主身份交接不再只换精化器 / 稳定器 / 生命力：主通道的姿态时钟、整具与逐骨运动量、触地、腿部保持、Auto Framing 分类、横向身份门和中景纵向基线现在在换 id 时一起断开；同一 id 失联后认回还会重置自己的滤波链。会话弧线、演化、忒修斯与 seed 故意继续。横向根与镜头保留交接前已经画出的当前位置，只清速度、滤波和旧锚点，避免清状态反而造出一帧瞬移。`primary-handoff.test.ts` 跑真实 motion / bone energy / ground 首帧，`framing-lateral.test.ts` 守交接当帧相机像素不变与身份滤波清空；`npm run check`（core 348 / app 668 / parts 247 件、0 错 12 警告）已过；真人多人交接未跑 |
 | 2026-09-17 | 自动人数多了一条真正的浏览器验收入口 `scripts/people/accept.ts`：同一份单人合成 Y4M 用两个临时 Chrome profile 串行跑 worker 与 `?worker=off`，只在主身份稳定后计量，并要求 `idle → probing → idle`、确认上限始终 1、单一主 id、无伴随身体、探测档明显低于常态档且前后恢复、从首次导航起无重载 / exception / 2 秒停帧；帧率通过窗口是常态中位数 ≥21Hz、探测中位数 9.75–18.75Hz 且 ≤ 前后较低者的 80%，不冒充精确 `30 → 15 → 30`。每场写 `worker.json` / `main.json`，参数、runner commit、dirty、Chrome 与宿主负载先写 `invocation.json`；复用输出目录会先清旧结果，四份文件共享 `runId`，浏览器报告另记实际 URL、页面 DOM 与入口脚本 SHA-256，旧 PASS / 旧 dist 都不能混成新证据。CDP 连接与每条命令都有 10 秒上限，中断会先杀 Chrome 并清临时 profile。脚本不再把过载宿主误报成产品回归：当前 14 逻辑核机器实测 load 约 190（每核 13.5），仓库原有平滑度探针也同时从历史 58.5–58.7fps 掉到 27.8–35.3fps，因此新入口会在开 Chrome 前以 exit 2 拒绝这类场次。源码 / CLI 守卫 9 条与 `npm run check`（core 321 / app 632 / parts 247、0 错 12 警告）、build 已过；完整浏览器验收 **Not run：当前宿主负载不合格，须在空闲机器重跑** |
 | 2026-09-17 | 首次摄像头启动现在是一个有交易边界的降级：权限拒绝、无设备、模型 / 首次推理超时，甚至 `create()` / `start()` 违约 reject，都会先清理失败实例再自动转 replay；回放 chunk 也造不出时留一个安静的空采集，舞台能进 idle 而不把错误抛到 boot。`cameraOn`、选择页手势和运行日志全改读实际留下的 kind，回放不会倒过来操作物种环。永远不出帧的 stream 的 `loadeddata` 等待有 `CAPTURE.startTimeout` 上限，`stop()` 同时摘掉 `video.srcObject`，预览不再把死 stream 报成“摄像头开着”。`capture-startup.test.ts` 7 条守正常路、failed、create / start / stop 异常、双失败、warning 语义和正式入口接线；真权限拒绝 / 无设备的浏览器路径本轮未重跑 |
 | 2026-09-17 | 首屏的 `parts.json` 现在只有 `PartLibrary` 一个所有者：展签的物种数和选择页的 themes + 自有件计数都由它加载后分发，不再各自 fetch；普通进场从三次 185,072B JSON 解析收成一次，坏 `?theme=` 深链也从三次收成一次。生产构建经本地计数代理完整走过展签 → 选择 → 舞台，`/parts/parts.json` 实际 1 请求（改前同页 Resource Timing 3 条），58.7fps / 最大间隔 116.7ms；这是一场功能冒烟，不拿短场性能数作优化结论。选择页仍执行原来的“程序化或确有自有件”上场门。索引缺席时这份投影明确标成非权威：内置 `placeholder` 能让无资产开发照常选到一具身体，但不会拿占位名单否掉手写 `?theme=xeno`。`choose-catalog.test.ts` 6 条守零重复请求、正式入口 / 展签接线、坏条目隔离、离线 resolve、占位 / 手动覆盖和 dev themes 旁路 |
