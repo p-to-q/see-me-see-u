@@ -5,7 +5,7 @@
  *  2. 读数：WRN12 同一把尺子。
  *  3. 镜像：侧边按观众自己的左右说，小屏上那条边画在显示的对应一侧。
  *  4. 小屏裁切开不开：减少动态、多人时不开。
- *  5. 舞台相机（`shotCamera`）：任意景别序列下视角与移轴每 16ms 的变化有上限；横向余量随景别连续收窄。
+ *  5. 舞台相机（`shotCamera`）：任意景别序列下视角与双轴移轴每 16ms 的变化有上限；横向余量随景别连续收窄。
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -18,8 +18,8 @@ import { DEFAULT_BOUNDS, fitFrame, lateralRoom, shotCamera } from '../src/stage/
 import { formatFramingRows } from '../src/shell/hud.ts';
 import { createPoseClock } from '../src/capture/pose-clock.ts';
 import {
-  createFramingClassifier, decide, lateralEvidence, smoothstep, stepLateral, stepShot,
-  LATERAL_REST, SHOT_REST, type LateralState, type ShotState,
+  createFramingClassifier, decide, lateralEvidence, smoothstep, stepLateral, stepShot, verticalEvidence,
+  LATERAL_REST, SHOT_REST, type LateralState, type ShotState, type VerticalMeasurement,
 } from '../../core/src/autoframe.ts';
 import { mulberry32 } from '../../core/src/rng.ts';
 import { AUTOFRAME, STAGE } from '../../core/src/tuning.ts';
@@ -27,6 +27,11 @@ import { person, SEATED, WHOLE } from '../../core/test/framing-people.ts';
 import { createSim, maxJumps } from '../dev/framing-sim.ts';
 
 const at = (cx: number) => person({ ...WHOLE, cx });
+const verticalOf = (pose: ReturnType<typeof person>, worldY = 0): VerticalMeasurement => {
+  const evidence = verticalEvidence(pose);
+  assert.ok(evidence);
+  return { ...evidence, worldY, accepted: true, cameraFraming: false };
+};
 
 const MAIN = readFileSync(fileURLToPath(new URL('../src/main.ts', import.meta.url)), 'utf8');
 
@@ -100,6 +105,33 @@ test('舞台相机：t = 0 时视角和等身全景逐字相同；余量在中�
   assert.equal(lateralRoom(1, 9 / 16, 1.0), 0, '竖屏里没有横向余量时不许是负的');
 });
 
+test('舞台纵向：world 骨架不变、只改 screen.y，进入中景后仍产生有限且连续的竖直移轴', () => {
+  const basePose = person(SEATED);
+  const movedPose = person({ ...SEATED, hy: (SEATED.hy ?? 0) + 0.04 });
+  const xyz = (pose: typeof basePose) => pose.world?.map(({ x, y, z }) => [x, y, z]);
+  assert.deepEqual(xyz(basePose), xyz(movedPose), '测试前提：world 几何必须逐字相同');
+  let s: ShotState = SHOT_REST;
+  for (let i = 0; i < 60; i++) {
+    s = stepShot(s, {
+      shot: 'upper', offset: { x: 0, y: 0 }, vertical: verticalOf(basePose), reduced: false, hold: false,
+    }, 1 / 60);
+  }
+  const before = shotCamera(DEFAULT_BOUNDS, 1.71, s, 16 / 9);
+  let worst = 0;
+  for (let i = 0; i < 120; i++) {
+    const prev = shotCamera(DEFAULT_BOUNDS, 1.71, s, 16 / 9);
+    s = stepShot(s, {
+      shot: 'upper', offset: { x: 0, y: 0 }, vertical: verticalOf(movedPose), reduced: false, hold: false,
+    }, 1 / 60);
+    const next = shotCamera(DEFAULT_BOUNDS, 1.71, s, 16 / 9);
+    worst = Math.max(worst, Math.abs(next.panY - prev.panY) * 0.96);
+  }
+  const after = shotCamera(DEFAULT_BOUNDS, 1.71, s, 16 / 9);
+  assert.ok(after.panY > before.panY + 0.01, `screen.y 下移没有进入舞台：${before.panY} → ${after.panY}`);
+  assert.ok(after.panY <= AUTOFRAME.followRangeY + 1e-12);
+  assert.ok(worst <= AUTOFRAME.maxStep.pan + 1e-9, `纵向移轴一帧挪了 ${worst}m/16ms`);
+});
+
 test('连续性：任意景别 / hold 序列下，舞台相机的视角、移轴与横向余量每 16ms 的变化不超过上限', () => {
   const rng = mulberry32(11);
   let s: ShotState = SHOT_REST;
@@ -140,6 +172,10 @@ test('横向接线：30Hz 推理先过姿态时钟，再喂 120Hz 跟随；分�
   assert.match(MAIN, /evidence:\s*lateralEvidence\(raw, sourceAspect\)/,
     '横向跟随还在重复吃采集端 30Hz 的同一份结果');
   assert.doesNotMatch(MAIN, /evidence:\s*lateralEvidence\(live\)/);
+  assert.match(MAIN, /const verticalRaw = verticalEvidence\(raw, sourceAspect\)/,
+    'screen.y 没有从姿态时钟进入纵向证据');
+  assert.match(MAIN, /screenVertical =[^]*worldY[^]*accepted:[^]*stage\.setShot\([^]*vertical:\s*screenVertical/,
+    'screen.y 没有与同名 world 锚点 / 身份门配对后接进舞台');
 
   const run = (renderHz: number): number[] => {
     const clock = createPoseClock();
@@ -173,10 +209,15 @@ test('横向接线：30Hz 推理先过姿态时钟，再喂 120Hz 跟随；分�
   assert.ok(worst < 0.005, `同一 30Hz 输入在 60/120Hz 上横向轨迹漂了 ${worst.toFixed(5)}m`);
 });
 
-test('HUD：横向那一段（偏移 / 余量 / 在做什么 / 出画侧）和"摄像头在取景"都读得出来', () => {
+test('HUD：横向、纵向诊断和"摄像头在取景"都读得出来', () => {
   const c = createFramingClassifier();
   const r = c.update(person(SEATED), 1 / 30, { cameraFraming: true });
-  const [a, b] = formatFramingRows({ reading: r, decision: decide('auto', r), legHold: 0, shot: 0, lateral: { x: -0.42, room: 0.9, why: 'hold-edge', side: 'left' } });
+  const [a, b] = formatFramingRows({
+    reading: r, decision: decide('auto', r), legHold: 0, shot: 0,
+    lateral: { x: -0.42, room: 0.9, why: 'hold-edge', side: 'left' },
+    vertical: { y: 0.03, source: 'screen', anchor: 'pelvis', observed: 0.812 },
+  });
   assert.match(a, /侧 -0\.42\/±0\.90m hold-edge ⚠出画\(left\)/);
+  assert.match(a, /纵 \+0\.03m screen\/pelvis y0\.812/);
   assert.match(b, /摄像头在取景/);
 });

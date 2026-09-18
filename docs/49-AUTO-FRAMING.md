@@ -373,6 +373,13 @@ URL 都是 `/?demo=1&debug=1&theme=porcelain&seed=7&theseus=off&arc=900&nopost=1
 | 上半身中景 + 左右晃 | 余量按中景画面算（窄得多），景别推近的那一秒里余量连续收窄，偏移被连续地夹回来 |
 | 镜像方向 | 画面 x 是摄像头看到的原图（没有镜像）：观众往自己右边走 → 画面 x 变小 → 越过的是**画面左边**，对观众来说是**右边**。侧边一律按观众自己的左右（= 镜像显示上的左右）说；`?mirror=0` 时细边画在显示上的另一侧 |
 
+**二补、纵向整体位置也是画面信号。** world 骨架会按 docs/04 落地；同一副骨架在摄像头画面里整体上移 / 下移，
+落地后可能逐字相同。因此中景把可信 pelvis（近处被裁时退到 chest）的 `screen.y` 与 human skeleton 的**同名 world 关节**配对：
+进入中景时两边同时立基线，之后用 screen 位移扣掉 world 同步位移，剩下的才是落地丢掉的整体画面移动。这样蹲起不会被 world 动作 + screen 跟随算两次。
+残差按躯干尺度折成米，再走同一条临界阻尼 / 限速跟随。画面 y 向下为正，映到舞台相机中心 +Y 后身体在输出里同样向下，仍是镜子的方向。
+丢失先冻结，1 秒后归中；坏光无限期冻结；单帧跳 20% 画面高、锚点 / 摄像头取景状态改变、尺度跨过身份门都会重立基线，不把换人或坐标系切换读成运镜。
+全景、多人和减少动态不跟；没有 `screen` 的旧回放保留原来的 world-relative fallback。
+
 **三、摄像头自带取景（S6）。** `?camframing=auto|on|off`，默认 `auto`（**不替谁打开**：§1.3 的结论是它对准脸、会裁腿）。
 
 - `on`：`getCapabilities().faceFraming` 里有 `true` 时 `applyConstraints({ faceFraming: true })`；`off`：有 `false` 时请求 `false`（撤掉系统级默认打开，前提是浏览器把这个开关交出来）；`auto`：什么都不请求，只读 `getSettings().faceFraming`。`pan` / `tilt` / `zoom` 只读能力，不请求（请求要多一次权限）。
@@ -389,6 +396,7 @@ URL 都是 `/?demo=1&debug=1&theme=porcelain&seed=7&theseus=off&arc=900&nopost=1
 
 | 做什么 | 在哪 | 测试 |
 |---|---|---|
+| 中景把可信 pelvis/chest 的 `screen.y` 与同名 world 高度配对：相对基线、抵消蹲起、画面空间去抖 / 死区、按躯干尺度折米；坏光冻结、长丢失归中、身份大跳重立基线；工作台显示纵向移轴 | `autoframe.ts` 的 `verticalEvidence` / `stepShot`；`main.ts → stage.setShot`；`framing-sim.ts` | `autoframe.test.ts` 的同 world / screen+world 抵消 / 小位移 / 丢失 / 换人 / 旧回放；`framing-lateral.test.ts` 的舞台接线与连续性 |
 | 景别保留速度状态，目标反向时先刹再回；速度 / 位置限幅并在视觉端点精确吸附；`upper → stepping-back` 的连续纠错证据不再等上一次切换的冷却 | `autoframe.ts` 的 `stepShot` / 分类器；`tuning.ts` 的 `shotOmega` / `shotMaxSpeed` / 收口门限 | `autoframe.test.ts` 的反向与刚进上半身退后反证；`autoframe-continuity.test.ts` 的速度变化守卫与 15/30/60/120Hz 对照 |
 | 降级 hold 不再切景别（只冻结跟随）；小屏告警 0.2 秒**限速**退回整幅 | `autoframe.ts` 的 `stepShot` / `stepCrop` | `core/test/autoframe-continuity.test.ts`（随机决策序列，每 16ms 上限）；`autoframe.test.ts` 两条改写 |
 | 控制器的四个新参数：稳定延迟、限速、前馈、去抖 | `stepFollow`；`filter.ts` 的 `oneEuroStep` | `autoframe-controller.test.ts` 4 条 |
@@ -501,8 +509,8 @@ docs/13 §6 记的是"标签页 → 选择页 → 舞台，100 个请求 2.06 MB
 
 ### 6.8 仍然没做的、可能还不对的
 
-1. **舞台仍没有消费画面空间的纵向整体位移。** `screen.y` 只到分类与小屏；舞台纵向跟的是 world 骨架内部的头胸相对位置。同一副 world 骨架整体在画面里上移 / 下移，舞台输出仍相同；近距离轻微上下移动因此可能没有反馈。下一步应另做一条 screen-space 纵向控制器，不能和本次景别轨迹混改。
-2. **没接过真人摄像头。** 全部证据来自合成的"画面里的人"（node 与无头 Chrome 工作台）。`faceFraming` 在稳定版 Chrome 上拿不到，`on` / `off` 只在假 track 上跑过。
+1. **近距离上半身可能在进分类器之前就被整体分数判成“没人”。** `overallScore()` 平均 33 点可见度：头肩 13 点为 0.95、画外下肢 20 点为 0.1 时只有 0.435，低于 `CAPTURE.minScore = 0.5`。presence、分类器和小屏目前共用这个总分；不能靠降低总门限修，应把“有可靠躯干锚点”与“全身质量”拆开。
+2. **没接过真人摄像头。** 纵向、横向与模式证据来自合成的"画面里的人"；真录制又没有 `screen`。`faceFraming` 在稳定版 Chrome 上拿不到，`on` / `off` 只在假 track 上跑过。
 3. **横向折算用"一个躯干长 = 0.5 米"**（和 docs/50 同一个数），离得远近、弯腰、侧身都会让尺度偏；死区吃掉小误差，大误差没在现场量过。
 4. **横向前馈停下时最多冲过 0.1 米**，和"不过冲"有张力。现场如果读成"身体比我多走了一步"，把 `lateralLead` 调成 0。
 5. **小屏的 `title` 看不见**：这一块指针穿透（`pointer-events: none`），悬停不出字。它只给无障碍与检查用；看得见的说明在 HUD。

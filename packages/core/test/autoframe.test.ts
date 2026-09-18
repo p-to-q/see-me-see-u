@@ -10,8 +10,8 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import {
-  createFramingClassifier, decide, frameEvidence, stepCrop, stepFollow, stepShot,
-  CROP_FULL, SHOT_REST, type ClassifierOptions, type FramingMode, type FramingWhy, type ShotState,
+  createFramingClassifier, decide, frameEvidence, stepCrop, stepFollow, stepShot, verticalEvidence,
+  CROP_FULL, SHOT_REST, type ClassifierOptions, type FramingMode, type FramingWhy, type ShotState, type VerticalMeasurement,
 } from '../src/autoframe.ts';
 import { AUTOFRAME } from '../src/tuning.ts';
 import type { RawPose } from '../src/types.ts';
@@ -19,6 +19,17 @@ import { between, person, SEATED, STOOD_UP_CLOSE, WHOLE, type PersonSpec } from 
 
 const HZ = 30;
 const DT = 1 / HZ;
+
+const verticalOf = (
+  pose: RawPose,
+  worldY = 0,
+  accepted = true,
+  cameraFraming = false,
+): VerticalMeasurement => {
+  const evidence = verticalEvidence(pose);
+  assert.ok(evidence, '测试姿态应有纵向 screen 证据');
+  return { ...evidence, worldY, accepted, cameraFraming };
+};
 
 type Seg = { seconds: number; pose: (u: number, frame: number) => RawPose | null };
 type Switch = { t: number; mode: FramingMode; why: FramingWhy };
@@ -58,6 +69,20 @@ test('证据：坐在笔记本前 = 头肩在、腿不在；全身 = 四个膝�
   assert.equal(cut.upper, false, `头被切了却判成上半身在画里（画外头肩点 ${cut.upperOut}）`);
   assert.equal(frameEvidence(null), null);
   assert.equal(frameEvidence(person({ ...WHOLE, score: 0.3 })), null, '没过 minScore 就是没有人');
+});
+
+test('纵向证据：同一副 world 骨架只在画面里整体下移，肩线读数跟着变；旧回放明确返回 undefined', () => {
+  const a = person(SEATED);
+  const b = person({ ...SEATED, hy: (SEATED.hy ?? 0) + 0.03 });
+  assert.deepEqual(a.world, b.world, '测试前提：world 必须逐字相同');
+  const ay = verticalEvidence(a)!;
+  const by = verticalEvidence(b)!;
+  assert.ok(Math.abs((by?.y ?? 0) - (ay?.y ?? 0) - 0.03) < 1e-12);
+  assert.equal(ay.anchor, 'pelvis');
+  assert.equal(verticalEvidence(person({ ...SEATED, hy: 1.2 }))?.anchor, 'chest', '近处胯裁掉后没有退到肩线');
+  assert.ok(verticalEvidence(person({ ...SEATED, cx: 1.1, visOut: 0.95 })), '横向出界不该抹掉仍在画内的纵向证据');
+  assert.equal(verticalEvidence({ ...a, screen: undefined }), undefined, '没有 screen 的回放不能编一个纵向位置');
+  assert.equal(verticalEvidence(null), null);
 });
 
 // ── 典型场景 ─────────────────────────────────────────────────────────────────
@@ -324,6 +349,77 @@ test('景别：坏状态、坏 dt 与过大旧速度都被净化，永远留在�
   const limited = stepShot({ progress: 0.5, velocity: 1e6, fx: { x: 0, v: 0 }, fy: { x: 0, v: 0 } }, input, DT);
   assert.ok(Number.isFinite(limited.progress) && limited.progress >= 0 && limited.progress <= 1);
   assert.ok(Number.isFinite(limited.velocity) && Math.abs(limited.velocity) <= AUTOFRAME.shotMaxSpeed + 1e-12);
+});
+
+test('中景纵向：进入时立零点；近处肩线移动 1.5% 画面高也有连续反馈', () => {
+  const basePose = person(SEATED);
+  const movedPose = person({ ...SEATED, hy: (SEATED.hy ?? 0) + 0.015 });
+  const input = (pose: RawPose) => ({
+    shot: 'upper' as const, offset: { x: 0, y: 0 }, vertical: verticalOf(pose), reduced: false, hold: false,
+  });
+  let s = run(SHOT_REST, 60, input(basePose));
+  assert.ok(Math.abs(s.fy.x) < 1e-9, `入场位置被当成动作：${s.fy.x}`);
+  const before = s.fy.x;
+  s = run(s, 60, input(movedPose));
+  assert.ok(s.fy.x > before + 0.001, `肩线下移 1.5% 没有反馈：${s.fy.x}`);
+  assert.ok(s.fy.x <= AUTOFRAME.followRangeY + 1e-12);
+});
+
+test('中景纵向：同一锚点的 screen 与 world 同步移动时互相抵消，蹲起不被算两次', () => {
+  const pose = person(SEATED);
+  const evidence = verticalEvidence(pose)!;
+  let s = run(SHOT_REST, 60, {
+    shot: 'upper', offset: { x: 0, y: 0 }, vertical: { ...evidence, worldY: 1, accepted: true, cameraFraming: false }, reduced: false, hold: false,
+  });
+  const screenDelta = 0.04;
+  const worldDelta = -screenDelta * (0.5 / evidence.scale);
+  s = run(s, 90, {
+    shot: 'upper', offset: { x: 0, y: worldDelta },
+    vertical: { ...evidence, y: evidence.y + screenDelta, worldY: 1 + worldDelta, accepted: true, cameraFraming: false },
+    reduced: false, hold: false,
+  });
+  assert.ok(Math.abs(s.fy.x) < 0.003, `screen + world 同一个蹲起被重复跟了 ${s.fy.x}m`);
+});
+
+test('中景纵向：坏光 / 丢失先冻结再归中；大跳当换人重立基线，不追过去', () => {
+  const input = (pose: RawPose | null) => ({
+    shot: 'upper' as const, offset: { x: 0, y: 0 }, vertical: pose ? verticalOf(pose) : null, reduced: false, hold: false,
+  });
+  let s = run(SHOT_REST, 45, input(person(SEATED)));
+  s = run(s, 60, input(person({ ...SEATED, hy: (SEATED.hy ?? 0) + 0.04 })));
+  const shifted = s.fy.x;
+  assert.ok(shifted > 0.01, `测试前提：纵向没有移开 ${shifted}`);
+
+  const dim = verticalOf(person({ ...SEATED, hy: (SEATED.hy ?? 0) + 0.04 }));
+  let heldInBadLight = s;
+  for (let i = 0; i < 90; i++) heldInBadLight = stepShot(heldInBadLight, {
+    shot: 'upper', offset: { x: 0, y: 0 }, vertical: { ...dim, quality: false }, reduced: false, hold: false,
+  }, DT);
+  assert.ok(Math.abs(heldInBadLight.fy.x - shifted) < 0.005, `坏光三秒却漂了：${shifted} → ${heldInBadLight.fy.x}`);
+  s = heldInBadLight;
+
+  const oneLost = stepShot(s, input(null), DT);
+  assert.ok(Math.abs(oneLost.fy.x - shifted) < 0.005, '短丢失没有冻结在原处');
+  const centered = run(oneLost, Math.ceil(AUTOFRAME.verticalHoldSeconds / DT) + 60, input(null));
+  assert.ok(Math.abs(centered.fy.x) < Math.abs(shifted) * 0.25, `长丢失没有归中：${centered.fy.x}`);
+
+  let changed = run(SHOT_REST, 45, input(person(SEATED)));
+  const jumpedPose = person({ ...SEATED, hy: (SEATED.hy ?? 0) + AUTOFRAME.verticalJump + 0.05 });
+  changed = stepShot(changed, input(jumpedPose), DT);
+  assert.ok(Math.abs(changed.fy.x) < 0.002, `换人式大跳被镜头追了：${changed.fy.x}`);
+  assert.ok(Math.abs((changed.vertical?.screenAnchor ?? 0) - verticalEvidence(jumpedPose)!.y) < 1e-12, '没有在新锚点重立基线');
+});
+
+test('中景纵向：旧回放继续吃 world fallback；减少动态明确清空 screen-space 跟随', () => {
+  const replay = run(SHOT_REST, 90, {
+    shot: 'upper', offset: { x: 0, y: 0.06 }, vertical: undefined, reduced: false, hold: false,
+  });
+  assert.ok(replay.fy.x > 0.001, '没有 screen 的旧回放丢了既有 world 跟随');
+  const reduced = run(SHOT_REST, 30, {
+    shot: 'upper', offset: { x: 0, y: 0 }, vertical: verticalOf(person({ ...SEATED, hy: 0.99 })), reduced: true, hold: false,
+  });
+  assert.equal(reduced.fy.x, 0);
+  assert.equal(reduced.vertical, undefined);
 });
 
 test('小屏裁切：任何告警 0.2 秒内限速退回整幅（不是当帧）；正常时放大到上限、窗口永远不伸出画面', () => {

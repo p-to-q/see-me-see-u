@@ -1277,6 +1277,21 @@ export const AUTOFRAME = {
   followRangeX: 0.12,
   followRangeY: 0.08,
 
+  // ── 中景的画面空间纵向跟随 ──
+  /**
+   * pelvis/chest 相对进入中景时的位置，先扣掉同名 world 关节的同步移动，再在画面单位里过死区、折成米。
+   * 初值与中景横向同一量级：近处小幅上下移动能进来，亚像素抖动进不来；真人摄像头验收后只调这里。
+   */
+  verticalDeadZoneImage: 0.003,
+  verticalBandImage: 0.02,
+  /** 画面锚点与躯干尺度分别去抖；先滤再除尺度，避免远处两份噪声相乘。 */
+  verticalCenterJitter: { minCutoff: 1.2, beta: 1.5 },
+  verticalScaleJitter: { minCutoff: 0.3, beta: 0 },
+  /** 单帧纵向锚点跳过 20% 画面高或尺度跨过身份门：当成换人，重立基线而不是运镜追过去。 */
+  verticalJump: 0.2,
+  /** 纵向证据短丢失先冻结；超过一秒平滑归中。 */
+  verticalHoldSeconds: 1.0,
+
   // ── 左上角小屏的数字裁切 ──
   /** 最大放大倍数。小屏上再大就糊，而且"整个画框"这件事会看不见 */
   previewZoom: 1.3,

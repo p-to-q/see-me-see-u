@@ -61,7 +61,8 @@ function createOldSim() {
       previousProgress = shot.progress;
       trace.push({
         t, dt, mode: r.mode, why: r.why, shot: d.shot, progress: shot.progress, velocity, eased: mix,
-        fov: (2 * Math.atan((h / 2) / dist) * 180) / Math.PI, panX: shot.fx.x * mix, room: 0, legHold: af.smoothstep(legHold),
+        fov: (2 * Math.atan((h / 2) / dist) * 180) / Math.PI,
+        panX: shot.fx.x * mix, panY: shot.fy.x * mix, room: 0, legHold: af.smoothstep(legHold),
         see: { state: seen.state, reason: seen.reason, side: null },
         crop: { zoom: crop.zoom, cx: crop.cx.x, cy: crop.cy.x, active: d.upperIsIntended, snap, tx: null, ty: null },
         lateral: { x: 0, target: 0, deadZone: 0, why: 'none', side: null },

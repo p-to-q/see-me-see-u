@@ -13,8 +13,8 @@ import { buildSkeleton, mediapipeToWorld } from '../../core/src/skeleton.ts';
 import { createStabilizer } from '../../core/src/stabilize.ts';
 import { clampFold, createRefiner } from '../../core/src/refine.ts';
 import {
-  createFramingClassifier, decide, lateralEvidence, stepLateral, stepToward, LATERAL_REST,
-  type FramingDecision, type FramingPolicy, type LateralState,
+  createFramingClassifier, decide, lateralEvidence, stepLateral, stepToward, verticalEvidence, LATERAL_REST,
+  type FramingDecision, type FramingPolicy, type LateralState, type VerticalMeasurement,
 } from '../../core/src/autoframe.ts';
 import { holdLegs } from '../../core/src/leghold.ts';
 import { createVitality } from '../../core/src/vitality.ts';
@@ -1170,6 +1170,8 @@ async function boot(): Promise<void> {
     // 这里若也吃原话，30Hz 的同一结果会在 120Hz 屏上变成「三帧不动、下一帧跳一下」。
     // 夹在舞台此刻的横向余量里（随景别连续变化）。
     // 台上有伴随身体时让位 —— 站位归 lineup；两个都是弹簧，加起来是连续的
+    const verticalRaw = verticalEvidence(raw, sourceAspect);
+    let screenVertical: VerticalMeasurement | null | undefined = verticalRaw === undefined ? undefined : null;
     lateral = stepLateral(lateral, {
       evidence: lateralEvidence(raw, sourceAspect), room: stage.lateralRoom, enabled: !crowdOut?.companions.length,
       aspect: sourceAspect,
@@ -1191,6 +1193,14 @@ async function boot(): Promise<void> {
       // 上半身模式：腿换成站在地上的站姿，不被画外的腿点驱动（`core/src/leghold.ts`）。
       // 放在运动特征**之前**：站着不动的腿不该贡献动能。权重 0 时原样返回同一个对象
       const humanSk = holdLegs(trackedSk, legHold);
+      if (verticalRaw) {
+        const worldY = humanSk.joints[verticalRaw.anchor]?.[1];
+        screenVertical = typeof worldY === 'number' && Number.isFinite(worldY) ? {
+          ...verticalRaw, worldY,
+          // 横向身份门发现 MediaPipe 在两个人之间跳时，纵向不能抢先接受另一副身体。
+          accepted: lateral.why !== 'hold-jump', cameraFraming: camFraming,
+        } : null;
+      }
       lastFeatures = motion.update(humanSk, dt);
       // 逐骨能量也算在**人的**骨架上，和 `motion` 同一条理由：
       // docs/44 §3 那条机制说的是"他刚才在用哪根肢体"，不是"那具身体哪根动得多"。
@@ -1386,6 +1396,8 @@ async function boot(): Promise<void> {
       // 调速器放到「后期」那一级（docs/48 §4 的阶梯第 5 级）才冻结跟随；景别仍照常缓动。
       // 前四级（墨色采样、换件延后、推理降频、DPR）连跟随也不冻结
       hold: loop.stats.degraded !== null || loop.stats.throttled || governor.sheds('post'),
+      // world 骨架会被落地，整体 screen.y 因此必须作为独立信号进入中景；多人 / 全景在 stepShot 内归中。
+      vertical: screenVertical,
     });
     stage.update(p, lastFeatures, dt);
     maybeStartBucketWarm();
@@ -1464,6 +1476,12 @@ async function boot(): Promise<void> {
         framing: {
           reading: framer.current, decision: framing, legHold, shot: stage.shot.progress,
           lateral: { x: lateral.x.x, room: stage.lateralRoom, why: lateral.why, side: lateral.side },
+          vertical: {
+            y: stage.shot.fy.x,
+            source: screenVertical === undefined ? 'world' : screenVertical ? 'screen' : 'lost',
+            anchor: stage.shot.vertical?.anchor ?? null,
+            observed: stage.shot.vertical?.centerFilter.x ?? null,
+          },
         },
         // 多人（docs/50）：每条轨迹一行 —— id、主 / 伴 / 无、在场多久、配对代价
         // `cap` 是**确认了的**上限（`peopleCap`），不是开机那个 `flags.people`——探测开着时它会在运行中变

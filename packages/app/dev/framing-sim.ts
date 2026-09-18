@@ -7,6 +7,7 @@
  */
 import {
   createFramingClassifier, decide, imageToStageX, lateralEvidence, stepCrop, stepLateral, stepShot, stepToward,
+  verticalEvidence,
   cropTarget, smoothstep, CROP_FULL, LATERAL_REST, SHOT_REST,
   type Crop, type FramingMode, type FramingPolicy, type FramingWhy, type LateralState, type LateralWhy, type Shot, type ShotState,
 } from '../../core/src/autoframe.ts';
@@ -40,6 +41,7 @@ export interface SimFrame {
   /** 舞台相机：竖直视角（度）、移轴（米）、横向余量（米） */
   fov: number;
   panX: number;
+  panY: number;
   room: number;
   legHold: number;
   see: { state: SeeState; reason: SeeReason; side: string | null };
@@ -82,15 +84,25 @@ export function createSim(opts: { kiosk?: boolean; keep?: number } = {}): Sim {
       const lean = s ? imageToStageX((s[11].x + s[12].x) / 2, 0.275, aspect) - imageToStageX((s[23].x + s[24].x) / 2, 0.275, aspect) : 0;
       // 舞台用上一帧的余量（`stage.lateralRoom`），这里同样
       const before = shotCamera(DEFAULT_BOUNDS, 1.71, shot, aspect);
-      lateral = stepLateral(lateral, { evidence: lateralEvidence(input.pose), room: before.room, enabled: true }, dt);
+      lateral = stepLateral(lateral, { evidence: lateralEvidence(input.pose, aspect), room: before.room, enabled: true, aspect }, dt);
+      const verticalRaw = verticalEvidence(input.pose, aspect);
+      const vertical = verticalRaw ? {
+        ...verticalRaw, worldY: 0, accepted: lateral.why !== 'hold-jump', cameraFraming: cam,
+      } : verticalRaw;
       const drift = 0;
-      shot = stepShot(shot, { shot: d.shot === 'upper' && drift <= 0 ? 'upper' : 'full', offset: input.pose ? { x: lean, y: 0 } : null, reduced: input.reduced ?? false, hold: input.hold ?? false }, dt);
+      shot = stepShot(shot, {
+        shot: d.shot === 'upper' && drift <= 0 ? 'upper' : 'full',
+        offset: input.pose ? { x: lean, y: 0 } : null,
+        vertical,
+        reduced: input.reduced ?? false,
+        hold: input.hold ?? false,
+      }, dt);
       const c = shotCamera(DEFAULT_BOUNDS, 1.71, shot, aspect);
       const target = active && !snap ? cropTarget(s, AUTOFRAME.previewZoom) : null;
       const frame: SimFrame = {
         t, dt, mode: r.mode, why: r.why, shot: d.shot,
         progress: shot.progress, velocity: shot.velocity, eased: smoothstep(shot.progress),
-        fov: c.fov, panX: c.panX, room: c.room, legHold: smoothstep(legHold),
+        fov: c.fov, panX: c.panX, panY: c.panY, room: c.room, legHold: smoothstep(legHold),
         see: { state: seen.state, reason: seen.reason, side: seen.side ?? null },
         crop: { zoom: crop.zoom, cx: crop.cx.x, cy: crop.cy.x, active, snap, tx: target?.x ?? null, ty: target?.y ?? null },
         lateral: { x: lateral.x.x, target: lateral.target, deadZone: lateral.deadZone, why: lateral.why, side: lateral.side },
@@ -125,7 +137,7 @@ export function maxJumps(trace: readonly SimFrame[]): Jumps {
     put('legHold', Math.abs(b.legHold - a.legHold) * k, b.t);
     put('lateral', Math.abs(b.lateral.x - a.lateral.x) * k, b.t);
     put('fovDeg', Math.abs(b.fov - a.fov) * k, b.t);
-    put('pan', Math.abs(b.panX - a.panX) * k, b.t);
+    put('pan', Math.hypot(b.panX - a.panX, b.panY - a.panY) * k, b.t);
   }
   return out;
 }

@@ -97,6 +97,8 @@ export interface FramingHud {
   shot: number;
   /** 身体的横向根偏移（docs/49 §6.3 二）：此刻的偏移、余量、在做什么、哪一侧出了画 */
   lateral?: { x: number; room: number; why: string; side: string | null };
+  /** 中景纵向移轴：输出、信号来源、锚点与当前 screen.y。给真人摄像头调参，不给观众。 */
+  vertical?: { y: number; source: 'screen' | 'world' | 'lost'; anchor: 'pelvis' | 'chest' | null; observed: number | null };
 }
 
 /**
@@ -112,7 +114,9 @@ export function formatFramingRows(f: FramingHud): [string, string] {
   const forced = f.decision.policy === 'auto' ? '' : `  [策略 ${f.decision.policy}]`;
   const l = f.lateral;
   const side = l ? ` · 侧 ${l.x >= 0 ? '+' : ''}${l.x.toFixed(2)}/±${l.room.toFixed(2)}m ${l.why}${l.side ? ` ⚠出画(${l.side})` : ''}` : '';
-  const head = `${r.mode} ← ${r.why} ${r.inMode.toFixed(1)}s · 景 ${Math.round(f.shot * 100)}% · 腿 ${f.legHold.toFixed(2)}${side}${forced}`;
+  const v = f.vertical;
+  const vertical = v ? ` · 纵 ${v.y >= 0 ? '+' : ''}${v.y.toFixed(2)}m ${v.source}${v.anchor ? `/${v.anchor}` : ''}${v.observed === null ? '' : ` y${v.observed.toFixed(3)}`}` : '';
+  const head = `${r.mode} ← ${r.why} ${r.inMode.toFixed(1)}s · 景 ${Math.round(f.shot * 100)}% · 腿 ${f.legHold.toFixed(2)}${side}${vertical}${forced}`;
   const e = r.evidence;
   if (!e) return [head, '无人'];
   const trend = Number.isFinite(r.trend) ? r.trend.toFixed(2) : '—';

@@ -49,7 +49,9 @@ import {
   boundsOfPlan, boundsOfSkeleton, contactPoints, lerpBounds, shotCamera, DEFAULT_BOUNDS,
   type BodyBounds,
 } from './framing.ts';
-import { stepShot, SHOT_REST, type Shot, type ShotState } from '../../../core/src/autoframe.ts';
+import {
+  stepShot, SHOT_REST, type Shot, type ShotState, type VerticalMeasurement,
+} from '../../../core/src/autoframe.ts';
 import { applyScene, isSceneId, pickScene, SCENES, type SceneId } from './scenes.ts';
 import { createInkSampler } from './ink-sampler.ts';
 
@@ -99,8 +101,9 @@ export interface Stage {
    * 走多久、跟不跟随由舞台自己按时间推（`core/src/autoframe.ts` 的 `stepShot`），不靠 CSS 或动画事件。
    * @param opts.reduced `prefers-reduced-motion`：0.15 秒到位，中景不跟随
    * @param opts.hold 帧循环在降级：跟随冻结，景别照常按时间走完（docs/49 §6.3：不再直接切）
+   * @param opts.vertical 同一人物的 screen.y 与 world 高度配对；null = 本帧丢失，缺省 = 旧回放没有 screen
    */
-  setShot(shot: Shot, opts?: { reduced?: boolean; hold?: boolean }): void;
+  setShot(shot: Shot, opts?: { reduced?: boolean; hold?: boolean; vertical?: VerticalMeasurement | null }): void;
   /**
    * 台上一组身体占多宽、最高的那一具多高（米）。0, 0 = 单人（缺省）。
    * 多人时取景的包围盒至少是这么宽、这么高（docs/50 §4.3），相机距离照旧不动 ——
@@ -467,6 +470,7 @@ export function createStage(opt: StageOptions = {}): Stage {
   let shotWant: Shot = 'full';
   let shotReduced = false;
   let shotHold = false;
+  let shotVertical: VerticalMeasurement | null | undefined;
   let shotState: ShotState = SHOT_REST;
   /** 中景按身高取景；身高来自骨架（上半身模式下是站姿身高，`core/src/leghold.ts`），带 framingTau 缓动 */
   let bodyH = DEFAULT_BOUNDS.height + 0.14;
@@ -807,7 +811,9 @@ export function createStage(opt: StageOptions = {}): Stage {
       // ── 景别过渡与中景跟随（时间驱动；静止时一帧都不重算）──
       {
         bodyH += (bodyHTarget - bodyH) * (1 - Math.exp(-step / STAGE.framingTau));
-        const next = stepShot(shotState, { shot: shotWant, offset: shotOffset, reduced: shotReduced, hold: shotHold }, step);
+        const next = stepShot(shotState, {
+          shot: shotWant, offset: shotOffset, vertical: shotVertical, reduced: shotReduced, hold: shotHold,
+        }, step);
         const moved = Math.abs(next.progress - shotState.progress) > 1e-6
           || Math.abs(next.fx.x - shotState.fx.x) > 1e-6 || Math.abs(next.fy.x - shotState.fy.x) > 1e-6
           || (next.progress > 0 && Math.abs(bodyHTarget - bodyH) > 1e-4)
@@ -918,6 +924,7 @@ export function createStage(opt: StageOptions = {}): Stage {
       shotWant = shot === 'upper' ? 'upper' : 'full';
       shotReduced = !!opts?.reduced;
       shotHold = !!opts?.hold;
+      shotVertical = opts?.vertical;
     },
 
     get shot() { return shotState; },

@@ -297,6 +297,8 @@ export interface ShotCamera {
   fov: number;
   /** 中景跟随的移轴平移（米） */
   panX: number;
+  /** 中景跟随的纵向移轴（米）；正 = 画面中心上移、身体在输出里下移 */
+  panY: number;
   /** 画面竖直中心（米，含场景的构图票） */
   centerY: number;
   /** 取景平面离相机多远（米） */
@@ -314,6 +316,7 @@ export function shotCamera(bounds: BodyBounds, bodyH: number, shot: ShotState, a
   const mix = smoothstep(shot.progress);
   const fit = blendFit(fitFrame(bounds), upperFit(bodyH, bounds.width), mix);
   const panX = shot.fx.x * mix;
+  const panY = shot.fy.x * mix;
   let h = fit.frameHeight;
   if (h * aspect < fit.frameWidth) h = fit.frameWidth / aspect;   // 太窄了就往高了框
   // 取景平面放在身体的**近面**，不是身体中心（四足的腿跑出画面外那个 bug 的修法，见 stage.ts）
@@ -322,7 +325,8 @@ export function shotCamera(bounds: BodyBounds, bodyH: number, shot: ShotState, a
     h,
     fov: (2 * Math.atan((h / 2) / dist) * 180) / Math.PI,
     panX,
-    centerY: fit.centerY + shot.fy.x * mix + bounds.height * frameLift,
+    panY,
+    centerY: fit.centerY + panY + bounds.height * frameLift,
     dist,
     aimY: fit.aimY,
     room: lateralRoom(h, aspect, bounds.width, panX),

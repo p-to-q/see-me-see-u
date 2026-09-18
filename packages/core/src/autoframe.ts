@@ -9,7 +9,9 @@
  *  2. **一个控制器** `stepFollow()`：目标去抖（One Euro）→ 速度前馈（有上限）→ 夹住范围 → 稳定延迟 →
  *     死区 + 二次过渡带 → 帧率无关的临界阻尼弹簧 → 限速。舞台中景跟随、小屏裁切、身体的横向根偏移**共用这一个**，
  *     各自只是参数不同（docs/49 §6.5 那张对照表里每一条"采纳"都落在这个函数的一个参数上，不是一个特例）。
- *  3. **景别** `stepShot()`：全景 ↔ 中景按时间走完，任何状态下都不一帧切（减少动态是写明的例外）。
+ *  3. **景别** `stepShot()`：全景 ↔ 中景按时间走完；中景另把 pelvis/chest 的 `screen.y` 与同名 world 高度配对，
+ *     让整体上下移动不会被落地抹掉，同时不把蹲起重复计算。
+ *     world 骨架的落地步骤抹掉。任何状态下都不一帧切（减少动态是写明的例外）。
  *  4. **小屏裁切** `stepCrop()`：只在上半身模式、一切正常时放大跟随；任何告警 0.2 秒内限速退回整幅（诚实规则）。
  *  5. **横向** `lateralEvidence()` / `stepLateral()`：躯干在画面里的横坐标 → 身体的有界横向根偏移；出了左右边时报哪一侧。
  *
@@ -520,6 +522,20 @@ export interface ShotState {
   velocity: number;
   fx: Follow;
   fy: Follow;
+  /** screen-space 纵向基线与去抖状态。旧回放没有 screen 时不建立，继续走 world fallback。 */
+  vertical?: VerticalFollowState;
+}
+
+export interface VerticalFollowState {
+  /** 刚进入中景 / 换人后的同一锚点；screen 与 world 的相对变化相减，避免把蹲起算两次。 */
+  screenAnchor: number;
+  worldAnchor: number;
+  anchor: VerticalEvidence['anchor'];
+  cameraFraming: boolean;
+  /** 纵向锚点不可信多久了。短丢失冻结，超过门限平滑归中。 */
+  lost: number;
+  centerFilter: OneEuroState;
+  scaleFilter: OneEuroState;
 }
 
 export const SHOT_REST: ShotState = { progress: 0, velocity: 0, fx: { x: 0, v: 0 }, fy: { x: 0, v: 0 } };
@@ -528,6 +544,11 @@ export interface ShotInput {
   shot: Shot;
   /** 上半身相对静止站姿的偏移（米）：x = 头胸相对骨盆的横向（前倾），y = 头的高度差。null = 这一帧没有骨架 */
   offset: { x: number; y: number } | null;
+  /**
+   * pelvis/chest 的 screen-space 纵向证据与同名 world 高度。`undefined` = 输入没有 screen（旧回放，沿用 offset.y）；
+   * `null` = 本帧证据丢失（先冻结再归中）。
+   */
+  vertical?: VerticalMeasurement | null;
   /** `prefers-reduced-motion` */
   reduced: boolean;
   /**
@@ -536,6 +557,83 @@ export interface ShotInput {
    * 一段按时间推的 1 秒运镜在低帧率下是几步大一点的台阶，一帧切才是真的跳。
    */
   hold: boolean;
+}
+
+/** screen 证据与**同一具 human skeleton、同名关节**的 world 高度配对后的帧输入。 */
+export interface VerticalMeasurement extends VerticalEvidence {
+  worldY: number;
+  /** false = 横向身份门还在 hold-jump；纵向不得先接受另一个人。 */
+  accepted: boolean;
+  /** 上游相机开始 / 停止自行取景会改 screen 坐标系，切换时重立相对基线。 */
+  cameraFraming: boolean;
+}
+
+function verticalGoal(
+  state: VerticalFollowState | undefined,
+  evidence: VerticalMeasurement | null | undefined,
+  active: boolean,
+  fallback: number,
+  dt: number,
+): { state?: VerticalFollowState; goal: number; screenDriven: boolean } {
+  const T = AUTOFRAME;
+  if (!active) return { goal: 0, screenDriven: evidence !== undefined || state !== undefined };
+  // 旧回放没有 screen：不能凭空发明画面位置，保留这一版之前的 world-relative 跟随。
+  if (evidence === undefined) return { goal: Number.isFinite(fallback) ? fallback : 0, screenDriven: false };
+  if (evidence && (!evidence.quality || !evidence.accepted)) {
+    // 坏光不是人走了：无限期冻结，不被一个低置信位置拖走。身份门 hold-jump 时丢掉旧基线，
+    // 但位置仍冻结；门确认新身份后第一帧会在当前位置重立基线，不追那次跳变。
+    if (!evidence.accepted) return { goal: NaN, screenDriven: true };
+    if (state) return { state: { ...state, lost: 0 }, goal: NaN, screenDriven: true };
+    return { goal: Number.isFinite(fallback) ? fallback : 0, screenDriven: true };
+  }
+  if (!evidence || !Number.isFinite(evidence.worldY)) {
+    if (!state) return { goal: Number.isFinite(fallback) ? fallback : 0, screenDriven: true };
+    const lost = state.lost + dt;
+    if (lost < T.verticalHoldSeconds) return { state: { ...state, lost }, goal: NaN, screenDriven: true };
+    // 长丢失后忘掉旧人的基线，再平滑回到中线；新证据回来会从新锚点重新立零点。
+    return { goal: 0, screenDriven: true };
+  }
+
+  const previousY = state?.centerFilter.x;
+  const previousScale = state?.scaleFilter.x;
+  const jumped = !!state && (
+    evidence.anchor !== state.anchor
+    || evidence.cameraFraming !== state.cameraFraming
+    || Math.abs(evidence.y - previousY!) > T.verticalJump
+    || lateralScaleJump(evidence.scale, previousScale!)
+  );
+  if (!state || jumped) {
+    const centerFilter = oneEuroStep(undefined, evidence.y, dt, T.verticalCenterJitter);
+    const scaleFilter = oneEuroStep(undefined, evidence.scale, dt, T.verticalScaleJitter);
+    return {
+      state: {
+        screenAnchor: centerFilter.x,
+        worldAnchor: evidence.worldY,
+        anchor: evidence.anchor,
+        cameraFraming: evidence.cameraFraming,
+        lost: 0,
+        centerFilter,
+        scaleFilter,
+      },
+      goal: 0,
+      screenDriven: true,
+    };
+  }
+
+  const centerFilter = oneEuroStep(state.centerFilter, evidence.y, dt, T.verticalCenterJitter);
+  const scaleFilter = oneEuroStep(state.scaleFilter, evidence.scale, dt, T.verticalScaleJitter);
+  // 同一关节的 world 上移会让它在画面里上移（screen.y 变小）；两者抵消后剩下的才是
+  // world 骨架因落地而丢掉的整体画面位移。否则蹲起会被 world 动作 + screen 跟随算两次。
+  const worldDelta = evidence.worldY - state.worldAnchor;
+  const imageError = centerFilter.x - state.screenAnchor
+    + worldDelta * (scaleFilter.x / PEOPLE.torsoMeters);
+  const corrected = deadZone(imageError, T.verticalDeadZoneImage, T.verticalBandImage);
+  return {
+    state: { ...state, lost: 0, centerFilter, scaleFilter },
+    // screen.y 向下为正；相机画面中心上移（+Y）后，身体在输出里同样向下，保持镜子的方向。
+    goal: corrected * (PEOPLE.torsoMeters / Math.max(PEOPLE.minScale, scaleFilter.x)),
+    screenDriven: true,
+  };
 }
 
 /**
@@ -584,19 +682,31 @@ export function stepShot(s: ShotState, input: ShotInput, dt: number): ShotState 
   }
   // 减少动态：中景不跟随，偏移收回 0（一个固定机位的中景）。写明的例外：这一下允许是一次切
   if (input.reduced) return { progress, velocity, fx: { x: 0, v: 0 }, fy: { x: 0, v: 0 } };
-  if (input.hold) return { progress, velocity, fx: { ...s.fx, v: 0 }, fy: { ...s.fy, v: 0 } };
   const follow = target === 1 && input.offset;
   const gx = follow ? input.offset!.x : 0;
-  const gy = follow ? input.offset!.y : 0;
+  const vertical = verticalGoal(s.vertical, input.vertical, target === 1, follow ? input.offset!.y : 0, t);
+  const gy = vertical.goal;
+  if (input.hold) {
+    return {
+      progress, velocity, fx: { ...s.fx, v: 0 }, fy: { ...s.fy, v: 0 },
+      ...(vertical.state ? { vertical: vertical.state } : {}),
+    };
+  }
   // 回全景时不要死区也不要稳定延迟：死区会让偏移停在离 0 还有 4cm 的地方，下一次进中景就从一个旧偏移起步
   const base: Omit<FollowParams, 'range'> = follow
     ? { deadZone: T.followDeadZone, band: T.followBand, omega: T.followOmega, maxSpeed: T.followMaxSpeed, settle: T.followSettleSeconds, jitter: T.followJitter }
     : { deadZone: 0, band: 1e-6, omega: T.followOmega, maxSpeed: T.followMaxSpeed };
+  // screen-space 纵向已经在画面单位里去抖并过死区，这里只做临界阻尼、限速和范围夹取；
+  // 再套一层 4cm 米制死区，会重新吞掉近处那一小段动作。
+  const verticalParams: Omit<FollowParams, 'range'> = vertical.screenDriven
+    ? { deadZone: 0, band: 1e-6, omega: T.followOmega, maxSpeed: T.followMaxSpeed }
+    : base;
   return {
     progress,
     velocity,
     fx: stepFollow(s.fx, gx, dt, { ...base, range: T.followRangeX }),
-    fy: stepFollow(s.fy, gy, dt, { ...base, range: T.followRangeY }),
+    fy: stepFollow(s.fy, gy, dt, { ...verticalParams, range: T.followRangeY }),
+    ...(vertical.state ? { vertical: vertical.state } : {}),
   };
 }
 
@@ -758,6 +868,52 @@ export function lateralEvidence(pose: RawPose | null | undefined, aspect = 16 / 
   // 画面的哪条边 → 观众的哪一侧：按 MIRROR_X 折，和身体往哪边走同一个符号（docs/04 §1 唯一定义处）
   const side: Side | null = edge === null ? null : MIRROR_X * (edge - 0.5) > 0 ? 'right' : 'left';
   return { x, scale, out: Math.max(outL, outR), side, quality: qualityScale(score) >= 1, trusted };
+}
+
+// ── 纵向：画面里的 pelvis/chest → 中景移轴 ──────────────────────────────────
+
+/**
+ * 中景纵向跟随的一帧原始证据。胯完整可信时用 pelvis；近处胯常在桌面 / 画面下方，
+ * 那时退到两肩中点 chest。头最先被裁，不拿它做整体位置。
+ */
+export interface VerticalEvidence {
+  /** 同一锚点的画面 y（向下为正） */
+  y: number;
+  /** 胯完整可信时用 pelvis；近处胯被裁时退到 chest。消费方必须配同名 world 关节。 */
+  anchor: 'pelvis' | 'chest';
+  /** 躯干长（画面高度单位），把画面位移折成米 */
+  scale: number;
+  /** `qualityScale ≥ 1`；false 时控制器冻结，不追坏光下的坐标 */
+  quality: boolean;
+}
+
+/**
+ * `undefined` = 这类输入根本没有 screen（旧回放，继续使用 world fallback）；
+ * `null` = 本来有 screen，但这一帧没有可靠 pelvis/chest（冻结后归中）；其余 = 可用证据。
+ */
+export function verticalEvidence(
+  pose: RawPose | null | undefined,
+  aspect = 16 / 9,
+): VerticalEvidence | null | undefined {
+  if (!pose) return null;
+  const screen = pose.screen;
+  if (!screen?.length) return undefined;
+  const score = Number.isFinite(pose.score) ? pose.score : 0;
+  if (score <= CAPTURE.minScore) return null;
+  const sL = screen[SHOULDER_L], sR = screen[SHOULDER_R];
+  // 这里只量纵向：人在画面左右边缘时，x 出界不该让一条完全可靠的 y 证据消失。
+  const inY = (l: Landmark): boolean => l.y >= -PREVIEW.edgeMargin && l.y <= 1 + PREVIEW.edgeMargin;
+  if (!trustedLandmark(sL) || !trustedLandmark(sR) || !inY(sL) || !inY(sR)) return null;
+  const hL = screen[HIP_L], hR = screen[HIP_R];
+  const hips = trustedLandmark(hL) && trustedLandmark(hR) && inY(hL) && inY(hR);
+  const scale = torsoScale(sL, sR, hips ? hL : null, hips ? hR : null, aspect);
+  if (!Number.isFinite(scale) || scale <= 0) return null;
+  return {
+    y: hips ? (hL.y + hR.y) / 2 : (sL.y + sR.y) / 2,
+    anchor: hips ? 'pelvis' : 'chest',
+    scale,
+    quality: qualityScale(score) >= 1,
+  };
 }
 
 /** 横向根偏移此刻在做什么。HUD 与工作台原样显示 */

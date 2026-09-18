@@ -69,7 +69,16 @@ test('连续性：景别（缓动后的进度、跟随偏移）在任何决策�
     const wp = worst(), wv = worst(), wf = worst();
     let t = 0;
     for (const f of chaos(seed, 60)) {
-      const n = stepShot(s, { shot: f.shot, offset: f.offset, reduced: false, hold: f.hold }, f.dt);
+      const n = stepShot(s, {
+        shot: f.shot,
+        offset: f.offset,
+        vertical: f.present ? {
+          y: 0.5 + (f.offset?.y ?? 0), anchor: 'pelvis', scale: 0.5, quality: true,
+          worldY: 1, accepted: true, cameraFraming: false,
+        } : null,
+        reduced: false,
+        hold: f.hold,
+      }, f.dt);
       t += f.dt;
       const at = `seed ${seed} t=${t.toFixed(2)}s shot=${f.shot} hold=${f.hold}`;
       note(wp, per16(smoothstep(n.progress) - smoothstep(s.progress), f.dt), at);
