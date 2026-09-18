@@ -89,15 +89,21 @@ test('numPoses worker queue: setOptions 失败要显式回执，同值下次仍�
   assert.equal(replies[1]?.ok, true);
 });
 
-test('webcam 只在匹配的成功 ack 后更新 applied，不再发送前乐观赋值', () => {
+test('webcam 两条路径共用有界 owner，deadline 后隔离整份推理资源', () => {
   const source = readFileSync(fileURLToPath(new URL('../src/capture/webcam.ts', import.meta.url)), 'utf8');
+  const controller = readFileSync(fileURLToPath(new URL('../src/capture/reconfigure.ts', import.meta.url)), 'utf8');
   assert.doesNotMatch(source, /engine\.numPoses\s*=\s*v\s*;\s*engine\.post/,
     '发 options 前就改 engine.numPoses 会把目标伪装成已生效');
-  assert.match(source, /requestId/, '请求和 ack 必须能匹配，否则旧回执会覆盖新目标');
-  assert.match(source, /m\.ok[\s\S]{0,300}engine\.numPoses\s*=/,
-    '只有 worker 明确成功才能推进 applied numPoses');
-  assert.match(source, /#mainPeopleRequest\s*=\s*null/,
-    'stop/reset 必须使主线程降级路径的旧请求失效');
+  assert.match(controller, /result\.requestId !== request\.requestId/,
+    '请求和 ack 必须能匹配，否则旧回执会覆盖新目标');
+  assert.match(source, /createReconfigureController/,
+    'worker 与主线程降级必须共用 applied\/desired\/deadline 语义');
+  assert.match(source, /peopleReconfigureTimeoutMs[\s\S]{0,500}retireEngine/,
+    'worker deadline 必须由 owner 终止整份 worker，不能只释放 busy');
+  assert.match(source, /#quarantineMainPeople\(resource, `主线程 \$\{error\}`, true\)/,
+    '主线程 deadline 必须隔离整份 landmarker');
+  assert.match(source, /mutationPending[\s\S]{0,500}#closeMainPeople/,
+    '旧 setOptions settle 前不得 close 同一份 landmarker');
   assert.doesNotMatch(source, /setOptions\(\{ numPoses: v \}\\?\)\.catch\(\(\) => \{ \/\* 改不了/,
     '主线程降级路径也不得静默吞掉 setOptions 失败');
 });

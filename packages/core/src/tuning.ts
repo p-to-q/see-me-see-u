@@ -47,6 +47,11 @@ export const CAPTURE = {
   /** worker 的一张输入帧超过这么久未回（毫秒）就退休该 worker，再走有上限的重建。 */
   workerFrameTimeoutMs: 2000,
   /**
+   * `setOptions({ numPoses })` 重建图的最长等待。超时后不能放锁继续用旧实例：worker 整体退休，
+   * 主线程 landmarker 整体隔离。它比单帧上限宽，仍远短于一次完整冷启动。
+   */
+  peopleReconfigureTimeoutMs: 2500,
+  /**
    * 按下「摄像头」到第一次推理完成最多等多久（秒）。**等的时候回放照跑**；
    * 超时就撤回这一次（回放继续、那一行回到「关着」）。基线冷缓存实测 32.6s（docs/48 §2），给足余量。
    */

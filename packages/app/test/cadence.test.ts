@@ -18,7 +18,7 @@ test('webcam 的 worker 与主线程降级都经过同一个 cadenceDue', () => 
   assert.equal((source.match(/cadenceDue\(/g) ?? []).length, 1, 'worker #send 必须经过共享节拍闸');
   assert.equal((source.match(/mainThreadInferenceDue\(/g) ?? []).length, 1,
     '主线程 #infer 必须经过同时认图重建状态的节拍闸');
-  assert.match(source, /mainThreadInferenceDue\(this\.#mainPeopleRequest !== null,/,
+  assert.match(source, /mainThreadInferenceDue\(this\.#mainPeopleResource\?\.controller\.busy \?\? false,/,
     '主线程必须把真实的 setOptions 在途状态接进互斥闸');
 });
 

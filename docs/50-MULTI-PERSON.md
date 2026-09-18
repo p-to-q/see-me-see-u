@@ -378,7 +378,7 @@ draw call：任何人数下 = 一具身体（共用桶，`people-budget.test.ts`
 | **探测缓存帧**（2026-09-17）：idle 且没有提示时，状态机只随新推理走，120Hz 渲染 / 30Hz 推理三秒只走 90 次；探测窗打开后仍逐渲染帧检查性能预算，才能在卡顿当帧撤窗；人数提示也仍按 UI 时钟收起 | `capture/people-probe-runtime.ts` 的 `shouldStepPeopleProbe` + `main.ts` | `people-probe-runtime.test.ts` 钉住 idle / probing / hint 三种分支；`people-inference.test.ts` 的 120/30Hz 夹具钉住 90 次 |
 | **多人推理时钟**（2026-09-17）：tracker 的出生/丢失/换人和自动探测的确认只在 `inferredAt` 变大时推进；没有实现该字段的 Capture 退到 `RawPose.t`。`reacquired` 同样只是新推理事件，主/伴随身体的时间状态只清一次。主线每帧只读一次 `latest()`，避免同一 rAF 拿到不同快照 | `capture/inference-clock.ts`（纯函数）+ `core/src/people.ts` 的 `isFreshReacquisition` + `main.ts`；相遇清零同时清 cursor | `app/test/people-inference.test.ts`：同一份结果在 120Hz 被读 3 秒，轨迹仍是 tentative、探测仍在 level 1；真实 30Hz 新结果才按 0.3s / 1.2s 门限推进；同一份 reacquired 在 4 个渲染帧只消费 1 次；重复、倒退、NaN 时刻不 throw |
 | **稳定单人快路**（2026-09-17）：自动模式仍预留三人桶，但完整人数数组只活在新推理那一步，渲染帧只留人数（收缩上限时同步截断）；只有一位主身体、没有退场残影且站位已在中线时，伴随身体管线复用同一个不可变空结果，在 `bodyAt()` 和完整上下文构造前就命中；渲染侧也只接一次，不再在每个 rAF 建 `Map` / `Set` / 空数组。多人退回单人时不用人体抖动死区，连续回中线后位置与速度都达标才在 1mm 内精确归零，快路会恢复 | `main.ts` 的 `detectedPeopleCount` / `renderedCrowd`；`creature/companions.ts` 的严格单人分支 | 120Hz / 30Hz 夹具三秒只读 90 次人数快照；`companions-single.test.ts` 连跑 360 帧复用同一结果，第二人或 retiring 条目会立即退出，30/60/120Hz 的多人站位会连续归中并重进快路 |
-| **运行中人数重配置**（2026-09-17）：`setOptions({ numPoses })` 只能串行，连续改目标时只追最后一个；不再在发送前乐观地把目标写成已生效，也不再吞掉失败 | `capture/pose-protocol.ts` 统一 request/ack；`pose-worker.ts` 串行队列；`webcam.ts` 的 worker 和主线程降级路径同样按 applied/desired/in-flight 分层 | `app/test/people-reconfigure.test.ts`：不并发重建、中间值被取代有回执、失败同值可重试、旧 ack 不覆盖新目标、stop 使旧回调失效；**真摄像头快速 1→3→1 未测** |
+| **运行中人数重配置**（2026-09-18）：`setOptions({ numPoses })` 只能串行，连续改目标时只追最后一个；不再在发送前乐观地把目标写成已生效，也不再吞掉失败。worker / 主线程降级共用 2.5s deadline owner；普通 reject 保留旧 applied 图并允许显式同值重试，deadline 则把整份资源判为不可信：worker 终止，主线程 landmarker 隔离到旧 mutation 真 settle 后才 close，当前 Capture 退回 replay，迟到结果无状态权 | `capture/reconfigure.ts` 统一 applied / desired / in-flight / deadline；`pose-protocol.ts` 统一 request/ack；`pose-worker.ts` 串行队列；`webcam.ts` 各自承担 terminate / quarantine 生命周期 | `app/test/reconfigure.test.ts`：成功、latest-wins、同步发送失败、普通拒绝、同值重试、永不返回、超时后迟到、stop；`people-reconfigure.test.ts` 守两条资源隔离；`cadence.test.ts` 守推理互斥。**真摄像头快速 1→3→1 与真 MediaPipe 慢挂未测；2.5s 是工程安全界，不是硬件实测** |
 
 **自动是默认策略，1 是默认稳态起点。** 推理那张表（§1.2）仍然没跑，所以没有把
 `defaultCap` / `defaultCapKiosk` 直接改成长期 2 人档；而是用有界的满档发现窗来自动决定。
@@ -397,6 +397,10 @@ PEOPLE tuning，也没有改变正常 30Hz 下的证据时长。
 `probeConfirmSeconds=1.2`（转正之后还要连续拿到身体多久才算数，直接回应 §0 第 2 条"路人擦肩而过"的顾虑）、
 `probeDeescalateSeconds=20`（升过档之后，实际人数持续不足多久就一次收回到已证明值）、`probeHintSeconds=4`（提示留多久）。
 这几个数没有跑过 §10 那种无头取证；如果现场观察到升档太勤/太懒，先调这几个数，不要改判据本身。
+
+`CAPTURE.peopleReconfigureTimeoutMs=2500` 不属于人数质量策略：它只给可能永不返回的图 mutation 划资源所有权边界，
+不能拿来让探测“更灵敏”。它特意短于一扇 3 秒探测窗，但尚无真设备慢挂分布；现场若出现健康重配置被误杀，先留重配置耗时
+与 delegate / 设备信息，再改这个安全界，不要把 timeout 后的 poisoned 实例重新放回快回路。
 
 15Hz 不是只写在调度器里的愿望：`capture/cadence.ts` 同时卡 worker `#send()` 与主线程降级 `#infer()`；
 稳定单人虽为以后多人预留 `instanceColor`，但全白值不变时不再把颜色缓冲逐桶、逐帧重复上传（`instance-color.test.ts`）。

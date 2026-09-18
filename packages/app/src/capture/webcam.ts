@@ -52,6 +52,7 @@ import { applyCamFraming, readCamFraming, type CamFramingFlag, type CamFramingSt
 import { cadenceDue, mainThreadInferenceDue } from './cadence.ts';
 import { frameFlightTimedOut, ownsFrameFlight, settleFrameFlight, type FrameFlight } from './frame-flight.ts';
 import { createMaskDemand } from './mask-demand.ts';
+import { createReconfigureController, type ReconfigureController } from './reconfigure.ts';
 
 // 本地 wasm：打包进产物，现场断网也能起（Vite 把它们当静态资源发出去）
 // 注意子路径没有 /wasm/：包的 exports 就是这么导出的
@@ -101,7 +102,8 @@ const WORKER_RETRIES = 2;
 
 // ── 姿态引擎（worker，整页常驻一个）──────────────────────────────────────────
 
-type PoseEngineEvent = Exclude<PoseOut, { type: 'options-result' }> | { type: 'options-fail'; error: string };
+type PoseEngineEvent = Exclude<PoseOut, { type: 'options-result' }>
+  | { type: 'options-fail'; error: string; terminal?: boolean };
 
 interface PoseEngine {
   backend: 'GPU' | 'CPU';
@@ -109,7 +111,7 @@ interface PoseEngine {
   dead: boolean;
   segmenterReady: boolean;
   /** 图此刻按几个人建的。整页共用一个 worker，所以换人数走 `options` 消息，不重新建 worker */
-  numPoses: number;
+  readonly numPoses: number;
   post(msg: PoseIn, transfer: Transferable[]): void;
   /** 目标值会串行发送；只有 worker 成功回执才会改 `numPoses` */
   requestNumPoses(numPoses: number): void;
@@ -161,34 +163,16 @@ async function createPoseEngine(model: PoseModel, forget: () => void): Promise<P
   const worker = new Worker(new URL('./pose-worker.ts', import.meta.url), { type: 'module', name: 'sb-pose' });
   let listener: ((m: PoseEngineEvent) => void) | null = null;
   const numPoses = peopleCap();
-  let desiredNumPoses = numPoses;
-  let optionsRequest: Extract<PoseIn, { type: 'options' }> | null = null;
-  let optionsSequence = 0;
-  let failedNumPoses: number | null = null;
   let segmenterRequested = false;
   let retireEngine: (why: string) => void = () => {};
-
-  const pumpOptions = (): void => {
-    if (engine.dead || optionsRequest || desiredNumPoses === engine.numPoses || failedNumPoses === desiredNumPoses) return;
-    const request: Extract<PoseIn, { type: 'options' }> = {
-      type: 'options', requestId: ++optionsSequence, numPoses: desiredNumPoses,
-    };
-    optionsRequest = request;
-    try {
-      engine.post(request, []);
-    } catch (error) {
-      optionsRequest = null;
-      failedNumPoses = request.numPoses;
-      listener?.({ type: 'options-fail', error: `人数重配置发送失败：${describe(error)}` });
-    }
-  };
+  let options!: ReconfigureController;
 
   const engine: PoseEngine = {
     backend: 'CPU',
     warning: null,
     dead: false,
     segmenterReady: false,
-    numPoses,
+    get numPoses() { return options.applied; },
     post(msg, transfer) {
       if (engine.dead) {
         for (const t of transfer) (t as { close?: () => void }).close?.();
@@ -196,12 +180,7 @@ async function createPoseEngine(model: PoseModel, forget: () => void): Promise<P
       }
       worker.postMessage(msg, transfer);
     },
-    requestNumPoses(value) {
-      desiredNumPoses = value;
-      // 显式再请求一次同值，就是对上次失败的重试。
-      if (failedNumPoses === value) failedNumPoses = null;
-      pumpOptions();
-    },
+    requestNumPoses(value) { options.request(value); },
     requestSegmenter() {
       if (segmenterRequested || engine.dead) return;
       segmenterRequested = true;
@@ -217,11 +196,25 @@ async function createPoseEngine(model: PoseModel, forget: () => void): Promise<P
     listen(fn) { listener = fn; },
   };
 
+  options = createReconfigureController({
+    initialNumPoses: numPoses,
+    timeoutMs: CAPTURE.peopleReconfigureTimeoutMs,
+    post: (request) => engine.post({ type: 'options', ...request }, []),
+    onFailure: (error) => listener?.({ type: 'options-fail', error: `worker ${error}` }),
+    onTimeout: (_request, error) => {
+      // watchdog 活在主线程；worker 自己的事件循环即使被 wasm 卡住，也能在这里硬终止。
+      const why = `worker ${error}`;
+      listener?.({ type: 'options-fail', error: why, terminal: true });
+      retireEngine(why);
+    },
+  });
+
   return new Promise<PoseEngine>((resolve, reject) => {
     let ready = false;
     const die = (why: string): void => {
       if (engine.dead) return;
       engine.dead = true;
+      options.stop();
       forget();
       try { worker.terminate(); } catch { /* 已经没了 */ }
       if (!ready) reject(new Error(why));
@@ -231,21 +224,7 @@ async function createPoseEngine(model: PoseModel, forget: () => void): Promise<P
     worker.onmessage = (ev: MessageEvent<PoseOut>) => {
       const m = ev.data;
       if (m.type === 'options-result') {
-        const current = optionsRequest;
-        // worker 重启/旧消息晚到时，不许它改写新一轮的 applied 值。
-        if (!current || m.requestId !== current.requestId) return;
-        optionsRequest = null;
-        if (m.ok && m.numPoses === current.numPoses) {
-          engine.numPoses = current.numPoses;
-          if (failedNumPoses === current.numPoses) failedNumPoses = null;
-        } else {
-          failedNumPoses = current.numPoses;
-          if (desiredNumPoses === current.numPoses) {
-            listener?.({ type: 'options-fail', error: `人数重配置失败：${m.error ?? '回执与请求不一致'}` });
-          }
-        }
-        // 在途期间改了几次也只发最后的目标；失败的同值等显式重试。
-        pumpOptions();
+        options.settle(m);
         return;
       }
       if (m.type === 'ready') {
@@ -281,6 +260,15 @@ async function createPoseEngine(model: PoseModel, forget: () => void): Promise<P
 }
 
 // ── Capture ───────────────────────────────────────────────────────────────
+
+interface MainPeopleResource {
+  landmarker: PoseLandmarker;
+  controller: ReconfigureController;
+  /** Promise 没有 settle 前只能隔离，不能 close 同一份正在变的 wasm 图。 */
+  mutationPending: boolean;
+  quarantined: boolean;
+  closed: boolean;
+}
 
 export class WebcamCapture implements Capture {
   readonly video: HTMLVideoElement;
@@ -320,9 +308,8 @@ export class WebcamCapture implements Capture {
   #firstResult: (() => void) | null = null;
   #retries = 0;
   #reacquiring = false;
-  /** 主线程降级路径的已生效值和唯一在途请求。 */
-  #mainPeopleApplied: number | null = null;
-  #mainPeopleRequest: { landmarker: PoseLandmarker; numPoses: number } | null = null;
+  /** 主线程降级路径的图、单在途状态与 quarantine 所有权。 */
+  #mainPeopleResource: MainPeopleResource | null = null;
   readonly #useWorker: boolean;
 
   /** 起来之后用的是哪条路，dev 页面拿来显示 */
@@ -410,7 +397,7 @@ export class WebcamCapture implements Capture {
     this.#others = this.#others.slice(0, Math.max(0, v - 1));
     const engine = this.#engine;
     if (engine && !engine.dead) engine.requestNumPoses(v);
-    this.#syncMainPeople();
+    this.#mainPeopleResource?.controller.request(v);
   }
   takeMask(): ImageBitmap | null {
     const mask = this.#mask;
@@ -483,11 +470,13 @@ export class WebcamCapture implements Capture {
     this.#engine = null;
     this.#inFlight = null;
     this.#firstResult = null;
-    // 先让旧 setOptions 回调失效，再 close；否则它可能在下一次 start 后改新图的状态。
-    this.#mainPeopleRequest = null;
-    this.#mainPeopleApplied = null;
-    try { this.#landmarker?.close(); } catch { /* 关闭失败不值得吵 */ }
-    this.#landmarker = null;
+    // 正在 setOptions 的图不能直接 close：先隔离；Promise 真 settle 后由资源自己收尾。
+    const mainResource = this.#mainPeopleResource;
+    if (mainResource) this.#quarantineMainPeople(mainResource, null, false);
+    else {
+      try { this.#landmarker?.close(); } catch { /* 关闭失败不值得吵 */ }
+      this.#landmarker = null;
+    }
     this.#maskDemand.set(false);
     this.#mask?.close();
     this.#mask = null;
@@ -721,12 +710,14 @@ export class WebcamCapture implements Capture {
       this.#error = m.error;
     } else if (m.type === 'options-fail') {
       this.#error = m.error;
+      // 普通 reject 仍可继续用旧 applied 图；deadline 表示整份 worker 已不可信，交给 replay。
+      if (m.terminal) this.#lost = true;
     }
   }
 
   /** worker 死了：重新拿一个。期间姿态时钟先保持、再交出 null —— 读数上是 ALM 02 停滞，那是实话 */
   #reacquire(): void {
-    if (this.#reacquiring || this.#retries >= WORKER_RETRIES) return;
+    if (this.#lost || this.#reacquiring || this.#retries >= WORKER_RETRIES) return;
     this.#reacquiring = true;
     this.#retries++;
     // worker 已终止，不会再有旧 mask 回执；把那张在途需求退回可重试态。
@@ -758,8 +749,7 @@ export class WebcamCapture implements Capture {
       opened = await this.#makeLandmarker(fileset, poseModel);
     }
     this.#landmarker = opened.landmarker;
-    this.#mainPeopleApplied = opened.numPoses;
-    this.#syncMainPeople();
+    this.#installMainPeople(opened.landmarker, opened.numPoses);
     this.#step();
   }
 
@@ -786,34 +776,64 @@ export class WebcamCapture implements Capture {
     }
   }
 
-  /** 主线程降级路径也用同一条规矩：单在途、latest-wins，成功才更新 applied。 */
-  #syncMainPeople(): void {
-    const landmarker = this.#landmarker;
-    const numPoses = this.#people;
-    if (!landmarker || this.#mainPeopleRequest || this.#mainPeopleApplied === numPoses) return;
-    const request = { landmarker, numPoses };
-    this.#mainPeopleRequest = request;
-    let applying: Promise<unknown>;
-    try {
-      applying = Promise.resolve(landmarker.setOptions({ numPoses }));
-    } catch (error) {
-      this.#mainPeopleRequest = null;
-      this.#error = `人数重配置失败：${describe(error)}`;
-      return;
-    }
-    void applying.then(() => {
-      if (this.#mainPeopleRequest === request && this.#landmarker === landmarker) this.#mainPeopleApplied = numPoses;
-    }).catch((error) => {
-      if (this.#mainPeopleRequest === request && this.#landmarker === landmarker) {
-        this.#error = `人数重配置失败：${describe(error)}`;
-      }
-    }).finally(() => {
-      // stop() 或新一轮启动已经让这个请求失效。
-      if (this.#mainPeopleRequest !== request || this.#landmarker !== landmarker) return;
-      this.#mainPeopleRequest = null;
-      // 在途期间可能改了多次，只追最后的值；同值失败等下次显式 setPeople 再试。
-      if (this.#people !== numPoses) this.#syncMainPeople();
+  /** 主线程降级与 worker 共用 applied / desired / in-flight / deadline 语义，取消能力仍各自负责。 */
+  #installMainPeople(landmarker: PoseLandmarker, initialNumPoses: number): void {
+    const resource: MainPeopleResource = {
+      landmarker,
+      controller: null as unknown as ReconfigureController,
+      mutationPending: false,
+      quarantined: false,
+      closed: false,
+    };
+    const controller = createReconfigureController({
+      initialNumPoses,
+      timeoutMs: CAPTURE.peopleReconfigureTimeoutMs,
+      post: (request) => {
+        resource.mutationPending = true;
+        let applying: Promise<unknown>;
+        try {
+          applying = Promise.resolve(landmarker.setOptions({ numPoses: request.numPoses }));
+        } catch (error) {
+          resource.mutationPending = false;
+          throw error;
+        }
+        void applying.then(
+          () => controller.settle({ ...request, ok: true }),
+          (error) => controller.settle({ ...request, ok: false, error: describe(error) }),
+        ).finally(() => {
+          resource.mutationPending = false;
+          if (resource.quarantined) this.#closeMainPeople(resource);
+        });
+      },
+      onFailure: (error) => {
+        if (this.#mainPeopleResource === resource) this.#error = error;
+      },
+      onTimeout: (_request, error) => this.#quarantineMainPeople(resource, `主线程 ${error}`, true),
     });
+    resource.controller = controller;
+    this.#mainPeopleResource = resource;
+    controller.request(this.#people);
+  }
+
+  /**
+   * timeout/stop 后旧对象只剩一个权利：等自己的 mutation 收口后 close。它不能再推理、
+   * 不能再接请求，也不能靠迟到成功覆盖下一份资源。
+   */
+  #quarantineMainPeople(resource: MainPeopleResource, error: string | null, markLost: boolean): void {
+    if (resource.quarantined) return;
+    resource.quarantined = true;
+    resource.controller.stop();
+    if (this.#mainPeopleResource === resource) this.#mainPeopleResource = null;
+    if (this.#landmarker === resource.landmarker) this.#landmarker = null;
+    if (error) this.#error = error;
+    if (markLost) this.#lost = true;
+    if (!resource.mutationPending) this.#closeMainPeople(resource);
+  }
+
+  #closeMainPeople(resource: MainPeopleResource): void {
+    if (resource.closed) return;
+    resource.closed = true;
+    try { resource.landmarker.close(); } catch { /* 已隔离；关闭失败不能再伤快回路 */ }
   }
 
   #loop = (): void => {
@@ -835,7 +855,7 @@ export class WebcamCapture implements Capture {
     const now = performance.now();
     // `setOptions()` 会异步重建 MediaPipe 图，不能与 detectForVideo 并发。worker 也在
     // reconfigureQueue.busy 时拒绝帧；主线程降级必须保持同一份所有权语义。
-    if (!mainThreadInferenceDue(this.#mainPeopleRequest !== null, now, this.#lastSent, this.#cadence)) return;
+    if (!mainThreadInferenceDue(this.#mainPeopleResource?.controller.busy ?? false, now, this.#lastSent, this.#cadence)) return;
 
     // 同一帧不重复推理；timestamp 必须严格递增，否则 MediaPipe 会抛
     const vt = this.video.currentTime;

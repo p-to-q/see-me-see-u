@@ -162,8 +162,10 @@ worker（155KB）、`vision_bundle`（153KB）、两份 11.7MB 的 wasm 都不�
     `import()` 有缓存、不会再执行胶水层。无头 Chrome 当场撞到（抠图起不来），同一个坑也会让 GPU→CPU 回落起不来。
     修法是每次创建前从缓存的模块上把 `default` 装回去（`test/pose-worker-factory.test.ts`）。
 - 降级路径：worker 起不来 / `?worker=off` → 原来的主线程推理（MediaPipe 改成动态 import，worker 那条路上主线程一个字节都不下）。
-  运行中改 `numPoses` 时，`setOptions()` 异步重建图的窗口内不调用 `detectForVideo()`；成功或失败收口后，下一份到期视频帧恢复，
-  与 worker 的 `reconfigureQueue.busy` 互斥语义一致。
+  运行中改 `numPoses` 时，`setOptions()` 异步重建图的窗口内不调用 `detectForVideo()`；普通成功 / 拒绝收口后，下一份到期视频帧恢复。
+  worker 与主线程共用 applied / desired / in-flight / deadline owner：等待超过 `CAPTURE.peopleReconfigureTimeoutMs=2500` 不会只放开 busy
+  继续碰一份可能仍在 mutation 的图，而是终止 worker，或隔离主线程 landmarker、等旧 Promise 真 settle 后再 close；当前 Capture 标 lost，
+  外层继续 replay。迟到结果没有状态权。这个 2.5s 是低于一次自动探测窗的安全界，**未在真 MediaPipe 慢挂上调过**。
   worker 中途死了 → 重新拿（最多 2 次）；一帧 2 秒没回来 → 当它丢了。
 - **2026-09-18，ImageSegmenter 退出启动和稳态快回路。** 上面的 §1 / §2 数字是当时“启动即建第二张图、之后持续 2Hz 抠图”的历史测量，
   不是这次改动后的新测量。现在只有慢回路武装时才解析模型并发 `segmenter-init`，每位观众只请求一张；generation 隔离换人后的迟到回执，
