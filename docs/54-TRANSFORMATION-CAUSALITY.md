@@ -136,8 +136,9 @@ hub tether，不新增骨头、不改冻结骨架契约。若物种需要卫星�
 3. **chain rebuild**：从父关节按既有骨长重建子链，保证每条链仍接在插座上；
 4. **diagnostics**：暴露 live / echo / route 的实际权重，给 HUD 和取证，而不是再靠肉眼猜参数。
 
-映射器仍必须由每个 `Director` / encounter 实例持有，不能继续放在模块全局。`reset()` 是换观众、换主身份、
-输入停滞后的唯一边界。失败或坏值时返回 live carrier，而不是返回上一个人的变形结果。
+映射器已经由每个 `Director` / encounter 实例持有，不再放在模块全局。`reset()` 接到换观众、换主身份、
+reacquire 与 untether 往返；输入停滞仍由 sampler 自己截断。失败或坏值时返回 live carrier，
+而不是返回上一个人的变形结果。两个 Director 同进程交错、四种 reset 边界与缺 runtime 降级已有测试。
 
 ### 3.2 零件层只接一个小的替换策略
 
@@ -210,7 +211,7 @@ hub tether，不新增骨头、不改冻结骨架契约。若物种需要卫星�
 
 1. **复现，不猜。** 用当前 seed / theme / arc 录下 40 秒与入地案例，HUD 同步记替换 slot、line 参数与 plan；先固定 `?arc=90` 复现 42.3 秒 radial 切入；
 2. **先止血。** `radial` 暂离自动弧线；承重 / 连接槽位改原位替换；效果几何退出主体落地测量；关闭 live 路径的自主关节呼吸。其中 **radial 自动路径隔离**与**特效 / 主体落地分离**已经落地；不同旧件 → 新件在交接结束时的 AABB 基准连续插值、承重 / 连接槽位的原位替换与自主关节呼吸隔离仍未做；
-3. **再修因果。** 实时载波、局部方向余波、方向级重量与 chain rebuild 已落地，旧 `follow` 仍是永久 fallback；下一片把 `LineSampler` 从模块全局移入每个 `Director` / encounter；
+3. **再修因果。** 实时载波、局部方向余波、方向级重量、chain rebuild 与 per-Director 状态已经落地，旧 `follow` 仍是永久 fallback；
 4. **最后加手势。** 单手 release 验明后才开放低概率整臂；没有真人证据就不继续扩大；
 5. **现场定标。** 通过上面的真人矩阵后，再调整范围和概率，不用合成姿态替观众做审美决定。
 

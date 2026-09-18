@@ -897,6 +897,7 @@ async function boot(): Promise<void> {
     encounterRng = mulberry32(seed);
 
     // 检测、时间轴与输出侧取景必须一起归零。少任何一个，新输入的第一帧都会与旧时间线插值。
+    director.resetTemporal();
     presence.reset();
     arc.reset();
     arcState = arc.state;
@@ -974,6 +975,7 @@ async function boot(): Promise<void> {
    * 否则接班第一帧会继承上一人的动能、触地、腿部模式和取景速度。
    */
   const resetPrimaryTemporal = (resetPipes: boolean): void => {
+    director.resetTemporal();
     poseClock.reset();
     if (resetPipes) {
       refiner?.reset();

@@ -60,7 +60,7 @@ test('主身份交接：触地判据把接班人的第一帧当基准，不凭�
 test('主身份交接：main 在换 id 与 reacquired 两条边界调用同一份完整清理', () => {
   assert.ok(RESET, 'main.ts 没有主身份时间状态的唯一清理点');
   for (const required of [
-    'poseClock.reset()', 'motion.reset()', 'boneEnergy.reset()', 'framer.reset()',
+    'director.resetTemporal()', 'poseClock.reset()', 'motion.reset()', 'boneEnergy.reset()', 'framer.reset()',
     'framing = decide(framingPolicy, framer.current)', 'legHold = 0',
     'lateral = resetLateralIdentity(lateral)', 'groundSense.reset()',
     'stage.resetShotIdentity()', 'lastFeatures = null',
