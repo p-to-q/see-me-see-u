@@ -1086,7 +1086,11 @@ export function stepLateral(s: LateralState, input: LateralInput, dt: number): L
   }
   // 回中线 / 让位时不要死区：死区会让身体停在中线旁边（和景别回全景同一条理由）
   const centering = why === 'center' || why === 'yield';
-  const projectionScale = Math.max(PEOPLE.minScale, scaleFilter?.x ?? scale);
+  const measuredScale = scaleFilter?.x ?? scale;
+  // 开机第一帧就跟丢时还没有任何 accepted scale；状态与 HUD 仍必须保持有限。
+  const projectionScale = Number.isFinite(measuredScale)
+    ? Math.max(PEOPLE.minScale, measuredScale)
+    : PEOPLE.minScale;
   const metresPerImageHeight = PEOPLE.torsoMeters / projectionScale;
   const deadZoneMetres = centering ? 0
     : (input.upper ? T.lateralDeadZoneUpperImage : T.lateralDeadZoneImage) * metresPerImageHeight;

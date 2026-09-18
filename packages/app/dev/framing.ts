@@ -206,8 +206,8 @@ function frame(): void {
   W.__framingJumps = jumps;
   const M = AUTOFRAME.maxStep as Record<string, number>;
   const [a, b] = formatFramingRows({
-    reading: { mode: f.mode, why: f.why, inMode: 0, evidence: null, trend: NaN, cooldown: 0, cameraFraming: camFraming },
-    decision: { policy, mode: f.mode, shot: f.shot, holdLegs: f.legHold > 0, upperIsIntended: f.shot === 'upper' },
+    reading: f.reading,
+    decision: f.decision,
     legHold: f.legHold, shot: f.eased,
     lateral: { x: f.lateral.x, room: f.room, why: f.lateral.why, side: f.lateral.side },
   });

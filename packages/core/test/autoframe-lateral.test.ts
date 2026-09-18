@@ -335,6 +335,14 @@ test('回放录制（没有 screen）：没有横向证据，偏移恒 0、不�
   assert.ok(s.every((k) => k.x.x === 0 && k.side === null));
 });
 
+test('第一帧就跟丢：尚无 accepted scale 时死区诊断仍有限', () => {
+  const s = stepLateral(LATERAL_REST, { evidence: null, room: Number.NaN, enabled: true }, Number.NaN);
+  assert.equal(s.why, 'hold-lost');
+  for (const value of [s.x.x, s.x.v, s.target, s.deadZone, s.band, s.lost]) {
+    assert.ok(Number.isFinite(value), `无尺度 fallback 产出 ${String(value)}`);
+  }
+});
+
 test('上半身中景 + 左右晃：余量在推近的那一秒里连续收窄，偏移被限速收回来，最后不出余量', () => {
   const s = run(hold(6, () => at(0.2)), { room: (i) => (i < 90 ? 1.2 : Math.max(0.35, 1.2 - ((i - 90) / 30) * 0.85)) });
   assert.ok(s[89].x.x > 0.8, `前三秒没跟到：${s[89].x.x}`);

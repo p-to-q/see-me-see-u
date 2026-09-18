@@ -407,7 +407,7 @@ URL 都是 `/?demo=1&debug=1&theme=porcelain&seed=7&theseus=off&arc=900&nopost=1
 | 帧循环：横向根偏移叠在多人站位上；跟丢时没有新骨架也重新平移（身体和接触阴影一起挪）；HUD `framing` 行多一段"侧" | `main.ts`、`shell/hud.ts` | `framing-lateral.test.ts` HUD 一条 |
 | 引导：侧边排在「往后退一点」前面；那一侧一条细边；WRN12 同一把尺子；两句新文案 | `preview-state.ts` / `preview.ts` / `preview.css` / `readout-state.ts` / `i18n.ts`（`outLeft` / `outRight`） | `framing-lateral.test.ts` 5 条 |
 | `?camframing=auto\|on\|off`；分类器与 `decide()` 接 `cameraFraming` | `capture/cam-framing.ts`（纯）、`capture/webcam.ts`（开机请求一次、约每秒重读）、`shell/kiosk.ts` | `app/test/cam-framing.test.ts` 6 条（假 track：被拒、同步抛、永不 resolve、方法本身抛） |
-| 工作台：目标窗口、死区、实际窗口、横向余量 / 目标 / 死区、20 秒曲线；逐帧读数挂在 `window.__framingTrace` | `dev/framing.{html,ts}`、`dev/framing-sim.ts`（照抄 main.ts 取景那几行的纯模拟）、`scripts/framing/trace.ts` | 取证见 6.6 |
+| 工作台：目标窗口、死区、实际窗口、横向余量 / 目标 / 死区、20 秒曲线；逐帧读数挂在 `window.__framingTrace`。模拟器与生产链同吃画幅、系统取景状态、上半身横移快档和同名 world 关节高度；HUD 直接显示分类器 / 策略原始结论，不再造占位读数 | `dev/framing.{html,ts}`、`dev/framing-sim.ts`（照抄 main.ts 取景那几行的纯模拟）、`scripts/framing/trace.ts` | `framing-lateral.test.ts`：9:16、低质量 + 系统取景、screen/world 同步抵消、坏 dt / 坏画幅 / 残缺点；取证见 6.6 |
 
 ### 6.5 对照：成熟实现做对了、我们原来没做的（作品负责人追加要求）
 
@@ -518,7 +518,7 @@ docs/13 §6 记的是"标签页 → 选择页 → 舞台，100 个请求 2.06 MB
 2. **横向折算用"一个躯干长 = 0.5 米"**（和 docs/50 同一个数），离得远近、弯腰、侧身都会让尺度偏；死区吃掉小误差，大误差没在现场量过。
 3. **横向前馈停下时最多冲过 0.1 米**，和"不过冲"有张力。现场如果读成"身体比我多走了一步"，把 `lateralLead` 调成 0。
 4. **小屏的 `title` 看不见**：这一块指针穿透（`pointer-events: none`），悬停不出字。它只给无障碍与检查用；看得见的说明在 HUD。
-5. **`dev/framing-sim.ts` 手抄了 main.ts 的接线顺序。** main.ts 改了，模拟不会自动跟；取证数字只对当前这一版成立。
+5. **`dev/framing-sim.ts` 仍手抄 main.ts 的接线顺序。** 这一版已逐字段补齐画幅、系统取景、上半身横移快档、纵向 screen/world 抵消与真实 HUD 读数；但 main.ts 以后改顺序或新增输入，模拟不会自动跟。工作台只有 `RawPose` 时重建 world 骨架只是近似，精确回放须显式传同名关节高度；取证数字只对当前这一版成立。
 6. **回放录制仍然没有 `screen`**（§5.7 第 4 条）：`?demo=1` 上横向与侧边话都演示不了。
 
 ## 7 · 中景更快跟（2026-09-15，第四轮反馈）

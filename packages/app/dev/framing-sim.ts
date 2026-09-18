@@ -9,8 +9,10 @@ import {
   createFramingClassifier, decide, imageToStageX, lateralEvidence, stepCrop, stepLateral, stepShot, stepToward,
   verticalEvidence,
   cropTarget, smoothstep, CROP_FULL, LATERAL_REST, SHOT_REST,
-  type Crop, type FramingMode, type FramingPolicy, type FramingWhy, type LateralState, type LateralWhy, type Shot, type ShotState,
+  type Crop, type FramingDecision, type FramingMode, type FramingPolicy, type FramingReading, type FramingWhy,
+  type LateralState, type LateralWhy, type Shot, type ShotState, type VerticalEvidence,
 } from '../../core/src/autoframe.ts';
+import { buildSkeleton, mediapipeToWorld } from '../../core/src/skeleton.ts';
 import { AUTOFRAME } from '../../core/src/tuning.ts';
 import type { RawPose } from '../../core/src/types.ts';
 import { cropActive, createSeeWatch, type SeeReason, type SeeState } from '../src/ui/preview-state.ts';
@@ -25,6 +27,11 @@ export interface SimInput {
   cameraFraming?: boolean;
   /** 舞台视口宽高比（缺省 16:9） */
   aspect?: number;
+  /**
+   * 正式链在稳定化 / 腿保持之后得到的同名 world 关节高度。调用方拿得到时应传；
+   * 工作台只有 RawPose 时，会用同一套骨架映射做一个有限的近似，绝不再写死 0。
+   */
+  worldY?: Partial<Record<VerticalEvidence['anchor'], number>>;
 }
 
 /** 一帧的全部读数。字段名就是 JSON 里的键 */
@@ -34,6 +41,9 @@ export interface SimFrame {
   mode: FramingMode;
   why: FramingWhy;
   shot: Shot;
+  /** 分类器与策略的原始结果；HUD / trace 不再用手写占位值冒充生产读数。 */
+  reading: FramingReading;
+  decision: FramingDecision;
   /** 景别进度、速度与缓动后的进度 */
   progress: number;
   velocity: number;
@@ -55,6 +65,18 @@ export interface Sim {
   reset(): void;
 }
 
+/** 工作台没有正式 human skeleton 时的近似；坏姿态只丢纵向证据，不能抛进动画帧。 */
+function rawWorldY(pose: RawPose | null, anchor: VerticalEvidence['anchor']): number | null {
+  if (!pose) return null;
+  try {
+    const skeleton = buildSkeleton(mediapipeToWorld(pose), pose.world, pose.t);
+    const y = skeleton.joints[anchor]?.[1];
+    return typeof y === 'number' && Number.isFinite(y) ? y : null;
+  } catch {
+    return null;
+  }
+}
+
 export function createSim(opts: { kiosk?: boolean; keep?: number } = {}): Sim {
   const keep = opts.keep ?? Infinity;
   let classifier = createFramingClassifier({ kiosk: opts.kiosk });
@@ -68,11 +90,11 @@ export function createSim(opts: { kiosk?: boolean; keep?: number } = {}): Sim {
 
   return {
     step(input) {
-      const dt = input.dt;
-      const aspect = input.aspect ?? 16 / 9;
+      const dt = Number.isFinite(input.dt) && input.dt > 0 ? input.dt : 0;
+      const aspect = Number.isFinite(input.aspect) && (input.aspect ?? 0) > 0 ? input.aspect! : 16 / 9;
       const cam = input.cameraFraming === true;
       t += dt;
-      const r = classifier.update(input.pose, dt, { cameraFraming: cam });
+      const r = classifier.update(input.pose, dt, { cameraFraming: cam, aspect });
       const d = decide(input.policy ?? 'auto', r, { cameraFraming: cam });
       const seen = watch.update({ camera: true, pose: input.pose, upperIsIntended: d.upperIsIntended }, dt);
       const active = cropActive({ upperIsIntended: d.upperIsIntended, reduced: input.reduced ?? false, othersBodied: false });
@@ -81,14 +103,28 @@ export function createSim(opts: { kiosk?: boolean; keep?: number } = {}): Sim {
       legHold = stepToward(legHold, d.holdLegs ? 1 : 0, dt, AUTOFRAME.legBlendSeconds);
       // 前倾（头胸相对骨盆）：舞台上它来自骨架；这里从画面折一个同量纲的数
       const s = input.pose?.screen;
-      const lean = s ? imageToStageX((s[11].x + s[12].x) / 2, 0.275, aspect) - imageToStageX((s[23].x + s[24].x) / 2, 0.275, aspect) : 0;
+      const middleX = (a: number, b: number): number | null => {
+        const x0 = s?.[a]?.x, x1 = s?.[b]?.x;
+        return Number.isFinite(x0) && Number.isFinite(x1) ? (x0! + x1!) / 2 : null;
+      };
+      const shoulderX = middleX(11, 12), pelvisX = middleX(23, 24);
+      const lean = shoulderX !== null && pelvisX !== null
+        ? imageToStageX(shoulderX, 0.275, aspect) - imageToStageX(pelvisX, 0.275, aspect)
+        : 0;
       // 舞台用上一帧的余量（`stage.lateralRoom`），这里同样
       const before = shotCamera(DEFAULT_BOUNDS, 1.71, shot, aspect);
-      lateral = stepLateral(lateral, { evidence: lateralEvidence(input.pose, aspect), room: before.room, enabled: true, aspect }, dt);
+      lateral = stepLateral(lateral, {
+        evidence: lateralEvidence(input.pose, aspect), room: before.room, enabled: true, aspect,
+        upper: d.shot === 'upper', cameraFraming: cam,
+      }, dt);
       const verticalRaw = verticalEvidence(input.pose, aspect);
-      const vertical = verticalRaw ? {
-        ...verticalRaw, worldY: 0, accepted: lateral.why !== 'hold-jump', cameraFraming: cam,
-      } : verticalRaw;
+      const suppliedY = verticalRaw ? input.worldY?.[verticalRaw.anchor] : undefined;
+      const worldY = verticalRaw
+        ? (Number.isFinite(suppliedY) ? suppliedY! : rawWorldY(input.pose, verticalRaw.anchor))
+        : null;
+      const vertical = verticalRaw && worldY !== null ? {
+        ...verticalRaw, worldY, accepted: lateral.why !== 'hold-jump', cameraFraming: cam,
+      } : verticalRaw ? null : verticalRaw;
       const drift = 0;
       shot = stepShot(shot, {
         shot: d.shot === 'upper' && drift <= 0 ? 'upper' : 'full',
@@ -100,7 +136,7 @@ export function createSim(opts: { kiosk?: boolean; keep?: number } = {}): Sim {
       const c = shotCamera(DEFAULT_BOUNDS, 1.71, shot, aspect);
       const target = active && !snap ? cropTarget(s, AUTOFRAME.previewZoom) : null;
       const frame: SimFrame = {
-        t, dt, mode: r.mode, why: r.why, shot: d.shot,
+        t, dt, mode: r.mode, why: r.why, shot: d.shot, reading: r, decision: d,
         progress: shot.progress, velocity: shot.velocity, eased: smoothstep(shot.progress),
         fov: c.fov, panX: c.panX, panY: c.panY, room: c.room, legHold: smoothstep(legHold),
         see: { state: seen.state, reason: seen.reason, side: seen.side ?? null },

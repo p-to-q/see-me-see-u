@@ -22,7 +22,7 @@ import {
   LATERAL_REST, SHOT_REST, type LateralState, type ShotState, type VerticalMeasurement,
 } from '../../core/src/autoframe.ts';
 import { mulberry32 } from '../../core/src/rng.ts';
-import { AUTOFRAME, STAGE } from '../../core/src/tuning.ts';
+import { AUTOFRAME, PEOPLE, STAGE } from '../../core/src/tuning.ts';
 import { person, SEATED, WHOLE } from '../../core/test/framing-people.ts';
 import { createSim, maxJumps } from '../dev/framing-sim.ts';
 
@@ -193,6 +193,78 @@ test('工作台：逐帧暴露景别速度，并把速度变化纳入同一份�
   assert.ok(Number.isFinite(jumps.progressVelocity.value));
   assert.ok(jumps.progressVelocity.value <= AUTOFRAME.maxStep.progressVelocity + 1e-9,
     `工作台量到景别速度跳变 ${jumps.progressVelocity.value}`);
+});
+
+test('工作台 parity：画幅、上半身快档与系统取景兜底逐字段等于生产控制器', () => {
+  const aspect = 9 / 16;
+  const pose = person({ ...SEATED, aspect, cx: 0.58 });
+  const dt = 1 / 30;
+  const sim = createSim();
+  const actual = sim.step({ pose, dt, policy: 'upper', cameraFraming: true, aspect });
+
+  const classifier = createFramingClassifier();
+  const reading = classifier.update(pose, dt, { cameraFraming: true, aspect });
+  const decision = decide('upper', reading, { cameraFraming: true });
+  const before = shotCamera(DEFAULT_BOUNDS, 1.71, SHOT_REST, aspect);
+  const expected = stepLateral(LATERAL_REST, {
+    evidence: lateralEvidence(pose, aspect), room: before.room, enabled: true, aspect,
+    upper: decision.shot === 'upper', cameraFraming: true,
+  }, dt);
+
+  assert.deepEqual(actual.reading, reading, '工作台分类器没有吃生产链同一份 aspect / cameraFraming');
+  assert.deepEqual(actual.decision, decision, '工作台自己重写了策略结论');
+  assert.deepEqual(actual.lateral, {
+    x: expected.x.x, target: expected.target, deadZone: expected.deadZone,
+    why: expected.why, side: expected.side,
+  }, '工作台横向没有吃生产链同一份 upper / cameraFraming');
+
+  const dim = person({ ...WHOLE, aspect, vis: 0.55, score: 0.55 });
+  const dimEvidence = lateralEvidence(dim, aspect);
+  assert.ok(dimEvidence?.trusted && !dimEvidence.quality, '测试前提：应是位置存在但低质量');
+  const dimFrame = createSim().step({ pose: dim, dt, policy: 'upper', cameraFraming: true, aspect });
+  assert.equal(dimFrame.lateral.why, 'center', '系统确认正在取景时，工作台仍冻结在低质量坐标');
+});
+
+test('工作台 parity：screen 与同名 world 关节同步移动时抵消，不把一个动作跟两遍', () => {
+  const aspect = 16 / 9;
+  const base = person(SEATED);
+  const moved = person({ ...SEATED, hy: (SEATED.hy ?? 0) + 0.04 });
+  const evidence = verticalEvidence(base, aspect);
+  assert.ok(evidence && evidence.anchor === 'pelvis', '测试前提：应使用 pelvis 纵向锚点');
+  const worldDelta = -0.04 * (PEOPLE.torsoMeters / evidence.scale);
+  const input = (pose: typeof base, worldY: number) => ({
+    pose, dt: 1 / 60, policy: 'upper' as const, aspect,
+    worldY: { pelvis: worldY },
+  });
+
+  const synced = createSim();
+  let frame = synced.step(input(base, 1));
+  for (let i = 1; i < 90; i++) frame = synced.step(input(base, 1));
+  const before = frame.panY;
+  for (let i = 0; i < 120; i++) frame = synced.step(input(moved, 1 + worldDelta));
+  assert.ok(Math.abs(frame.panY - before) < 0.003,
+    `screen + world 同步移动仍让工作台追了 ${(frame.panY - before).toFixed(4)}m`);
+
+  const screenOnly = createSim();
+  let control = screenOnly.step(input(base, 1));
+  for (let i = 1; i < 90; i++) control = screenOnly.step(input(base, 1));
+  const controlBefore = control.panY;
+  for (let i = 0; i < 120; i++) control = screenOnly.step(input(moved, 1));
+  assert.ok(control.panY > controlBefore + 0.01,
+    '对照组没有追 screen 位移，抵消测试等于没有执行');
+});
+
+test('工作台 parity：坏 dt / 画幅和残缺 landmark 只走有限 fallback，不抛进动画帧', () => {
+  const broken = person(SEATED);
+  broken.screen = [{ x: Number.NaN, y: Infinity, z: 0 }];
+  broken.world = [];
+  broken.score = Number.NaN;
+  const frame = createSim().step({ pose: broken, dt: Number.NaN, aspect: -Infinity });
+  for (const value of [
+    frame.t, frame.dt, frame.progress, frame.velocity, frame.fov, frame.panX, frame.panY,
+    frame.room, frame.legHold, frame.crop.zoom, frame.crop.cx, frame.crop.cy,
+    frame.lateral.x, frame.lateral.target, frame.lateral.deadZone,
+  ]) assert.ok(Number.isFinite(value), `工作台坏输入产出 ${String(value)}`);
 });
 
 test('横向接线：30Hz 推理先过姿态时钟，再喂 120Hz 跟随；分类器与小屏只吃未停滞原话', () => {
