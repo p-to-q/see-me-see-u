@@ -23,6 +23,7 @@
 
 | 日期 | 这一版落地了什么 |
 |---|---|
+| 2026-09-18 | 变化弧线加了一道 app 层的产品门：合法拓扑不再自动等于可公开播放。orb / furball 仍在谱系声明 `radial`，但没有显式叠加时会退回连通人形；参数化声明保留肢体 / 头身比例。观众控件和随机池也不再暴露 radial，显式 `?plan=radial` 仍可用于 look-dev。90 秒弧线用 60Hz 回放守住 42.2s 尚未漂移、42.4s 已开始但目标仍连通；`npm run check`：core 348 / app 674 / parts 247 件、0 错 12 警告。这是止血，不是 radial 完成；hub tether 与真人回归未做 |
 | 2026-09-18 | 忒修斯替换 / graft / remorph 的短命视觉几何不再参与主体落地：芯、墨屑、缩放和飞入 offset 只画；`Creature` 为每个交接槽位另给 `assemble()` 一件满尺寸、在插座上的稳定代理，只算 lift、不进渲染桶，未交接部位继续按真实几何落地。真实 `parts.json` 回归扫描全部槽位（含 foot）、replace / crossfade 与 t=0..1 共 21 个阶段；旧 joint t=0.65 会把稳定头部整体抬 33.2mm，修后完整 4×4 矩阵不动。无 parts 的 placeholder 路径同样有限、不泵动。`npm run check`：core 348 / app 670 / parts 247 件、0 错 12 警告。仍欠：不同 old→new 在交接结束时的 AABB 基准差要做连续插值，脱离 / 墨屑自己的几何还要独立守地板；本刀只隔离短命效果，未宣称变化链完成 |
 | 2026-09-18 | 多人主身份交接不再只换精化器 / 稳定器 / 生命力：主通道的姿态时钟、整具与逐骨运动量、触地、腿部保持、Auto Framing 分类、横向身份门和中景纵向基线现在在换 id 时一起断开；同一 id 失联后认回还会重置自己的滤波链。会话弧线、演化、忒修斯与 seed 故意继续。横向根与镜头保留交接前已经画出的当前位置，只清速度、滤波和旧锚点，避免清状态反而造出一帧瞬移。`primary-handoff.test.ts` 跑真实 motion / bone energy / ground 首帧，`framing-lateral.test.ts` 守交接当帧相机像素不变与身份滤波清空；`npm run check`（core 348 / app 668 / parts 247 件、0 错 12 警告）已过；真人多人交接未跑 |
 | 2026-09-17 | 自动人数多了一条真正的浏览器验收入口 `scripts/people/accept.ts`：同一份单人合成 Y4M 用两个临时 Chrome profile 串行跑 worker 与 `?worker=off`，只在主身份稳定后计量，并要求 `idle → probing → idle`、确认上限始终 1、单一主 id、无伴随身体、探测档明显低于常态档且前后恢复、从首次导航起无重载 / exception / 2 秒停帧；帧率通过窗口是常态中位数 ≥21Hz、探测中位数 9.75–18.75Hz 且 ≤ 前后较低者的 80%，不冒充精确 `30 → 15 → 30`。每场写 `worker.json` / `main.json`，参数、runner commit、dirty、Chrome 与宿主负载先写 `invocation.json`；复用输出目录会先清旧结果，四份文件共享 `runId`，浏览器报告另记实际 URL、页面 DOM 与入口脚本 SHA-256，旧 PASS / 旧 dist 都不能混成新证据。CDP 连接与每条命令都有 10 秒上限，中断会先杀 Chrome 并清临时 profile。脚本不再把过载宿主误报成产品回归：当前 14 逻辑核机器实测 load 约 190（每核 13.5），仓库原有平滑度探针也同时从历史 58.5–58.7fps 掉到 27.8–35.3fps，因此新入口会在开 Chrome 前以 exit 2 拒绝这类场次。源码 / CLI 守卫 9 条与 `npm run check`（core 321 / app 632 / parts 247、0 错 12 警告）、build 已过；完整浏览器验收 **Not run：当前宿主负载不合格，须在空闲机器重跑** |
@@ -143,9 +144,9 @@
 | `src/assets/library.ts` PartLibrary（parts.json + glb + 程序化占位） | `stable` | 把 `parts.json` 改名 → 页面照跑，30 个占位实例（`creature-fallback-no-partsjson.png`）；单个 glb 改名 → 只有那一个槽位退回占位，16/17 正常（`creature-one-glb-missing-head-fallback.png`）|
 | **运行时读 `/parts/curation.json`**（`library.ts` 的 `loadCuration()` → `makeGenome({ rejected })`） | `stable` | 人眼剔掉的件真的不进池：`npm run check` 里 `packages/core/test/genome-curation.test.ts` 拿**真的** `parts.json` × `curation.json` 跑穷举 —— 所有 theme × tier 1/2/3 × 60 seed，10 件 reject 一次都没抽到；同一组里还钉住"没有物种因为策展消失"（可选物种名单加不加 `rejected` 完全相同）。`npm run check:parts` 当场复述这个集合：`策展: keep 0 · reject 10`，其中 3 件仍留在 `parts.json` 里是故意的（docs/14 §5：genome 排除、文件保留）。取不到时**不拖垮资产层**：`loadCuration()` 与 `parts.json` 分开 fetch，失败只是"没有人工品控这一层"，`console.warn` 一行后退成空集合（ADR-4 / P3）|
 | `src/creature/assemble.ts` 纯装配（挂载 + 关节盖片） | `stable` | 30 个实例的 `M·(0,0,0)` 与 `bone.p0` 误差 0；stretch 槽位 `M·(0,1,0)` 与 `p1` 误差 0 |
-| **A 档新拓扑 `radial`（无躯干）/ `column`（单柱）** | `stable` | 纯函数，`packages/core/src/bodyplan.ts`。`radial`：四条肢摊成四条绕核心的轨道弧，弦长 = 骨长（部件不被拉伸），半径 = 末端离中心的距离、高度 = 末端相对中心的高度、朝向 = 肩轴；核心压到 0.40。`column`：六块腿骨首尾串成一根桅杆，双臂是顶端分支，蹲下按之字折叠（只改方向不改长度）。`test/bodyplan.test.ts` 新增 10 条，覆盖"真的没有躯干/没有腿"与三条因果（抬手 / 蹲下 / 张开），共 110 条全绿。取证 `scratch/evidence/plan-radial-*.png`、`plan-column-*.png`。**只在合成骨架上跑过，没接过真人** |
+| **A 档新拓扑 `radial`（无躯干）/ `column`（单柱）** | `experimental` | 纯函数，`packages/core/src/bodyplan.ts`。`radial`：四条肢摊成四条绕核心的轨道弧，弦长 = 骨长（部件不被拉伸），半径 = 末端离中心的距离、高度 = 末端相对中心的高度、朝向 = 肩轴；核心压到 0.40。`column`：六块腿骨首尾串成一根桅杆，双臂是顶端分支，蹲下按之字折叠（只改方向不改长度）。`test/bodyplan.test.ts` 新增 10 条，覆盖"真的没有躯干/没有腿"与三条因果（抬手 / 蹲下 / 张开）。取证 `scratch/evidence/plan-radial-*.png`、`plan-column-*.png`。**只在合成骨架上跑过，没接过真人**；2026-09-18 起 radial 仅保留显式 `?plan=radial` 开发预览，自动旅程 / 控件 / 随机池均隔离，column 不受影响 |
 | `inverted` 的落地基准修正 | `stable` | 原来按"最低的脚"贴地，而倒过来之后脚在最上面 → 头被按到地板以下。改成 `PLANS_WITHOUT_FEET`（`radial` / `inverted`）按**整体最低点**贴地，且出口的比例遍沿用同一基准。这是 `xeno` 换成 `inverted` 时抓到的 |
-| 六个条目重新分配身体方案 | `stable` | orb/furball→`radial`，manipulator/screenface→`column`，autonomous→`quadruped`，xeno→`inverted`，char.paper→`towering`（`towering` 与 `inverted` 从此不再是零使用）。改的是 `roster.ts` 的 `BODY_PLAN`，跑 `factory:index` 只重写 `parts.json` 的 themes；**191 件 parts 数组逐字节未变**（改前后 JSON 比对），`check:parts` 191 件 0 错 |
+| 六个条目重新分配身体方案 | `experimental` | orb/furball→`radial`，manipulator/screenface→`column`，autonomous→`quadruped`，xeno→`inverted`，char.paper→`towering`（`towering` 与 `inverted` 从此不再是零使用）。改的是 `roster.ts` 的 `BODY_PLAN`，跑 `factory:index` 只重写 `parts.json` 的 themes；**191 件 parts 数组逐字节未变**（改前后 JSON 比对），`check:parts` 191 件 0 错。orb / furball 的声明仍在，但 radial 当前不会自动到场；它们的公开旅程回到保留身材的连通人形，等 tether 验收 |
 
 | **脚长在腿上（`foot` 的挂载 + `FOOT` 三个旋钮）** | `stable` | **改之前脚是躺在地上的**：`foot` 按 uniform 挂，长轴尺寸 = `SLOT_WIDTH.foot / localGirth` = **0.39m**，和 0.17m 的脚骨毫无关系；而部件契约把 socketA 放在长轴端点，于是整只脚从脚踝**往前平铺**出去、戳穿地板，脚踝以下是空的。现在脚长由脚骨算（`FOOT.lengthOfBone` 补上踝后面那截脚跟，带钳位），踝钉在脚长三成处（`FOOT.anchor`），`SLOT_WIDTH.foot` 改读「脚宽」0.115。取证 `scratch/evidence/body-feet-before-after.png`（同机位同 seed 的脚部特写）与 `body-{porcelain,xeno,manipulator}-{before,after}.png` |
 | 关节盖片盖住接缝 | `experimental` | `MORPH.jointCapScale` 0.75 → 0.95。0.75 时盖片比它要盖的那根骨头还细，肩/胯/膝的穿插照样露在外面 —— 盖了等于没盖。取证同上那六张图。**审美判断，没有量化判据** || `src/creature/body.ts` `BodyInstance` 接口（身体方案的插拔点，docs/18 §3） | `stable` | 纯提取，`creature.ts` 一行没动。编译期断言 `Creature extends BodyInstance` 在 `npm run typecheck` 里（把 `pose` 签名改坏会立刻红）；`mass.ts` 是第二个实现 |
@@ -258,7 +259,8 @@
   B 档换的是渲染器，一个槽位件都不实例化 —— 那 32 件花过 credits 的资产在画面上看不见。
   这是 mass 落地那一轮的取舍，不是新账。A 档的新拓扑没有这个代价（docs/18 §6）。
 - **`radial` / `column` 没接过真人骨架。** 合成 A-pose 与三副合成姿态下因果成立，
-  但真人追踪的抖动会怎么进到"弧半径"和"折叠角"里，没见过。
+  但真人追踪的抖动会怎么进到"弧半径"和"折叠角"里，没见过。radial 因承重链断开
+  已只留显式开发预览；这是隔离风险，不是真人验收的替代。
 - `mass` 里的旋钮（`res` 默认值、球间距、半径系数、`isolation`/`subtract`）按 `tuning.ts`
   的规矩本该住在 `tuning.ts`，同样因为冻结契约暂时留在模块里。
 

@@ -42,6 +42,7 @@ import { createMassBody } from './creature/mass.ts';
 import { createNascent } from './creature/nascent.ts';
 import { createSwarmBody } from './creature/swarm.ts';
 import type { BodyInstance } from './creature/body.ts';
+import { automaticBodyPlan, bodyPlanFor } from './creature/body-plan-policy.ts';
 import { createStage } from './stage/stage.ts';
 import { contactPoints, REFERENCE_POSE } from './stage/framing.ts';
 import { chooseTheme, themeFromUrl } from './choose/choose.ts';
@@ -390,13 +391,16 @@ async function boot(): Promise<void> {
   // `?plan=` 仍然**立刻**生效（不等第 III 乐章）：look dev 要的是一个开场就站定的靶子。
   // 但它和控件条按下的形体一样是一条**叠加**（`shell/intent.ts`），不再是永远赢过弧线的覆盖 ——
   // 再点一次就拿掉，身体回到弧线（作品负责人 2026-09-14：没有一个按钮能锁住系统）。
-  const speciesPlan: BodyPlan = themeDef?.bodyPlan ?? 'rig';
+  const declaredSpeciesPlan: BodyPlan = themeDef?.bodyPlan ?? 'rig';
+  // “能算”不等于“能自动播”。旧 radial 的两条腿弧没有连回主体，现场读成断腿。
+  // 物种的自动路径先经过 app 策略门；显式 `?plan=radial` 仍优先，留给开发取证。
+  const speciesPlan: BodyPlan = automaticBodyPlan(declaredSpeciesPlan);
   /** 观众叠在弧线上的东西。按钮只增删它，导演和身体到场每帧自己读；人一走回到 URL 写的那一份 */
   let intent: Intent = intentFromFlags(flags);
   const kindOf = (p: BodyPlan | null): string =>
     (p === null ? 'rig' : typeof p === 'string' ? p : (p.kind ?? 'rig'));
   /** 这一帧实际用的方案（弧线还没到第 III 乐章时是 `rig`，见 `planDrift()`） */
-  const activePlan = (): BodyPlan => (intent.form as BodyPlan | undefined) ?? speciesPlan;
+  const activePlan = (): BodyPlan => bodyPlanFor(declaredSpeciesPlan, intent.form as BodyPlan | undefined);
 
   // ── 4b. 左上角那块小屏幕（`ui/preview.ts`）────────────────────────────────
   // **挂在这里，不是更早。** 它要显示摄像头画面，而这件作品有一条硬规矩：

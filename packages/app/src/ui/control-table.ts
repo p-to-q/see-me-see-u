@@ -32,7 +32,8 @@
  */
 import { ARC_ACTS } from '../../../core/src/arc.ts';
 import { FRAMING_POLICIES, isFramingPolicy, type FramingPolicy } from '../../../core/src/autoframe.ts';
-import { BODY_PLANS, PLANS_WITHOUT_PARTS } from '../../../core/src/bodyplan.ts';
+import { PLANS_WITHOUT_PARTS } from '../../../core/src/bodyplan.ts';
+import { PUBLIC_BODY_PLANS } from '../creature/body-plan-policy.ts';
 import { SCENE_IDS } from '../stage/scenes.ts';
 import { intentFromFlags } from '../shell/intent.ts';
 import { parsePeople, type Flags } from '../shell/kiosk.ts';
@@ -118,10 +119,10 @@ const SHADINGS = ['physical', 'toon'] as const;
 
 export const CONTROLS: readonly ControlDef[] = [
   {
-    id: 'form', kind: 'overlay', group: 'form', key: 'F', options: BODY_PLANS, default: null,
+    id: 'form', kind: 'overlay', group: 'form', key: 'F', options: PUBLIC_BODY_PLANS, default: null,
     fromFlags: (f) => f.plan,
     url: { param: 'plan', write: (v) => (v as string | null) ?? null },
-    roll: { slot: 1, param: 'plan', options: BODY_PLANS },
+    roll: { slot: 1, param: 'plan', options: PUBLIC_BODY_PLANS },
     links: [{ page: '/dev/lineup.html', theme: false }, { page: '/dev/mass.html', theme: true }],
     // 进出 B 档（团块 / 点场）是另一条身体实现，开机时就定了
     reload: (ctx, next) => {

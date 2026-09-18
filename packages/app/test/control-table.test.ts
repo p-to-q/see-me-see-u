@@ -11,9 +11,9 @@ import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 import { ARC_ACTS } from '../../core/src/arc.ts';
-import { BODY_PLANS } from '../../core/src/bodyplan.ts';
 import { SCENE_IDS } from '../src/stage/scenes.ts';
 import { SHADING_IDS } from '../src/creature/shading.ts';
+import { PUBLIC_BODY_PLANS } from '../src/creature/body-plan-policy.ts';
 import { readFlags } from '../src/shell/kiosk.ts';
 import { COPY } from '../src/ui/i18n.ts';
 import {
@@ -70,7 +70,8 @@ test('弧线拥有的两样（玩法、形体）是叠加；其余是普通的�
   assert.equal(kind.scene, 'choice');
   assert.equal(kind.species, 'choice');
   assert.deepEqual(optionsOf(CONTROLS.find((c) => c.id === 'act')!, []), [...ARC_ACTS]);
-  assert.deepEqual(optionsOf(CONTROLS.find((c) => c.id === 'form')!, []), [...BODY_PLANS]);
+  assert.deepEqual(optionsOf(CONTROLS.find((c) => c.id === 'form')!, []), [...PUBLIC_BODY_PLANS]);
+  assert.ok(!PUBLIC_BODY_PLANS.includes('radial'), '未系住的 radial 不该出现在观众控件里');
   assert.deepEqual(optionsOf(CONTROLS.find((c) => c.id === 'scene')!, []), [...SCENE_IDS]);
 });
 
