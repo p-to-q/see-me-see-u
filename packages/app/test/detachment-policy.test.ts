@@ -112,7 +112,7 @@ test('脱离接线: 主身体消费 plan，伴随身体原位；receipt 后才�
   assert.ok(event.indexOf('swapped.set(') > event.indexOf('creature.replace('), 'renderer 接纳前就提交了长期 genome');
   const handoff = main.slice(main.indexOf('const resetPrimaryTemporal'), main.indexOf('const applyGovernor'));
   assert.match(handoff, /creature\.settleDetachment\(\)/, '旧人的脱离会跳到新主人的 socket');
-  assert.match(main, /contactPoints\(lastSkeleton, STAGE\.contactPoints, STAGE\.contactLiftRange, contactPartDetached\)/,
+  assert.match(main, /const shown = presented\.skeleton;[^]*contactPoints\(shown, STAGE\.contactPoints, STAGE\.contactLiftRange, contactPartDetached\)/,
     '脱离后仍在按完整骨架画接触阴影或触发落脚声');
   assert.ok(main.indexOf('const contacts = contactPoints(') > main.indexOf('commitDetachment('),
     '接触点在当帧脱离 receipt 之前取样，会多留一帧假落点');
