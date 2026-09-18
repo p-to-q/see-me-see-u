@@ -12,7 +12,7 @@
 
 | # | 现象 | 证据 | 下一步 | 现状 |
 |---|---|---|---|---|
-| Q20 | 变化后期会把承重链 / 脚画成脱离或拖地，部分身体入地；echo 又给整副骨架增加 1.2s 延迟，削弱“它在当下回应我” | docs/54；[#18](https://github.com/p-to-q/see-me-see-u/issues/18) | 用现有第一段腿骨为 radial 做 hub tether 并跑真人取证；再把整副 echo 改成实时载波 + 局部余波 | 短命效果已退出主体落地；旧 radial 已离开自动 / 控件 / 随机路径，显式开发预览保留；tether / 实时载波未实现 |
+| Q20 | 变化后期会把承重链 / 脚画成脱离或拖地，部分身体入地；旧 echo 又给整副骨架增加 1.2s 延迟，削弱“它在当下回应我” | docs/54；[#18](https://github.com/p-to-q/see-me-see-u/issues/18) | 把 sampler 移入每个 Director / encounter；隔离 live 路径的自主呼吸；用现有第一段腿骨为 radial 做 hub tether，并跑真人取证 | 短命效果已退出主体落地；旧 radial 已离开自动 / 控件 / 随机路径；实时载波 + 前臂 / 手方向余波已落地，200mm 阶跃当帧回应 102.2mm，15–120Hz 都在首帧回应；显式 radial 开发预览与全局 sampler 仍保留 |
 
 ## P1 · 体验与可信度
 

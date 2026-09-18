@@ -3,8 +3,8 @@
  *
  * 三道闸，各对着那条裁定里的一句话：
  *  1. **没有边界**：`arc.overall` 按 1% 一步扫过去，三个数没有一步跳得超过一个小界。
- *  2. **四个玩法仍然是它们自己**：在各自的地名上，三个数等于删掉的那四个文件里的数，
- *     而且采样器吐出来的骨架和那四个文件逐帧对得上。
+ *  2. **四个地名仍在**：三个数保留原量级；follow / facing 在自己的地名上仍与旧实现
+ *     对得上。echo / resist 不再改整副骨架，改守实时载波、局部余波与局部重量。
  *     参照物是**抄在这个文件里的旧实现**，不是 `tuning.ts` —— 参照物要是跟着 LINE 一起改，
  *     这道闸就会和它要挡的东西一起坏（docs/44 §10.5 第 6 条那三道坏闸的形状）。
  *  3. **永远不脱钩**：一个抬着手站定的人，整条线走完，身体一毫米都不自己动。
@@ -13,9 +13,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createLineSampler, lineAt, linePoints, pointOf, speciesDrift } from '../src/line.ts';
 import { movementBounds, type MovementIndex } from '../src/arc.ts';
-import { buildSkeleton } from '../src/skeleton.ts';
+import { BONES, buildSkeleton } from '../src/skeleton.ts';
 import { ARC } from '../src/tuning.ts';
-import type { Bone, Skeleton, Vec3 } from '../src/types.ts';
+import type { Skeleton, Vec3 } from '../src/types.ts';
 
 // ─────────────────────────── 旧实现（逐字取自删掉之前的 acts/*.ts） ───────────────────────────
 
@@ -25,43 +25,6 @@ const TODAY = {
   weight: [0, 0, 1, 0],
   facing: [0, 0, 0, 1],
 };
-
-/** echo.ts：环形缓冲里离 t-1.2 最近的那一帧；缓冲不够半个延迟就跟随 */
-function legacyEcho() {
-  const ECHO = 1.2; const CAP = Math.ceil(ECHO * 60 * 2);
-  const buf: { t: number; sk: Skeleton }[] = []; let head = 0;
-  return (sk: Skeleton, t: number): Skeleton => {
-    buf[head] = { t, sk }; head = (head + 1) % CAP;
-    const want = t - ECHO;
-    let best: { t: number; sk: Skeleton } | null = null;
-    for (const f of buf) { if (!f) continue; if (!best || Math.abs(f.t - want) < Math.abs(best.t - want)) best = f; }
-    return best && t - best.t >= ECHO * 0.5 ? best.sk : sk;
-  };
-}
-
-/** resist.ts：逐关节临界阻尼追踪，τ 随速度 0.06..0.42 */
-function legacyResist(first: Skeleton) {
-  const follow: Record<string, Vec3> = {};
-  for (const k in first.joints) follow[k] = [...first.joints[k]] as Vec3;
-  return (sk: Skeleton, dt: number, speed: number): Skeleton => {
-    const step = Math.min(dt, 1 / 15);
-    const tau = 0.06 + (0.42 - 0.06) * Math.min(1, speed / 1.2);
-    const a = 1 - Math.exp(-step / Math.max(1e-3, tau));
-    const track = (key: string, target: Vec3): Vec3 => {
-      let cur = follow[key];
-      if (!cur) { cur = [target[0], target[1], target[2]]; follow[key] = cur; return [...cur] as Vec3; }
-      cur[0] += (target[0] - cur[0]) * a; cur[1] += (target[1] - cur[1]) * a; cur[2] += (target[2] - cur[2]) * a;
-      return [...cur] as Vec3;
-    };
-    const joints: Record<string, Vec3> = {};
-    for (const k in sk.joints) joints[k] = track(k, sk.joints[k]);
-    const bones: Bone[] = sk.bones.map((b) => {
-      const p0 = track(`${b.id}#0`, b.p0); const p1 = track(`${b.id}#1`, b.p1);
-      return { ...b, p0, p1, length: Math.hypot(p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2]) };
-    });
-    return { ...sk, joints, bones };
-  };
-}
 
 /** facing.ts：X 取负 */
 function legacyFacing(sk: Skeleton): Skeleton {
@@ -187,13 +150,11 @@ test('line: 在各自的地名上，三个数就是删掉的那四个玩法里�
   }
 });
 
-/** 钉在第 k 个地名上跑 `seconds` 秒挥手，逐帧和旧实现比，返回最大偏差（米） */
+/** 钉在 follow / facing 地名上跑 `seconds` 秒挥手，逐帧和旧实现比 */
 function pinnedVsLegacy(k: MovementIndex, seconds = 6): number {
   const s = createLineSampler();
   const target = lineAt(pointOf(k));
   const dt = 1 / 60;
-  const echo = legacyEcho();
-  let resist: ReturnType<typeof legacyResist> | null = null;
   let worst = 0;
   for (let i = 0; i < Math.round(seconds / dt); i++) {
     const t = i * dt;
@@ -202,24 +163,134 @@ function pinnedVsLegacy(k: MovementIndex, seconds = 6): number {
     const got = s.apply({ skeleton: sk, t, dt, speed, target, snap: i === 0 });
     let want: Skeleton;
     if (k === 0) want = sk;
-    else if (k === 1) want = echo(sk, t);
-    else if (k === 2) { resist ??= legacyResist(sk); want = resist(sk, dt, speed); }
     else want = legacyFacing(sk);
-    // 旧 echo 缓冲不够半个延迟时跟随、新的取最老那一帧：这 1.2 秒的建立期不比
-    if (k === 1 && t < 1.25) continue;
     worst = Math.max(worst, worstJoint(got, want, k === 3));
   }
   return worst;
 }
 
 const NAMES = ['follow', 'echo', 'resist', 'facing'];
-for (let k = 0; k < 4; k++) {
+for (const k of [0, 3] as const) {
   test(`line: 钉在第 ${k + 1} 个地名上，采样器逐帧就是原来的 ${NAMES[k]}`, (t) => {
     const worst = pinnedVsLegacy(k as MovementIndex);
     t.diagnostic(`${NAMES[k]}: 挥手 6 秒最大偏差 ${(worst * 1000).toFixed(4)}mm`);
     assert.ok(worst < 1e-3, `${NAMES[k]} 在自己的地名上和原来差了 ${(worst * 1000).toFixed(2)}mm`);
   });
 }
+
+function rightWristStep(dx: number, t: number): Skeleton {
+  const pose: Record<string, Vec3> = {};
+  for (const key in POSE) pose[key] = [...POSE[key]] as Vec3;
+  pose.wristR[0] += dx;
+  return buildSkeleton(pose, [], t);
+}
+
+function assertCoherent(sk: Skeleton): void {
+  const byId = new Map(sk.bones.map((bone) => [bone.id, bone]));
+  for (const [id, a, b] of BONES) {
+    const bone = byId.get(id)!;
+    assert.ok(bone, `${id} 丢了`);
+    assert.ok(gap(bone.p0, sk.joints[a]) < 1e-9, `${id}.p0 没接在 ${a}`);
+    assert.ok(gap(bone.p1, sk.joints[b]) < 1e-9, `${id}.p1 没接在 ${b}`);
+    assert.ok(Math.abs(bone.length - gap(bone.p0, bone.p1)) < 1e-9, `${id}.length 不是实际端点距离`);
+  }
+  for (const point of Object.values(sk.joints)) for (const v of point) assert.ok(Number.isFinite(v), '关节出现非有限值');
+  for (const bone of sk.bones) for (const v of [...bone.p0, ...bone.p1, bone.length]) assert.ok(Number.isFinite(v), `${bone.id} 出现非有限值`);
+}
+
+test('line/resist: 重量留在双臂末端，主体当帧回应且骨长不变', () => {
+  const sampler = createLineSampler();
+  const target = lineAt(pointOf(2));
+  const dt = 1 / 60;
+  const base = rightWristStep(0, 0);
+  for (let i = 0; i < 120; i++) {
+    sampler.apply({ skeleton: { ...base, t: i * dt }, t: i * dt, dt, speed: 0, target, snap: i === 0 });
+  }
+
+  const live = rightWristStep(0.2, 2);
+  const out = sampler.apply({ skeleton: live, t: 2, dt, speed: 0.8, target, snap: false });
+  for (const key of ['pelvis', 'chest', 'neck', 'headCenter', 'shoulderR', 'elbowR', 'hipL', 'footIdxR']) {
+    assert.ok(gap(out.joints[key], live.joints[key]) < 1e-9, `${key} 被重量拖慢了`);
+  }
+  assert.ok(gap(out.joints.wristR, base.joints.wristR) > 0.001, '前臂在动作第一帧完全没回应');
+  assert.ok(gap(out.joints.wristR, live.joints.wristR) > 0.01, '重量没有留下可见阻力');
+  assert.ok(Math.abs(gap(out.joints.elbowR, out.joints.wristR) - gap(live.joints.elbowR, live.joints.wristR)) < 1e-9,
+    '重量改变了当前前臂长度');
+  assert.ok(Math.abs(gap(out.joints.wristR, out.joints.handTipR) - gap(live.joints.wristR, live.joints.handTipR)) < 1e-9,
+    '重量改变了当前手部长度');
+  assertCoherent(out);
+});
+
+test('line/echo: 手腕阶跃当帧就回应，历史仍只是局部余波', (t) => {
+  const sampler = createLineSampler();
+  const target = lineAt(pointOf(1));
+  const dt = 1 / 60;
+  const base = rightWristStep(0, 0);
+  for (let i = 0; i < 120; i++) sampler.apply({ skeleton: { ...base, t: i * dt }, t: i * dt, dt, speed: 0, target, snap: i === 0 });
+
+  const live = rightWristStep(0.2, 2);
+  const out = sampler.apply({ skeleton: live, t: 2, dt, speed: 0.8, target, snap: false });
+  const input = gap(live.joints.wristR, base.joints.wristR);
+  const response = gap(out.joints.wristR, base.joints.wristR);
+  t.diagnostic(`200mm 手腕阶跃当帧回应 ${(response * 1000).toFixed(1)}mm，历史比例 ${sampler.history.toFixed(2)}`);
+  assert.ok(response >= input * 0.5 - 1e-9, `当帧只回应 ${(response * 1000).toFixed(1)}mm`);
+  assert.ok(gap(out.joints.wristR, live.joints.wristR) > 0.05, '回声被修成了纯 follow，历史余波没有了');
+  for (const key of ['pelvis', 'chest', 'neck', 'headCenter', 'shoulderR', 'elbowR', 'hipL', 'footIdxR']) {
+    assert.ok(gap(out.joints[key], live.joints[key]) < 1e-9, `${key} 被历史拖走了`);
+  }
+  assert.ok(sampler.history <= 0.5, '历史比当下更多');
+  assertCoherent(out);
+
+  let settled = out;
+  for (let i = 1; i <= 75; i++) {
+    const now = 2 + i * dt;
+    settled = sampler.apply({ skeleton: { ...live, t: now }, t: now, dt, speed: 0, target, snap: false });
+  }
+  assert.ok(gap(settled.joints.wristR, live.joints.wristR) < 1e-9, '历史追上后仍不回到当前姿态');
+});
+
+test('line/echo: 15/30/60/120Hz 的阶跃都在第一个显示帧回应', () => {
+  for (const hz of [15, 30, 60, 120]) {
+    const sampler = createLineSampler();
+    const target = lineAt(pointOf(1));
+    const dt = 1 / hz;
+    const base = rightWristStep(0, 0);
+    for (let i = 0; i < 2 * hz; i++) sampler.apply({ skeleton: { ...base, t: i * dt }, t: i * dt, dt, speed: 0, target, snap: i === 0 });
+    const live = rightWristStep(0.2, 2);
+    const out = sampler.apply({ skeleton: live, t: 2, dt, speed: 0.8, target, snap: false });
+    assert.ok(gap(out.joints.wristR, base.joints.wristR) > 0.001, `${hz}Hz 首帧仍没有 1mm 回应`);
+    assert.ok(gap(out.joints.pelvis, live.joints.pelvis) < 1e-9, `${hz}Hz 骨盆不是 live`);
+    assertCoherent(out);
+  }
+});
+
+test('line: 坏 dt / speed / 参数当帧退回 live，不放毒后一帧', () => {
+  const sampler = createLineSampler();
+  const live = rightWristStep(0.2, 0);
+  const bad = sampler.apply({
+    skeleton: live, t: Number.NaN, dt: Number.NaN, speed: Number.NaN,
+    target: { delay: Number.NaN, weight: Number.POSITIVE_INFINITY, facing: Number.NaN }, snap: false,
+  });
+  assertCoherent(bad);
+  assert.ok(worstJoint(bad, live) < 1e-9, '坏控制参数没有退回 live');
+
+  const next = rightWristStep(-0.1, 1 / 60);
+  const recovered = sampler.apply({ skeleton: next, t: 1 / 60, dt: 1 / 60, speed: 0, target: lineAt(pointOf(0)), snap: true });
+  assertCoherent(recovered);
+  assert.ok(worstJoint(recovered, next) < 1e-9, '坏值留在采样器里污染了下一帧');
+});
+
+test('line/reset: 上一个人的 1.2s 历史不进下一个人', () => {
+  const sampler = createLineSampler();
+  const target = lineAt(pointOf(1));
+  const dt = 1 / 60;
+  for (let i = 0; i < 120; i++) sampler.apply({ skeleton: waving(i * dt), t: i * dt, dt, speed: 0.8, target, snap: i === 0 });
+  sampler.reset();
+  const newcomer = buildSkeleton(asymmetricPose(), [], 0);
+  const first = sampler.apply({ skeleton: newcomer, t: 0, dt, speed: 0, target, snap: true });
+  assert.ok(worstJoint(first, newcomer) < 1e-9, '新观众第一帧混入了旧历史');
+  assertCoherent(first);
+});
 
 // ─────────────────────────── 闸 3：永远不脱钩 ───────────────────────────
 

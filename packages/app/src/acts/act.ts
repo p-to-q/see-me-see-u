@@ -116,7 +116,7 @@ export function playLine(w: World, dt: number, movement: MovementIndex, ctx?: Ac
   const target = lineAt(overall);
   const posed = line.apply({ skeleton: sk, t: w.t, dt, speed: w.features?.speed ?? 0, target, snap });
   w.creature.pose(posed, w.presence, dt);
-  w.note(`线 延迟 ${target.delay.toFixed(2)}s · 重量 ${target.weight.toFixed(2)} · 朝向 ${line.facing.toFixed(2)}`);
+  w.note(`线 余波 ${target.delay.toFixed(2)}s/${line.history.toFixed(2)} · 重量 ${target.weight.toFixed(2)} · 朝向 ${line.facing.toFixed(2)}`);
 }
 
 /** 连续出错这么多次，这个 Act 就被永久禁用 —— 一个坏玩法不该带走整件作品 */
