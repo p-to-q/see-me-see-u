@@ -98,7 +98,9 @@ function waveRenders(
     if (u <= 0 || u >= 1) {
       while (j < n && capPhase(j, n, t) === u) j++;
       const pick = u <= 0 ? from : to;
-      list = pick ? [{ partId: pick.partId, materialRole: pick.materialRole, scale: pres }] : [];
+      list = pick ? [{
+        partId: pick.partId, materialRole: pick.materialRole, scale: pres, groundsBody: false,
+      }] : [];
     } else {
       list = at(u);
     }
@@ -108,14 +110,21 @@ function waveRenders(
   return out;
 }
 
-/** 一处（一件骨头件，或一处盖片）的替换：芯、墨屑、新件 */
+/**
+ * 一处（一件骨头件，或一处盖片）的替换：芯、墨屑、新件。
+ * 这里的每一件都在跑缩放 / 离轴曲线，所以只画、不参与主体落地；
+ * 包括关节波里看似静止的区段，整个 active slot 的 lift 都只认
+ * `assemble(..., { ground })` 那份满尺寸、在插座上的稳定代理。
+ */
 function replaceOne(
   key: SlotKey, from: SlotPick | null, to: SlotPick, tt: number, pres: number,
 ): SlotRender[] {
   const list: SlotRender[] = [];
   if (from) {
     const core = coreScale(tt);
-    if (core > 0) list.push({ partId: from.partId, materialRole: from.materialRole, scale: core * pres });
+    if (core > 0) list.push({
+      partId: from.partId, materialRole: from.materialRole, scale: core * pres, groundsBody: false,
+    });
     const n = shardCount(key);
     const sh = shardAt(tt);
     if (sh.scale > 1e-3) {
@@ -127,12 +136,16 @@ function replaceOne(
           along: n > 1 ? ((k + 0.5) / n) * (1 - clamp01(THESEUS.shardScale)) : 0,
           lateral: sh.lateral,
           angle: k * GOLDEN,
+          groundsBody: false,
         });
       }
     }
   }
   const g = graftCurve(tt);
-  list.push({ partId: to.partId, materialRole: to.materialRole, scale: g.scale * pres, offset: g.offset });
+  list.push({
+    partId: to.partId, materialRole: to.materialRole, scale: g.scale * pres, offset: g.offset,
+    groundsBody: false,
+  });
   return list;
 }
 
@@ -148,12 +161,18 @@ export function replaceRenders(
   return replaceOne(key, from, to, tt, pres);
 }
 
-/** 一处的交叉淡入：旧件缩没、新件走 graft 的组装曲线 */
+/** 一处的交叉淡入：旧件缩没、新件走 graft 的组装曲线；两者都是短命效果。 */
 function crossfadeOne(from: SlotPick | null, to: SlotPick, tt: number, pres: number): SlotRender[] {
   const list: SlotRender[] = [];
-  if (from) list.push({ partId: from.partId, materialRole: from.materialRole, scale: (1 - smoothstep(tt)) * pres });
+  if (from) list.push({
+    partId: from.partId, materialRole: from.materialRole, scale: (1 - smoothstep(tt)) * pres,
+    groundsBody: false,
+  });
   const g = graftCurve(tt);
-  list.push({ partId: to.partId, materialRole: to.materialRole, scale: g.scale * pres, offset: g.offset });
+  list.push({
+    partId: to.partId, materialRole: to.materialRole, scale: g.scale * pres, offset: g.offset,
+    groundsBody: false,
+  });
   return list;
 }
 

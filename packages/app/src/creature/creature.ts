@@ -222,6 +222,8 @@ export function createCreature(opt: CreatureOptions): Creature {
   let outlineWithCompanions = true;
   /** 伴随身体每一帧的渲染表（复用同一个对象） */
   const renderC: Partial<Record<SlotKey, SlotRender[]>> = {};
+  /** 伴随身体交接槽位的稳定落地代理（不画） */
+  const groundC: Partial<Record<SlotKey, SlotRender[]>> = {};
   /** 这一帧每个桶里主身体占几份（描边外壳只画这几份） */
   const primaryCounts = new Map<string, number>();
   /** 这一帧伴随身体实例的颜色，下标 = 实例序号 − 主身体实例数 */
@@ -261,6 +263,8 @@ export function createCreature(opt: CreatureOptions): Creature {
   const specs = new Map<string, PartInstance>();
   const cursor = new Map<string, number>();
   const render: Partial<Record<SlotKey, SlotRender[]>> = {};
+  /** 主身体交接槽位的稳定落地代理（不画） */
+  const ground: Partial<Record<SlotKey, SlotRender[]>> = {};
 
   const unsubscribe = library.onGeometry((partId) => { dirtyParts.add(partId); });
 
@@ -532,12 +536,21 @@ export function createCreature(opt: CreatureOptions): Creature {
         } else {
           render[key] = [];
         }
+        // 交接的视觉实例会缩放、飞入、散开：它们不能决定整具身体的 lift。
+        // 用交接前那件的满尺寸插座位置做代理；从空槽 graft 时才用目标件。
+        const anchor = s?.from ?? s?.to;
+        if (anchor) ground[key] = [{
+          partId: anchor.partId, materialRole: anchor.materialRole, scale: pres,
+        }];
+        else delete ground[key];
       }
 
       // 4. 装配（挂载数学全在 core/attach.ts 里）
       let instances: PartInstance[];
       try {
-        instances = assemble(genome, sk, library, { render, maxInstances });
+        instances = assemble(genome, sk, library, {
+          render, ground: active.size ? ground : undefined, maxInstances,
+        });
       } catch (e) {
         console.error('[creature] assemble 失败，保持上一帧', e);
         return;
@@ -557,10 +570,17 @@ export function createCreature(opt: CreatureOptions): Creature {
           renderC[key] = s?.kind === 'replace' ? replaceRenders(key, s.from, s.to, s.t, cp)
             : s ? crossfadeRenders(key, s.from, s.to, s.t, cp)
               : pick ? [{ partId: pick.partId, materialRole: pick.materialRole, scale: cp }] : [];
+          const anchor = s?.from ?? s?.to;
+          if (anchor) groundC[key] = [{
+            partId: anchor.partId, materialRole: anchor.materialRole, scale: cp,
+          }];
+          else delete groundC[key];
         }
         let extra: PartInstance[];
         try {
-          extra = assemble(genome, c.skeleton, library, { render: renderC, maxInstances });
+          extra = assemble(genome, c.skeleton, library, {
+            render: renderC, ground: active.size ? groundC : undefined, maxInstances,
+          });
         } catch {
           continue;   // 一具伴随身体摆不出来不拖垮主身体（P2）
         }

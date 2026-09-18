@@ -33,6 +33,11 @@ export interface PartInstance {
   mirrored: boolean;
   /** 列主序 4x4，与 three.js Matrix4.elements 一致 */
   matrix: Mat4;
+  /**
+   * 这件是稳定身体的一部分，可以决定主体贴地量。
+   * 替换中的碎屑、芯和飞入件仍然正常绘制，但不能拖着其他部位上下移动。
+   */
+  groundsBody: boolean;
 }
 
 /** 一个槽位这一帧要画成什么样。换装动画期间一个槽位会有两条（旧的缩小 / 新的长回来） */
@@ -57,6 +62,11 @@ export interface SlotRender {
    * 同时交接会把那一格的实例和面数一起乘上去（`replace-event.ts` 的 `waveRenders`）。
    */
   caps?: readonly [number, number];
+  /**
+   * 是否参与主体落地计算。缺省 true；只有短命的替换效果几何设为 false。
+   * 这不影响该实例是否绘制。
+   */
+  groundsBody?: boolean;
 }
 
 /** 垂直于 `dir` 的一个方向，绕轴转 `angle`。退化（dir 贴着 Z）时换一根参考轴 */
@@ -77,6 +87,12 @@ function lateralInPlace(m: Mat4, dir: Vec3, dist: number, angle: number): void {
 export interface AssembleOptions {
   /** 覆盖某些槽位的渲染内容；没给的槽位按 genome 原样画 */
   render?: Partial<Record<SlotKey, SlotRender[]>>;
+  /**
+   * 交接中槽位的稳定落地代理；只参与 lift，不返回给渲染端。
+   * 这里的件必须是满尺寸、在插座上的稳定几何，不能带碎屑 / offset / 事件 scale。
+   * 未列出的槽位不会在这里重复装配：它们已由正常 render 实例参与落地。
+   */
+  ground?: Partial<Record<SlotKey, SlotRender[]>>;
   /** 实例总数上限（docs/02 P5）。超了就丢弃多余的，绝不越预算 */
   maxInstances?: number;
 }
@@ -177,12 +193,19 @@ function translateInPlace(m: Mat4, dir: Vec3, dist: number): void {
  * 真正被缓存下来、不必每帧重算的是**局部包围盒本身** —— 它从 `PartMeta` 直接读，
  * 不分配、不遍历顶点。
  */
-function groundToFloor(out: PartInstance[], lib: MetaSource): void {
+function groundToFloor(out: PartInstance[], stable: PartInstance[], lib: MetaSource): void {
   if (!out.length) return;                        // mass 那一档一个部件都不实例化
   // 复用同一个对象喂给 groundLift：这条路在帧循环里，每帧 new 64 个临时对象
   // 就是每分钟给 GC 送 230k 个短命对象（P5：帧里不分配）
   const lift = groundLift((function* () {
     for (const i of out) {
+      if (!i.groundsBody) continue;
+      scratch.matrix = i.matrix;
+      scratch.aabb = lib.metaOf(i.partId)?.aabb ?? null;
+      scratch.mirrored = i.mirrored;
+      yield scratch;
+    }
+    for (const i of stable) {
       scratch.matrix = i.matrix;
       scratch.aabb = lib.metaOf(i.partId)?.aabb ?? null;
       scratch.mirrored = i.mirrored;
@@ -203,7 +226,9 @@ export function assemble(
   opt: AssembleOptions = {},
 ): PartInstance[] {
   const out = place(genome, skeleton, lib, opt);
-  groundToFloor(out, lib);
+  // 代理只装配 opt.ground 明确列出的槽位，不把整具身体在帧里再算一遍。
+  const stable = opt.ground ? place(genome, skeleton, lib, { render: opt.ground }, true) : [];
+  groundToFloor(out, stable, lib);
   return out;
 }
 
@@ -213,6 +238,7 @@ function place(
   skeleton: Skeleton,
   lib: MetaSource,
   opt: AssembleOptions,
+  onlyRenderOverrides = false,
 ): PartInstance[] {
   const out: PartInstance[] = [];
   const cap = finite(opt.maxInstances ?? Infinity, Infinity);
@@ -232,7 +258,7 @@ function place(
     const slot = SLOT_OF_BONE[bone.id];
     if (!slot) continue;
 
-    const renders = opt.render?.[bone.id] ?? defaultRender(genome, bone.id);
+    const renders = opt.render?.[bone.id] ?? (onlyRenderOverrides ? [] : defaultRender(genome, bone.id));
     const mode = SLOT_FIT[slot];
     const dir = dirOf(bone.p0, bone.p1);
 
@@ -270,6 +296,7 @@ function place(
         materialRole: r.materialRole,
         mirrored,
         matrix,
+        groundsBody: r.groundsBody !== false,
       });
     }
   }
@@ -277,7 +304,7 @@ function place(
   // ── 2. 关节盖片（docs/05 §4） ──────────────────────────────────────────
   const joints = skeleton.joints ?? {};
   const pelvis = joints['pelvis'] ?? [0, 0, 0];
-  const jointRenders = opt.render?.['joint'] ?? defaultRender(genome, 'joint');
+  const jointRenders = opt.render?.['joint'] ?? (onlyRenderOverrides ? [] : defaultRender(genome, 'joint'));
 
   for (let ci = 0; ci < JOINT_CAPS.length; ci++) {
     const capDef = JOINT_CAPS[ci];
@@ -318,6 +345,7 @@ function place(
         materialRole: r.materialRole,
         mirrored: false,
         matrix,
+        groundsBody: r.groundsBody !== false,
       });
     }
   }
