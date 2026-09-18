@@ -57,12 +57,14 @@
  *      （`SETTLE_MOVE_MS`，和 `--sb-dur-move` 同一个数：这是一次"挪到位"）。
  *   3. 到位之后闪一下（`SETTLE_FLASH_MS`）——说的是"定住了"，不是重新出现。
  *
- * 三步都做完，这一层才整个摘掉。选择页此刻早就在底下、字标落在同一个位置，
- * 摘掉的那一帧因此没有变化——底下的物种名、说明这才第一次被观众看见。
+ * 三步都做完，这一层才整个摘掉，`finish()` 也只在这一刻 resolve。
+ * 选择页的资产此刻已经到齐，但 DOM、输入和入场时间线都还在闸门后；
+ * 下一帧才开始它自己的 reveal。因此不会有一帧同时属于两个 UI。
  */
 import { COPY, setBi, type BiText } from '../ui/i18n.ts';
 import { markNode } from '../ui/mark.ts';
 import type { Flags } from './kiosk.ts';
+import { runLoadingExit } from './loading-exit.ts';
 import '../ui/type.css';
 import './loading.css';
 
@@ -123,12 +125,13 @@ export interface Loading {
   progress(id: LoadStageId, value: number): void;
   /** 这一档到齐了 */
   done(id: LoadStageId): void;
-  /** 全部结束：淡出并摘掉。重复调用无害 */
-  finish(): void;
+  /** 全部结束：退场并摘掉。在节点真正移除后 resolve；重复调用返回同一个 Promise */
+  finish(): Promise<void>;
 }
 
 /** 什么都不做的那一个。`?loading=0` 和现场深链走这条路，调用点因此不用写 if */
-const NOOP: Loading = { begin() {}, progress() {}, done() {}, finish() {} };
+const ALREADY_FINISHED = Promise.resolve();
+const NOOP: Loading = { begin() {}, progress() {}, done() {}, finish: () => ALREADY_FINISHED };
 
 interface Row {
   root: HTMLElement;
@@ -222,6 +225,7 @@ export function mountLoading(flags: Flags, opts: MountLoadingOptions = {}): Load
   const t0 = performance.now();
   let shown = 0;          // §进度只许前进：已经念出口的百分比不许退回去
   let finished = false;
+  let finishPromise: Promise<void> | null = null;
   let degraded = false;
   /** 这一层真的露出来的那一刻（`is-on` 落地时）。没露过面就还是 -1 —— 见 `finish()` 的快路径 */
   let shownAt = -1;
@@ -302,40 +306,43 @@ export function mountLoading(flags: Flags, opts: MountLoadingOptions = {}): Load
       render();
     },
     finish() {
-      if (finished) return;
+      if (finishPromise) return finishPromise;
       finished = true;
       cleanup();
       console.info(`[loading] 加载完成，耗时 ${Math.round(performance.now() - t0)}ms`);
       // 宽限期内就结束的：一帧都没画过，直接摘掉，不要放一次没人看见的淡出
-      if (!layer.classList.contains('is-on')) { layer.remove(); return; }
+      if (!layer.classList.contains('is-on')) {
+        layer.remove();
+        finishPromise = Promise.resolve();
+        return finishPromise;
+      }
       // 真的到齐了，不再是"99% 假装还没到"——见 render() 里那条注释，那条只管中途
       pct.textContent = '100%';
       fill.style.width = '100%';
       // 退场三步，每一步等上一步真的做完（文件头「字标落定，其余才回来」）：
       // 细节先收起 → 字标从大变小挪到角落 → 到位闪一下 → 整层摘掉。
-      // 底是不透明的 `--sb-paper`，这三步全程盖住底下——选择页早就已经在那儿了
-      // （`chooseTheme(...).then()` 先叫 `loading.finish()`），但观众看不见它，
-      // 直到这一层真的摘掉的那一帧。字标落的角落和选择页自己那一份完全同一个位置，
-      // 摘掉时因此没有跳变。
-      const leave = (): void => {
-        layer.classList.remove('is-detailed');
-        // 没有字标（`opts.hasEntry`）：细节收起之后直接摘掉，没有大变小、没有闪一下——
-        // 那两步是字标自己的退场，这一层没有字标就没有什么好退场的
-        if (!mark) { setTimeout(() => layer.remove(), SETTLE_DETAILS_MS); return; }
-        setTimeout(() => {
-          mark.classList.remove('is-big');
-          setTimeout(() => {
-            mark.classList.add('is-settled');
-            setTimeout(() => layer.remove(), SETTLE_FLASH_MS);
-          }, SETTLE_MOVE_MS);
-        }, SETTLE_DETAILS_MS);
-      };
+      // 首屏下这层的底可能是透明的（让展签后的 attract 种子活着），
+      // 所以不能再靠“底色会盖住”来幸运隐藏选择页。`ChooseOptions.beforeReveal`
+      // 把选择页的 DOM、输入和入场时间线全部留在这个 Promise 后面；
+      // 这里的职责是到真正 `layer.remove()` 才交出显示权。
       // 两条下限取更大的那个：MIN_SHOW_MS 保证"这一层至少露了多久"（缓存命中时管用）；
       // DONE_HOLD_MS 保证"真到 100% 之后至少停这么久"（冷启动早就过了 MIN_SHOW_MS，
       // 不加这一条的话数字刚跳到 100% 画面就换了）。都只晚收，不晚开始——
       // 舞台、摄像头照常往下走，等的只有这一层自己摘掉（含退场那三步）
       const wait = Math.max(MIN_SHOW_MS - (performance.now() - shownAt), DONE_HOLD_MS);
-      setTimeout(leave, wait);
+      finishPromise = runLoadingExit({
+        waitMs: wait,
+        detailsMs: SETTLE_DETAILS_MS,
+        moveMs: SETTLE_MOVE_MS,
+        flashMs: SETTLE_FLASH_MS,
+        hasMark: mark !== null,
+        onDetails: () => layer.classList.remove('is-detailed'),
+        onMove: () => mark?.classList.remove('is-big'),
+        onSettled: () => mark?.classList.add('is-settled'),
+        onRemove: () => layer.remove(),
+        onError: (error) => console.warn('[loading] 退场某一步失败，已继续交棒：', error),
+      });
+      return finishPromise;
     },
   };
 }

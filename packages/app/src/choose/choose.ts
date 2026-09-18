@@ -90,6 +90,13 @@ export interface ChooseOptions {
    */
   onProgress?: (done: number, total: number) => void;
   /**
+   * 图与条目都就绪后、选择页产生任何可见或可交互副作用之前的交棒闸门。
+   *
+   * 正式程序用它等加载层**真正移除**；dev 页不传，行为不变。
+   * 它不阻塞 anchor 图的并行下载，只序列化两个 UI 的可见时间线。
+   */
+  beforeReveal?: () => Promise<void>;
+  /**
    * 最近一帧姿态。给了才有**举手滚动**（`ring/wave.ts`）。
    *
    * **不传 = 这一页逐字和以前一样。** 所以所有的降级都在调用方那一侧收口，
@@ -225,6 +232,15 @@ export async function mountChoose(options: ChooseOptions): Promise<ChooseHandle>
     if (!isWearable(theme, library, resolved.callerSuppliedThemes)) return;
     cards.push(buildCard(theme, image, rng));
   });
+
+  // 从这一行往下才会挂 DOM、开输入、起空闲计时器和推环的入场时间线。
+  // 闸门必须站在这条边界之前：放在 `field.play()` 前还不够，因为底部名牌
+  // 和字标都是静态可见的，一挂上就会和透明的加载层重叠。
+  try { await options.beforeReveal?.(); } catch (error) {
+    // 现场不许因为一个退场回调永久卡在菜单之前。正式的 loading.finish()
+    // 本身永不 reject；这条是给其他宿主 / dev 注入时的最后退路。
+    console.warn('[choose] 入场交棒失败，已继续显示选择页：', error);
+  }
 
   // 首屏配色由这一页也 hold 一份：环起不来（`?gl=off` / 没有 WebGPU）时
   // 降级列表**就是**首屏，它同样得是白底黑字，不能因为环没起来就翻回深色。
