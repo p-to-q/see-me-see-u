@@ -22,6 +22,7 @@
     "factory:compress": "node packages/factory/src/cli.ts compress",
     "factory:refs": "node packages/factory/src/cli.ts refs",
     "factory:index": "node --env-file=.env packages/factory/src/cli.ts index",
+    "seo:indexnow": "node scripts/indexnow-submit.mjs",
     "factory:serve": "node --env-file=.env packages/factory/src/proxy.ts",
     "check": "npm run typecheck && npm run test && npm run check:parts",
     "typecheck": "tsc -p tsconfig.json",

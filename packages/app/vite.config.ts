@@ -1,8 +1,9 @@
 import { shouldShip } from './build/ship-filter.ts';
 import { blockRender } from './build/render-blocking.ts';
 import { shouldServeSlow, type SlowHostMode } from './build/slow-host.ts';
+import { discoveryFiles, injectDiscovery } from './src/site/discovery.ts';
 import { defineConfig, type Plugin } from 'vite';
-import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { copyFileSync, cpSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { resolve } from 'node:path';
 
@@ -296,12 +297,45 @@ function shipAssets(): Plugin {
   };
 }
 
+/**
+ * 搜索、社交卡与机器阅读层。
+ *
+ * 关键元数据在 build 时就进 HTML，而不是等 JS 启动后再补；同一份
+ * `discovery.ts` 同时生成 sitemap / robots / manifest / LLM 地图，防止 URL 漂移。
+ */
+function siteDiscovery(): Plugin {
+  return {
+    name: 'sb-site-discovery',
+    transformIndexHtml: {
+      order: 'pre',
+      handler: (html, ctx) => injectDiscovery(html, ctx.filename),
+    },
+    closeBundle() {
+      const out = resolve(__dirname, 'dist');
+      mkdirSync(out, { recursive: true });
+      for (const [name, body] of Object.entries(discoveryFiles())) {
+        writeFileSync(resolve(out, name), body);
+      }
+
+      const media = [
+        ['src/site/assets/see-me-see-u.svg', 'icons/see-me-see-u.svg'],
+        ['src/site/assets/see-me-see-u-stage.png', 'social/see-me-see-u-stage.png'],
+      ] as const;
+      for (const [from, to] of media) {
+        const target = resolve(out, to);
+        mkdirSync(resolve(target, '..'), { recursive: true });
+        copyFileSync(resolve(__dirname, from), target);
+      }
+    },
+  };
+}
+
 export default defineConfig({
   root: __dirname,
   // dev 下 assets/ 整个作为静态根（/raw/ 在 anchor 渲染时要用）；
   // build 时改由 shipAssets() 只复制 SHIPPED 里那几个目录。
   publicDir: process.env.NODE_ENV === 'production' ? false : resolve(__dirname, '../../assets'),
-  plugins: [demoIndex(), anchorWriter(), shipAssets(), renderBlockingEntries()],
+  plugins: [demoIndex(), anchorWriter(), shipAssets(), siteDiscovery(), renderBlockingEntries()],
   server: { port: 5173, host: true, fs: { allow: [ROOT] } },
   // 姿态推理的 worker（`capture/pose-worker.ts`）必须是 ES module worker：
   // MediaPipe 在 module worker 里走 `import()` 加载 wasm 胶水层，而经典胶水层只是一个顶层 `var`，

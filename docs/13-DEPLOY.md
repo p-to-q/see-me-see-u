@@ -189,6 +189,39 @@ Upstash for Redis → Create，区域选离 `useeme.ptoq.io` 的读者最近的�
 
 ## 6. 上线检查单
 
+### 搜索、社交卡与机器阅读层
+
+`packages/app/src/site/discovery.ts` 是这一层唯一的事实源：公开页的
+canonical URL、标题、描述和索引策略都在那里。Vite 构建期把元数据注入
+初始 HTML，再从同一张表生成：
+
+- `/robots.txt`
+- `/sitemap.xml`
+- `/manifest.webmanifest`
+- `/llms.txt` / `/llms-full.txt`
+- IndexNow 公开 key 文件
+- 1200×630 真实舞台画面与方形字标 icon
+
+8 张展陈页、`/404` 和 18 张 `/dev/*` 工作台都是有意公开的可索引页，
+各自进 sitemap 并有自己的 canonical / description。`/404` 的内容仍可能被搜索引擎
+自行判为 soft-404；仓库不伪装这个外部结果，但也不再主动发 `noindex`。
+`/poster/*` 与任何未登记新页仍默认 `noindex` ── 它们是打印渲染面或未裁定表面。
+
+`llms*.txt` 只是方便机器阅读的建议性索引，不是网络标准，也不是「已被
+AI 收录」的证据。真正承重的仍是可抓取 HTML、canonical、sitemap、
+Schema.org 与外部链接。文案必须保留两条边界：线上只有快回路；慢回路是
+现场限定，真实模型调用尚未验证。`packages/app/test/discovery.test.ts` 守这两句，
+同时禁止把 Apache-2.0 误写给作品实体。
+
+生产部署稳定后可跑：
+
+```bash
+npm run seo:indexnow -- --dry-run   # 先查准备提交的 canonical URL
+npm run seo:indexnow                # 部署后再提交；不替代 Google Search Console
+```
+
+它使用这个站自己的公开 key，不复制 `ptoq.io` 或其他仓库的 key。
+
 > 2026-09-14 过了两遍，证据在每一条后面。第一遍是 `main@5e1f97d`；第二遍是乐章边界、读数、控件三条合并之后的 main
 > （首屏 98 个请求 2.06 MB、无摄像头权限 0 错、无 WebGPU 0 错，结论与第一遍相同）。线上入口与推上去的构建逐字相同时才算过。
 > **没有真人、没有真摄像头、没有真 GPU 的那几条照实写了没验。**

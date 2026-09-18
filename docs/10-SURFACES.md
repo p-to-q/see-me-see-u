@@ -6,7 +6,7 @@
 >
 > 规则：**动完代码就更新这张表。** 证据一栏必须是"跑过的命令"或"截图路径"，不能是"应该可以"。
 
-最后更新：2026-09-18
+最后更新：2026-09-19
 
 <details>
 <summary>改动史（每次动完代码追加一行）</summary>
@@ -23,6 +23,7 @@
 
 | 日期 | 这一版落地了什么 |
 |---|---|
+| 2026-09-19 | 公开站发现层从「只有 title / favicon / viewport」变成单一契约驱动：8 张展陈页、`/404` 和 18 张 `/dev/*` 工作台在初始 HTML 里有唯一 description / canonical / robots / Open Graph / Twitter Card / `Organization + WebSite + VisualArtwork + WebPage` JSON-LD，全部依产品裁定允许索引；`/poster/*` 与未登记 HTML 仍缺省 `noindex`。同一页面表生成 robots / sitemap / manifest / llms / llms-full / IndexNow key，社交图用真实舞台证据裁成 1200×630，不用概念插画代替作品。`discovery.test.ts` 8/8，`npm run build` 通过，XML / manifest 另独解析通过；构建只有既有 Vite native-config、字体运行时解析与 kiosk >500kB 警告。**`/404` 的 index 是开放许可不是收录承诺，搜索引擎仍可自行判它为 soft-404；这些证据只证明产物可被发现，不证明 Google / Bing / 大模型已经收录；Search Console 所有权、组织官网反链和部署后 IndexNow 仍是外部操作** |
 | 2026-09-18 | Auto Framing 新增 app 层唯一的“有效景别”解析：分类器 / 手动策略仍保留原始决定，实际身体方案与真正画上台的 companion 再统一折成舞台景别；舞台、横向快档、纵向跟随、小屏数字裁切与 HUD 不再各自猜一次。`rig` / `stub` / `towering` 的比例变化仍有可读上半身，不能因 `drift > 0` 被误判成非人形；四足 / 环 / 柱 / 团块与未知形体一旦开始漂移则回全景。多人以渲染结果而非探测候选为准，调速器只留主身体时小屏不会误报第二具身体；工作台多人模式与正式链同样让横向控制归中。类型检查、42 条定向测试、9 段 60Hz 连续性 trace 与 `npm run build` 已过；构建只有既有 Vite native-config、字体运行时解析与 kiosk >500kB 警告。全仓首跑暴露的呈现骨架旧源码断言已改为守 `presented.skeleton` 语义，慢回路真实 HTTP 夹具显式绑定 IPv4 并清理 keep-alive；最终 `npm run check` 为 core 362 / app 724 / parts 247 件、0 错 12 个既有警告。**真人近 / 中 / 远、多人进出、调速器降级观感及原生 `faceFraming` 组合仍未验证** |
 | 2026-09-18 | 舞台新增“呈现骨架”回执边界：`World.skeleton` 继续只保存观众输入，Director 的 echo / resist / facing 输出只有在身体 `pose()` 成功返回后才成为 last-good；接触阴影、落脚声、取景、多人交接旧身体和 HUD 现在消费同一副真正交给身体的骨架，不再把变化前的人体输入与画面混用。reset 清回执后立即用参考姿态重新立基准，pose 异常保留 last-good；包装器每帧只保存对象引用，不复制骨架，并保留物种到场后会切换的动态 stats getter。定向测试 30/30、`npm run typecheck` 与 `npm run build` 通过，构建只有既有 Vite native-config、字体运行时解析与 kiosk >500kB 警告。一次全仓 `npm run check` 中 core 362/362，通过；app 715 中 713 通过、2 失败，输出明确捕获到慢回路 HTTP 在全负载下的一次 `fetch failed`，同文件隔离复跑 8/8；因此这次全仓门禁**不记为通过**，需要在本轮合并前定位并重新跑绿。真人摄像头、目标 WebGPU 和最终像素仍未验证 |
 | 2026-09-18 | 前端到访存档补齐 encounter epoch 边界：上一位迟到的成功、reject、500、坏 JSON 或 404→Worker fallback 仍可完成那次已经走完弧线的 best-effort 写入，但它们不再能把下一位的 `phase / n` 改成 `kept / off`；当前相遇自己的失败仍按 §7.1 静默关闭整次会话。`ok: true` 现在还必须带正的安全整数序号，否则不能伪装成已保存；平台 idle 调度器同步抛错也只关存档，不再逃进帧循环。24 条前端存档测试逐条覆盖旧 / 新 epoch、延迟 idle、两处端点与坏回执；`npm run check`：core 362 / app 707 / parts 247 件、0 错 12 个既有警告；`npm run build` 通过，只有既有 Vite native-config、字体运行时解析与 kiosk >500kB 警告。**线上 Worker / 真 D1 仍未部署或实连；这刀不增加任何运动数据字段，也不改变不存 IP 的裁定** |

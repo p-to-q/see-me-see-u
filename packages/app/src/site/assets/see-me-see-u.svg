@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="SEE-ME SEE-U">
+  <rect width="512" height="512" fill="#0e0f12"/>
+  <g fill="#dfe4ea" font-family="Helvetica Neue, Arial, sans-serif" font-size="76" font-weight="600" letter-spacing="-3">
+    <text x="54" y="226">SEE-ME</text>
+    <text x="54" y="316">SEE-U</text>
+  </g>
+</svg>
