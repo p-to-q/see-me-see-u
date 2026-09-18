@@ -100,13 +100,15 @@ export function displaySide(side: Side, mirror: boolean): Side {
 }
 
 /**
- * 小屏的数字裁切开不开（docs/49 §6.3 一、§6.5）。三条都要满足：
+ * 小屏的数字裁切开不开（docs/49 §6.3 一、§6.5）。两条都要满足：
  *  - 上半身是正当取景；
  *  - 没有减少动态（一块跟着人挪的缩略图本身就是动态）；
- *  - 画里没有别的**有身体**的人（多人时取景是整组，也就是整幅 —— 和舞台一律全景同一条）。
+ *
+ * “台上有没有别的身体”已经由 app 编排层折进 `upperIsIntended`。这里再看一遍
+ * 探测轨迹，会让超出渲染预算的人错误地否决裁切，制造第二份事实来源。
  */
-export function cropActive(input: { upperIsIntended: boolean; reduced: boolean; othersBodied: boolean }): boolean {
-  return input.upperIsIntended && !input.reduced && !input.othersBodied;
+export function cropActive(input: { upperIsIntended: boolean; reduced: boolean }): boolean {
+  return input.upperIsIntended && !input.reduced;
 }
 
 export interface SeeInput {

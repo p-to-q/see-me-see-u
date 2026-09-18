@@ -49,6 +49,7 @@ import { createPresentedBody } from './creature/presented-body.ts';
 import { automaticBodyPlan, bodyPlanFor } from './creature/body-plan-policy.ts';
 import { createStage } from './stage/stage.ts';
 import { contactPoints, REFERENCE_POSE } from './stage/framing.ts';
+import { resolveEffectiveFraming } from './stage/effective-framing.ts';
 import { chooseTheme, themeFromUrl } from './choose/choose.ts';
 import { catalogFromIndex, catalogKnowsTheme } from './choose/catalog.ts';
 import { createFrameLoop } from './shell/safe-frame.ts';
@@ -423,6 +424,10 @@ async function boot(): Promise<void> {
   /** `?framing=` / 控件条。叠加在分类器上，选 auto 就交回去 */
   let framingPolicy: FramingPolicy = flags.framing;
   let framing: FramingDecision = decide(framingPolicy, framer.current);
+  /** app 层知道身体方案与实际同伴数后，所有输出消费者共用的最终取景语义。 */
+  let effectiveFraming = resolveEffectiveFraming(framing, {
+    plan: 'rig', planDrift: 0, hasCompanions: false, cameraFraming: false,
+  });
   /** 腿混向站姿的权重（线性，`holdLegs` 里套 smoothstep） */
   let legHold = 0;
   /**
@@ -436,8 +441,9 @@ async function boot(): Promise<void> {
 
   const preview = mountPreview({
     flags,
-    // 上半身是正当取景时：「往后退一点」不为腿说话，小屏在人身上做一个小范围的数字裁切
-    framing: () => framing.upperIsIntended,
+    // 缺腿提示与数字裁切不是同一个问题：上游摄像头裁腿时前者豁免，后者只服从舞台最终景别。
+    lowerBodyOptional: () => effectiveFraming.lowerBodyOptional,
+    cropUpper: () => effectiveFraming.stageShot === 'upper',
     reduced: () => reducedMotion?.matches ?? false,
     cameraFraming,
     // 用 getter：观众按下「用我的摄像头」之后 `capture` 会被整个换掉，
@@ -452,8 +458,18 @@ async function boot(): Promise<void> {
       const v = (capture as { video?: HTMLVideoElement }).video;
       return !!v?.srcObject;
     },
-    // 多人（docs/50 §6.2）：其余被看见的人淡淡地画出来。`people` 声明在下面，这个闭包第一次被调用时它早已初始化
-    others: () => (people?.frame?.tracks ?? []).filter((t) => t.missing === 0 && !t.primary).map((t) => ({ pose: t.pose, bodied: t.selected })),
+    // 多人（docs/50 §6.2）：其余被看见的人淡淡地画出来。身体透明度必须服从真正的渲染预算，
+    // 不能把 tracker 的候选 `selected` 直接说成“已有身体”（调速器可能已经只留主身体）。
+    // `people` 声明在下面；闭包第一次执行时它已经初始化。
+    others: () => {
+      const frame = people?.frame;
+      if (!frame || !people) return [];
+      const bodyBudget = people.shed ? 1 : people.plan.bodies;
+      return frame.tracks.filter((t) => t.missing === 0 && !t.primary).map((t) => {
+        const selectedIndex = frame.selected.indexOf(t.id);
+        return { pose: t.pose, bodied: selectedIndex >= 0 && selectedIndex < bodyBudget };
+      });
+    },
     // 自动探测确认了一个新人（docs/50 §6.3 修订）：「看到了第二 / 三个人」。`peopleHint` 声明在下面，
     // 同一条闭包纪律；探测没开、或没在提示窗口里时是 null，屏幕不多一个字（docs/23 §S4）
     notice: () => peopleHint(),
@@ -468,7 +484,7 @@ async function boot(): Promise<void> {
   // 这里不重写一遍那个条件 —— 和 `flags.nav` / `wantsPreview()` 同一条纪律。
   // `live`：从选择页进来时 capture 是回放，录像的每一帧都过 minScore —— 不告诉它，它就对着空场说「有人」。
   // `cameraOn` 在下面才声明，这里只是一个闭包，第一次被调用时它早已初始化
-  const readout = mountReadout({ flags, live: () => cameraOn, upperIsIntended: () => framing.upperIsIntended });
+  const readout = mountReadout({ flags, live: () => cameraOn, upperIsIntended: () => effectiveFraming.lowerBodyOptional });
 
   // ── 5. 状态机 ───────────────────────────────────────────────────────────
   const presence = createPresence();
@@ -917,6 +933,9 @@ async function boot(): Promise<void> {
     poseClock.reset();
     framer.reset();
     framing = decide(framingPolicy, framer.current);
+    effectiveFraming = resolveEffectiveFraming(framing, {
+      plan: 'rig', planDrift: 0, hasCompanions: false, cameraFraming: false,
+    });
     legHold = 0;
     lateral = LATERAL_REST;
     stage.resetShotIdentity();
@@ -1001,6 +1020,9 @@ async function boot(): Promise<void> {
     boneEnergy.reset();
     framer.reset();
     framing = decide(framingPolicy, framer.current);
+    effectiveFraming = resolveEffectiveFraming(framing, {
+      plan: activePlan(), planDrift: planDrift(), hasCompanions: false, cameraFraming: cameraFraming(),
+    });
     legHold = 0;
     lateral = resetLateralIdentity(lateral);
     groundSense.reset();
@@ -1198,14 +1220,14 @@ async function boot(): Promise<void> {
     // 摄像头自己在取景时，腿被它裁掉是预期（docs/49 §6.3 三）：分类器和引导都要知道
     const camFraming = cameraFraming();
     framing = decide(framingPolicy, framer.update(measured, dt, { cameraFraming: camFraming, aspect: sourceAspect }), { cameraFraming: camFraming });
-    legHold = stepToward(legHold, framing.holdLegs ? 1 : 0, dt, AUTOFRAME.legBlendSeconds);
-    preview?.update(measured, dt, sourceAspect);
+    const currentPlan = activePlan();
+    const currentPlanDrift = planDrift();
 
     // 伴随身体（docs/50 §4）：每个人各自的骨架、在场、站位。开场团块还没长出零件时（`emergence` 0）它们也不长
     // 稳定单人先判：命中时连 `bodyAt()` / CompanionContext 都不构造。
     const stableSingle = people && crowd ? people.bodies.stableSingle(crowd) : null;
     const crowdOut = stableSingle ?? (people && crowd ? people.bodies.update(crowd, {
-      dt, freshInference: inference !== null, plan: activePlan(), drift: planDrift(), refineOn, vitalityOn,
+      dt, freshInference: inference !== null, plan: currentPlan, drift: currentPlanDrift, refineOn, vitalityOn,
       bodies: people.shed ? 1 : people.plan.bodies,
       scale: nascent ? nascent.stats.emergence : 1,
       aspect: sourceAspect,
@@ -1215,6 +1237,15 @@ async function boot(): Promise<void> {
       stage.setGroup(crowdOut?.groupWidth ?? 0, crowdOut?.groupHeight ?? 0);
       renderedCrowd = crowdOut;
     }
+    // 原始分类器不知道身体已非人形或台上已有同伴；从这里起所有输出消费者只读同一份最终语义。
+    effectiveFraming = resolveEffectiveFraming(framing, {
+      plan: currentPlan,
+      planDrift: currentPlanDrift,
+      hasCompanions: (crowdOut?.companions.length ?? 0) > 0,
+      cameraFraming: camFraming,
+    });
+    legHold = stepToward(legHold, effectiveFraming.holdLegs ? 1 : 0, dt, AUTOFRAME.legBlendSeconds);
+    preview?.update(measured, dt, sourceAspect);
     // 横向根偏移：吃姿态时钟给身体的同一份连续流。模式分类 / 小屏吃未停滞的 `measured` 原话；
     // 这里若也吃原话，30Hz 的同一结果会在 120Hz 屏上变成「三帧不动、下一帧跳一下」。
     // 夹在舞台此刻的横向余量里（随景别连续变化）。
@@ -1225,7 +1256,7 @@ async function boot(): Promise<void> {
       evidence: lateralEvidence(raw, sourceAspect), room: stage.lateralRoom, enabled: !crowdOut?.companions.length,
       aspect: sourceAspect,
       // 中景死区更小、弹簧更快：进中景已经是自适应取景，不受全景那条"相机距离不动"的主张约束
-      upper: framing.shot === 'upper',
+      upper: effectiveFraming.stageShot === 'upper',
       // 我们自己的证据质量不够时的兜底：摄像头确认在自己取景就信它，回中线（`camFraming` 本帧已经算过一次）
       cameraFraming: camFraming,
     }, dt);
@@ -1258,8 +1289,8 @@ async function boot(): Promise<void> {
       // 拓扑漂移（docs/40 §1：**"逐渐"是这条线的全部技术要求**）。
       // 第 I / II 乐章 drift = 0，人形；第 III 乐章开头到第 III 个地名之间
       // 从人形漂到物种自己的方案；之后 drift = 1，一次 remap 就够，零额外开销。
-      const drift = planDrift();
-      const plan = activePlan();
+      const drift = currentPlanDrift;
+      const plan = currentPlan;
       const planned = drift >= 1 ? remapSkeleton(humanSk, plan)
         : drift <= 0 ? remapSkeleton(humanSk, 'rig')
           : blendSkeletons(remapSkeleton(humanSk, 'rig'), remapSkeleton(humanSk, plan), drift);
@@ -1450,16 +1481,16 @@ async function boot(): Promise<void> {
       waiting: slow.phase === 'running',
     }, dt);
 
-    // 景别。中景只给人形：身体方案一开始漂移，"上半身"就不再是一个取景（四足没有上半身），给全景。
+    // 景别。中景只给仍有稳定头肩胸的人形拓扑；四足 / 环 / 柱一开始漂移就回全景。
     // 帧循环在降级或无人降帧时：跟随冻结，景别照常按时间走完（docs/49 §6.3 一 —— 一帧切正是"没有过渡"的根因之一）
     // 多人：台上有伴随身体时一律全景（docs/50 §4.3 —— 三个人的中景要么切掉两侧的人，要么不再是中景）
-    stage.setShot(framing.shot === 'upper' && planDrift() <= 0 && !crowdOut?.companions.length ? 'upper' : 'full', {
+    stage.setShot(effectiveFraming.stageShot, {
       reduced: reducedMotion?.matches ?? false,
       // 调速器放到「后期」那一级（docs/48 §4 的阶梯第 5 级）才冻结跟随；景别仍照常缓动。
       // 前四级（墨色采样、换件延后、推理降频、DPR）连跟随也不冻结
       hold: loop.stats.degraded !== null || loop.stats.throttled || governor.sheds('post'),
       // world 骨架会被落地，整体 screen.y 因此必须作为独立信号进入中景；多人 / 全景在 stepShot 内归中。
-      vertical: screenVertical,
+      vertical: effectiveFraming.stageShot === 'upper' ? screenVertical : null,
     });
     stage.update(p, lastFeatures, dt);
     maybeStartBucketWarm();
@@ -1536,7 +1567,8 @@ async function boot(): Promise<void> {
         theseus: theseus?.state,
         // 取景模式此刻是什么、为什么、量到了什么（docs/49 §落地：切换必须实时看得见）
         framing: {
-          reading: framer.current, decision: framing, legHold, shot: stage.shot.progress,
+          reading: framer.current, decision: framing, effective: effectiveFraming,
+          legHold, shot: stage.shot.progress,
           lateral: { x: lateral.x.x, room: stage.lateralRoom, why: lateral.why, side: lateral.side },
           vertical: {
             y: stage.shot.fy.x,

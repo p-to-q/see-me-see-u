@@ -16,6 +16,7 @@ import { buildSkeleton, mediapipeToWorld } from '../../core/src/skeleton.ts';
 import { AUTOFRAME } from '../../core/src/tuning.ts';
 import type { RawPose } from '../../core/src/types.ts';
 import { cropActive, createSeeWatch, type SeeReason, type SeeState } from '../src/ui/preview-state.ts';
+import { resolveEffectiveFraming, type EffectiveFraming } from '../src/stage/effective-framing.ts';
 import { DEFAULT_BOUNDS, shotCamera } from '../src/stage/framing.ts';
 
 export interface SimInput {
@@ -25,6 +26,12 @@ export interface SimInput {
   reduced?: boolean;
   hold?: boolean;
   cameraFraming?: boolean;
+  /** 物种身体漂移 0..1；工作台可用它复现“原始 upper、舞台实际 full”。 */
+  planDrift?: number;
+  /** 这一帧真正采用的形体；缺省是人形。 */
+  plan?: string;
+  /** 真正画上台的伴随身体数，不是探测上限。 */
+  companions?: number;
   /** 舞台视口宽高比（缺省 16:9） */
   aspect?: number;
   /**
@@ -44,6 +51,8 @@ export interface SimFrame {
   /** 分类器与策略的原始结果；HUD / trace 不再用手写占位值冒充生产读数。 */
   reading: FramingReading;
   decision: FramingDecision;
+  /** 结合身体方案 / 同伴数后的最终景别语义。 */
+  effective: EffectiveFraming;
   /** 景别进度、速度与缓动后的进度 */
   progress: number;
   velocity: number;
@@ -96,11 +105,20 @@ export function createSim(opts: { kiosk?: boolean; keep?: number } = {}): Sim {
       t += dt;
       const r = classifier.update(input.pose, dt, { cameraFraming: cam, aspect });
       const d = decide(input.policy ?? 'auto', r, { cameraFraming: cam });
-      const seen = watch.update({ camera: true, pose: input.pose, upperIsIntended: d.upperIsIntended }, dt);
-      const active = cropActive({ upperIsIntended: d.upperIsIntended, reduced: input.reduced ?? false, othersBodied: false });
+      const effective = resolveEffectiveFraming(d, {
+        plan: input.plan ?? 'rig',
+        planDrift: input.planDrift ?? 0,
+        hasCompanions: Number.isFinite(input.companions) && (input.companions ?? 0) > 0,
+        cameraFraming: cam,
+      });
+      const seen = watch.update({ camera: true, pose: input.pose, upperIsIntended: effective.lowerBodyOptional }, dt);
+      const active = cropActive({
+        upperIsIntended: effective.stageShot === 'upper',
+        reduced: input.reduced ?? false,
+      });
       const snap = seen.state !== 'ok';
       crop = stepCrop(crop, { active, snap, screen: input.pose?.screen }, dt);
-      legHold = stepToward(legHold, d.holdLegs ? 1 : 0, dt, AUTOFRAME.legBlendSeconds);
+      legHold = stepToward(legHold, effective.holdLegs ? 1 : 0, dt, AUTOFRAME.legBlendSeconds);
       // 前倾（头胸相对骨盆）：舞台上它来自骨架；这里从画面折一个同量纲的数
       const s = input.pose?.screen;
       const middleX = (a: number, b: number): number | null => {
@@ -114,8 +132,8 @@ export function createSim(opts: { kiosk?: boolean; keep?: number } = {}): Sim {
       // 舞台用上一帧的余量（`stage.lateralRoom`），这里同样
       const before = shotCamera(DEFAULT_BOUNDS, 1.71, shot, aspect);
       lateral = stepLateral(lateral, {
-        evidence: lateralEvidence(input.pose, aspect), room: before.room, enabled: true, aspect,
-        upper: d.shot === 'upper', cameraFraming: cam,
+        evidence: lateralEvidence(input.pose, aspect), room: before.room, enabled: !effectiveFramingHasGroup(effective), aspect,
+        upper: effective.stageShot === 'upper', cameraFraming: cam,
       }, dt);
       const verticalRaw = verticalEvidence(input.pose, aspect);
       const suppliedY = verticalRaw ? input.worldY?.[verticalRaw.anchor] : undefined;
@@ -125,18 +143,18 @@ export function createSim(opts: { kiosk?: boolean; keep?: number } = {}): Sim {
       const vertical = verticalRaw && worldY !== null ? {
         ...verticalRaw, worldY, accepted: lateral.why !== 'hold-jump', cameraFraming: cam,
       } : verticalRaw ? null : verticalRaw;
-      const drift = 0;
       shot = stepShot(shot, {
-        shot: d.shot === 'upper' && drift <= 0 ? 'upper' : 'full',
+        shot: effective.stageShot,
         offset: input.pose ? { x: lean, y: 0 } : null,
-        vertical,
+        vertical: effective.stageShot === 'upper' ? vertical : null,
         reduced: input.reduced ?? false,
         hold: input.hold ?? false,
       }, dt);
       const c = shotCamera(DEFAULT_BOUNDS, 1.71, shot, aspect);
       const target = active && !snap ? cropTarget(s, AUTOFRAME.previewZoom) : null;
       const frame: SimFrame = {
-        t, dt, mode: r.mode, why: r.why, shot: d.shot, reading: r, decision: d,
+        t, dt, mode: r.mode, why: r.why, shot: effective.stageShot,
+        reading: r, decision: d, effective,
         progress: shot.progress, velocity: shot.velocity, eased: smoothstep(shot.progress),
         fov: c.fov, panX: c.panX, panY: c.panY, room: c.room, legHold: smoothstep(legHold),
         see: { state: seen.state, reason: seen.reason, side: seen.side ?? null },
@@ -154,6 +172,11 @@ export function createSim(opts: { kiosk?: boolean; keep?: number } = {}): Sim {
       crop = CROP_FULL; shot = SHOT_REST; lateral = LATERAL_REST; legHold = 0; t = 0; trace = [];
     },
   };
+}
+
+/** 保持工作台只依赖 resolver 的最终原因，不再私自从探测上限猜“多人”。 */
+function effectiveFramingHasGroup(effective: EffectiveFraming): boolean {
+  return effective.shotWhy === 'group';
 }
 
 /** 一段逐帧读数里，每一路**折到 16ms** 的最大变化量与它发生的时刻 */

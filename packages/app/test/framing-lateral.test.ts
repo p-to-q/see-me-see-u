@@ -15,6 +15,7 @@ import { cropActive, createSeeWatch, displaySide, seeState } from '../src/ui/pre
 import { assess } from '../src/ui/readout-state.ts';
 import { COPY } from '../src/ui/i18n.ts';
 import { DEFAULT_BOUNDS, fitFrame, lateralRoom, shotCamera } from '../src/stage/framing.ts';
+import { resolveEffectiveFraming } from '../src/stage/effective-framing.ts';
 import { formatFramingRows } from '../src/shell/hud.ts';
 import { createPoseClock } from '../src/capture/pose-clock.ts';
 import {
@@ -86,11 +87,10 @@ test('镜像：侧边按观众自己的左右；镜像显示时细边画在同�
   assert.equal(displaySide('left', false), 'right');
 });
 
-test('小屏裁切：上半身取景才开；减少动态、画里有别的有身体的人时不开', () => {
-  assert.equal(cropActive({ upperIsIntended: true, reduced: false, othersBodied: false }), true);
-  assert.equal(cropActive({ upperIsIntended: true, reduced: true, othersBodied: false }), false);
-  assert.equal(cropActive({ upperIsIntended: true, reduced: false, othersBodied: true }), false);
-  assert.equal(cropActive({ upperIsIntended: false, reduced: false, othersBodied: false }), false);
+test('小屏裁切：编排层确认上半身取景才开；减少动态时不开', () => {
+  assert.equal(cropActive({ upperIsIntended: true, reduced: false }), true);
+  assert.equal(cropActive({ upperIsIntended: true, reduced: true }), false);
+  assert.equal(cropActive({ upperIsIntended: false, reduced: false }), false);
 });
 
 test('舞台相机：t = 0 时视角和等身全景逐字相同；余量在中景里窄得多', () => {
@@ -275,7 +275,7 @@ test('横向接线：30Hz 推理先过姿态时钟，再喂 120Hz 跟随；分�
   assert.doesNotMatch(MAIN, /evidence:\s*lateralEvidence\(live\)/);
   assert.match(MAIN, /const verticalRaw = verticalEvidence\(raw, sourceAspect\)/,
     'screen.y 没有从姿态时钟进入纵向证据');
-  assert.match(MAIN, /screenVertical =[^]*worldY[^]*accepted:[^]*stage\.setShot\([^]*vertical:\s*screenVertical/,
+  assert.match(MAIN, /screenVertical =[^]*worldY[^]*accepted:[^]*stage\.setShot\([^]*vertical:\s*effectiveFraming\.stageShot === 'upper' \? screenVertical : null/,
     'screen.y 没有与同名 world 锚点 / 身份门配对后接进舞台');
 
   const run = (renderHz: number): number[] => {
@@ -313,8 +313,11 @@ test('横向接线：30Hz 推理先过姿态时钟，再喂 120Hz 跟随；分�
 test('HUD：横向、纵向诊断和"摄像头在取景"都读得出来', () => {
   const c = createFramingClassifier();
   const r = c.update(person(SEATED), 1 / 30, { cameraFraming: true });
+  const decision = decide('auto', r, { cameraFraming: true });
   const [a, b] = formatFramingRows({
-    reading: r, decision: decide('auto', r), legHold: 0, shot: 0,
+    reading: r, decision,
+    effective: resolveEffectiveFraming(decision, { plan: 'rig', planDrift: 0, hasCompanions: false, cameraFraming: true }),
+    legHold: 0, shot: 0,
     lateral: { x: -0.42, room: 0.9, why: 'hold-edge', side: 'left' },
     vertical: { y: 0.03, source: 'screen', anchor: 'pelvis', observed: 0.812 },
   });

@@ -43,6 +43,8 @@ let policyChoice: FramingPolicy | 'script' = isFramingPolicy(q.get('framing')) ?
 let kiosk = q.get('kiosk') === '1';
 let reduced = q.get('reduced') === '1';
 let camFraming = q.get('camframing') === 'on';
+let planDrift = q.get('drift') === '1' ? 1 : 0;
+let companions = q.get('companions') === '1' ? 1 : 0;
 let forceHold = false;
 let sim = createSim({ kiosk, keep: loop ? 1200 : Infinity });
 let capture: Capture | null = null;
@@ -71,6 +73,8 @@ bindBox('kiosk', () => kiosk, (v) => { kiosk = v; }, true);
 bindBox('reduced', () => reduced, (v) => { reduced = v; });
 bindBox('hold', () => forceHold, (v) => { forceHold = v; });
 bindBox('camframing', () => camFraming, (v) => { camFraming = v; });
+bindBox('drift', () => planDrift > 0, (v) => { planDrift = v ? 1 : 0; });
+bindBox('companions', () => companions > 0, (v) => { companions = v ? 1 : 0; });
 $<HTMLButtonElement>('cam').addEventListener('click', async () => {
   const { createCapture } = await import('../src/capture/capture.ts');
   const c = await createCapture('webcam');
@@ -196,7 +200,10 @@ function frame(): void {
   const s = capture ? { pose: capture.latest(), policy: 'auto' as const, hold: false } : scriptAt(segs, t);
   t += dt;
   const policy = policyChoice === 'script' ? s.policy : policyChoice;
-  const f = sim.step({ pose: s.pose, dt, policy, reduced, hold: forceHold || s.hold, cameraFraming: camFraming });
+  const f = sim.step({
+    pose: s.pose, dt, policy, reduced, hold: forceHold || s.hold,
+    cameraFraming: camFraming, planDrift, plan: planDrift > 0 ? 'quadruped' : 'rig', companions,
+  });
   $('src').textContent = capture ? '摄像头' : `${scriptName} ${(t % total).toFixed(1)} / ${total.toFixed(1)}s`;
   drawView(s.pose, f);
   drawStage(f);
@@ -208,6 +215,7 @@ function frame(): void {
   const [a, b] = formatFramingRows({
     reading: f.reading,
     decision: f.decision,
+    effective: f.effective,
     legHold: f.legHold, shot: f.eased,
     lateral: { x: f.lateral.x, room: f.room, why: f.lateral.why, side: f.lateral.side },
   });
@@ -215,7 +223,7 @@ function frame(): void {
   for (const [text, bad] of [
     [a, false], [b, false],
     [`小屏：${f.see.state}/${f.see.reason}${f.see.side ? `（观众的${f.see.side === 'left' ? '左' : '右'}边）` : ''} · 裁切 ${f.crop.active ? '开' : '关'}${f.crop.snap ? ' · 诚实退回中' : ''} · zoom ${f.crop.zoom.toFixed(3)} · 中心 (${f.crop.cx.toFixed(3)}, ${f.crop.cy.toFixed(3)})`, false],
-    [`舞台：景别 ${f.shot} ${(f.eased * 100).toFixed(0)}% · 速度 ${f.velocity >= 0 ? '+' : ''}${f.velocity.toFixed(2)}/s · fov ${f.fov.toFixed(2)}° · 移轴 (${f.panX.toFixed(3)}, ${f.panY.toFixed(3)})m · 腿 ${f.legHold.toFixed(2)}`, false],
+    [`舞台：景别 ${f.shot}/${f.effective.shotWhy} ${(f.eased * 100).toFixed(0)}% · 速度 ${f.velocity >= 0 ? '+' : ''}${f.velocity.toFixed(2)}/s · fov ${f.fov.toFixed(2)}° · 移轴 (${f.panX.toFixed(3)}, ${f.panY.toFixed(3)})m · 腿 ${f.legHold.toFixed(2)}`, false],
     ...Object.entries(jumps).map(([k, v]) => [`每 16ms 最大 ${k}: ${v.value.toFixed(4)}（上限 ${M[k]}）@ ${v.t.toFixed(2)}s`, v.value > M[k] + 1e-9] as [string, boolean]),
     ['曲线：白 = 放大倍数 · 琥珀 = 景别 · 紫 = 景别速度（中线为 0）· 蓝 = 横向偏移 · 青 = 纵向移轴 · 绿 = 腿；顶上色带：灰 full / 琥珀 upper / 蓝 stepping-back', false],
   ] as Array<[string, boolean]>) {
