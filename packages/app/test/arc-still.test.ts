@@ -14,7 +14,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { ACTS, createDirector, type World } from '../src/acts/index.ts';
-import { untether } from '../src/acts/untether.ts';
+import { createUntether, untether } from '../src/acts/untether.ts';
 import { createArc, ARC_ACTS, type ArcState } from '../../core/src/arc.ts';
 import { buildSkeleton } from '../../core/src/skeleton.ts';
 import { createVitality } from '../../core/src/vitality.ts';
@@ -152,8 +152,9 @@ test('对照组：`untether` 在同一套夹具下**必须**动 —— 否则上
   // 它是唯一一个脱钩的玩法，而它只由观众自己按下去（docs/40 §1 末尾、docs/16 §7）。
   // 「主动交出身体」和「被作品擅自拿走」是两件相反的事。
   const w = stillWorld(createArc().state);
-  untether.enter?.(w);
-  const moved = selfMotion((world, dt) => untether.update(world, dt), w);
+  const act = createUntether();
+  act.enter?.(w);
+  const moved = selfMotion((world, dt) => act.update(world, dt), w);
   t.diagnostic(`untether: 静止 20 秒，自动 ${(moved * 1000).toFixed(1)}mm`);
   assert.ok(moved > 0.01,
     `untether 只动了 ${(moved * 1000).toFixed(1)}mm —— 夹具量不出"自己在动"，上面的绿是假的`);

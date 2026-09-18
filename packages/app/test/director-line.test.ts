@@ -23,6 +23,20 @@ function pose(dx: number, t: number): Skeleton {
   return { ...REFERENCE_POSE, joints, t };
 }
 
+function shiftedPose(dx: number, t: number): Skeleton {
+  const joints: Record<string, Vec3> = {};
+  for (const key in REFERENCE_POSE.joints) {
+    const p = REFERENCE_POSE.joints[key];
+    joints[key] = [p[0] + dx, p[1], p[2]];
+  }
+  const bones = REFERENCE_POSE.bones.map((bone) => ({
+    ...bone,
+    p0: [bone.p0[0] + dx, bone.p0[1], bone.p0[2]] as Vec3,
+    p1: [bone.p1[0] + dx, bone.p1[1], bone.p1[2]] as Vec3,
+  }));
+  return { ...REFERENCE_POSE, joints, bones, t };
+}
+
 function echoArc(): ArcState {
   return {
     movement: 1,
@@ -90,6 +104,33 @@ test('line runtime: 两个 Director 同进程交错运行，历史互不污染',
   directorA.update(a.world, dt);
   assert.ok(gap(a.posed()!.joints.wristR, a.world.skeleton.joints.wristR) > 0.01,
     '第一位自己的历史也被第二个 Director 清掉了');
+});
+
+test('untether runtime: 两个 Director 各自保留交还时的身体与相位', () => {
+  const a = rig(shiftedPose(0, 0));
+  const b = rig(shiftedPose(2, 0));
+  const directorA = createDirector(ACTS);
+  const directorB = createDirector(ACTS);
+
+  assert.equal(directorA.force('untether', a.world), true);
+  for (let i = 0; i < 90; i++) directorA.update(a.world, dt);
+  assert.equal(directorB.force('untether', b.world), true);
+  directorB.update(b.world, dt);
+
+  // B 的 enter 若覆盖了模块全局 base，A 下一帧会从 x≈0 跳到 x≈2。
+  directorA.update(a.world, dt);
+  const pelvisA = a.posed()?.joints.pelvis;
+  const pelvisB = b.posed()?.joints.pelvis;
+  assert.ok(pelvisA && Math.abs(pelvisA[0]) < 0.2, `A 被 B 串位到 x=${pelvisA?.[0]}`);
+  assert.ok(pelvisB && Math.abs(pelvisB[0] - 2) < 0.2, `B 没守住自己的基准 x=${pelvisB?.[0]}`);
+  assert.ok(pelvisA && pelvisB && Math.abs(pelvisA[0] - (pelvisB[0] - 2)) > 0.01,
+    'A 已运行 1.5 秒、B 才一帧，两者却共享了同一相位');
+
+  // 坏 dt 走有限 fallback，不把帧循环送进 NaN / Infinity。
+  directorB.update(b.world, Number.NaN);
+  for (const p of Object.values(b.posed()!.joints)) {
+    assert.ok(p.every(Number.isFinite), `坏 dt 产生非有限关节 ${p}`);
+  }
 });
 
 test('line runtime: resetTemporal 后下一位第一帧只有自己的姿态', () => {

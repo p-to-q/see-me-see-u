@@ -1592,6 +1592,31 @@ export const VITALITY = {
   lagCurve: 2.2,
 };
 
+/**
+ * 观众明确「把身体还回去」之后，那具身体自己的站立摇曳（`app/src/acts/untether.ts`）。
+ *
+ * 这是唯一允许脱离实时人体输入的身体动作，所以参数独立成组：改声音、段落速度或展场尺度时，
+ * 不需要进 Act 拆数学。它不属于正常四段变化；正常变化的宏观动作仍必须由观众供能。
+ */
+export const UNTETHER = {
+  /** 两个不成整数比的频率让循环不容易被读出来。 */
+  swayHz: 0.11,
+  breathHz: 0.19,
+  /** 振幅都按捕获身体的身高缩放。 */
+  swayHeightRatio: 0.035,
+  breathHeightRatio: 0.012,
+  /** 纵深摇曳相对水平摇曳的频率、相位与幅度。 */
+  depthFrequencyRatio: 0.7,
+  depthPhaseRadians: 1.1,
+  depthAmplitudeRatio: 0.6,
+  /** 位移沿高度增长；上限避免异常高关节把摇曳放大。 */
+  heightWeightCap: 1.4,
+  minHeightMeters: 0.2,
+  /** 后台恢复 / 卡顿后不追赶整段墙钟，避免一步跳走。 */
+  maxStepSeconds: 1 / 15,
+  fallbackStepSeconds: 1 / 60,
+};
+
 export const SLOW_LOOP = {
   /** 同一个人最多触发几次 */
   maxPerSession: 1,

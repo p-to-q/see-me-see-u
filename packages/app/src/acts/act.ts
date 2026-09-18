@@ -70,6 +70,11 @@ export interface Act {
   label: string;
   /** 'body' = 决定身体怎么动，同时只有一个；'ambient' = 常驻叠加 */
   kind: 'body' | 'ambient';
+  /**
+   * 为每个 Director 建一份私有实例。有跨帧记忆的玩法必须提供；无状态玩法省略即可共享。
+   * `ACTS` 是目录，不是运行时状态的所有者（双舞台 / 联机时尤其不能共用一份闭包）。
+   */
+  instantiate?(): Act;
   canEnter?(w: World): boolean;
   weight?: number;
   minSeconds?: number;
@@ -173,8 +178,11 @@ export interface Director {
 }
 
 export function createDirector(acts: readonly Act[], fallbackId = 'follow'): Director {
-  const body = acts.filter((a) => a.kind === 'body');
-  const ambient = acts.filter((a) => a.kind === 'ambient');
+  // `acts` 是玩法目录。把有记忆的条目在边界上实例化一次，Director 此后只碰自己的副本。
+  // 无状态玩法仍共享原对象，不为每帧或每场制造没有意义的分配。
+  const ownedActs = acts.map((act) => act.instantiate?.() ?? act);
+  const body = ownedActs.filter((a) => a.kind === 'body');
+  const ambient = ownedActs.filter((a) => a.kind === 'ambient');
   const fallback = body.find((a) => a.id === fallbackId) ?? body[0];
 
   const disabled = new Map<string, string>();
@@ -247,7 +255,7 @@ export function createDirector(acts: readonly Act[], fallbackId = 'follow'): Dir
     get currentId() { return current?.id ?? null; },
     get disabled() { return disabled; },
     force(id, w) {
-      const act = acts.find((a) => a.id === id && a.kind === 'body');
+      const act = ownedActs.find((a) => a.id === id && a.kind === 'body');
       if (!act || disabled.has(id)) return false;
       if (act.id === 'untether' && current?.id !== 'untether') line.reset();
       forced = true;

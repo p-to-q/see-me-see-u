@@ -142,6 +142,11 @@ hub tether，不新增骨头、不改冻结骨架契约。若物种需要卫星�
 reacquire 与 untether 往返；输入停滞仍由 sampler 自己截断。失败或坏值时返回 live carrier，
 而不是返回上一个人的变形结果。两个 Director 同进程交错、四种 reset 边界与缺 runtime 降级已有测试。
 
+脱钩玩法自身也遵守同一条所有权边界：`ACTS` 只登记原型，有跨帧状态的 Act 通过
+`instantiate()` 给每个 Director 一份私有闭包。`untether` 的进入姿态与相位不再是模块全局；
+因此未来双屏、多人或远程协作可以并行运行，而不会让后一具身体偷走前一具身体的基准。
+它的频率、幅度、高度权重和卡顿步长集中在 `UNTETHER` tuning 块，换声音或段落节奏时无需改控制流。
+
 ### 3.2 零件层只接一个小的替换策略
 
 在 app 内增加一个纯策略函数，输入 `slot / arc / replacementIndex / injected Rng / activeRelease`，输出三种之一：
