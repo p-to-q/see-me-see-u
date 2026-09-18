@@ -65,6 +65,7 @@ test('encounter reset: 自然离场和成功换源只调用同一个完整清零
     'motion.reset()', 'boneEnergy.reset()', 'evolution.reset()', 'stabilizer.reset()',
     'refiner?.reset()', 'vitality.reset()', 'groundSense.reset()', 'swapGate.reset()',
     'slow.reset()', 'visits.reset()', 'people.tracker.reset()', 'people.bodies.reset()',
+    'releaseState = INITIAL_RELEASE_STATE',
     'lastFeatures = null', 'lastSkeleton = null', 'lastBase = null', 'body.reset?.()',
     'theseus?.reset(seed)', 'intent = intentFromFlags(flags)',
   ]) assert.ok(RESET.includes(required), `完整清零漏了：${required}`);

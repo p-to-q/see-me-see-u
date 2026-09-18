@@ -13,7 +13,8 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import {
-  coreScale, envelope, graftCurve, REPLACE_SECONDS, replaceRenders, shardAt,
+  coreScale, envelope, graftCurve, handReleaseAlong, REPLACE_SECONDS, replaceMotionFor,
+  replaceRenders, shardAt, type ReplaceMotion,
 } from '../src/creature/replace-event.ts';
 import { assemble, type SlotRender } from '../src/creature/assemble.ts';
 import { swapOneSlot } from '../src/creature/theseus-wire.ts';
@@ -79,6 +80,48 @@ test('theseus 事件: 缺省替换在插座上发生，坏进度也有限', () =
         assert.equal(r.offset ?? 0, 0, `${key} t=${String(t)} 仍从插座外飞入`);
       }
     }
+  }
+});
+
+test('theseus 事件: 单手只离开再回接，非手请求在渲染边界降级', () => {
+  const from = { partId: 'old', materialRole: 'secondary' as const };
+  const to = { partId: 'new', materialRole: 'secondary' as const };
+  const incoming = (key: SlotKey, t: number, motion: ReplaceMotion = 'hand-release') =>
+    replaceRenders(key, from, to, t, 1, motion).find((r) => r.partId === to.partId)!;
+
+  assert.equal(incoming('handR', 0).along ?? 0, 0, '起点没有接在腕上');
+  assert.equal(incoming('handR', 1).along ?? 0, 0, '终点没有接回腕上');
+  assert.equal(incoming('handR', 0.5).along, handReleaseAlong(0.5), '中点没有走到最远');
+  assert.ok((incoming('handR', 0.5).along ?? 0) > 0, '手根本没有离开');
+  assert.equal(incoming('handL', 0.5, 'in-place').along ?? 0, 0, '原位手被 release 污染');
+  assert.equal(incoming('footL', 0.5).along ?? 0, 0, '脚接受了 release 请求');
+  assert.equal(incoming('spine', 0.5).along ?? 0, 0, '连接槽位接受了 release 请求');
+  assert.equal(replaceMotionFor('upperArmL', 'hand-release'), 'in-place', '整臂从渲染边界漏进来了');
+  const regular = replaceRenders('handR', from, to, 0.5);
+  const released = replaceRenders('handR', from, to, 0.5, 1, 'hand-release');
+  assert.deepEqual(released.map((r) => r.partId), regular.map((r) => r.partId),
+    'release 改了桶或实例集合，draw / 面数预算不再等价');
+
+  for (const t of [Number.NaN, Infinity, -Infinity]) {
+    for (const r of replaceRenders('handR', from, to, t, 1, 'hand-release')) {
+      assert.ok(Number.isFinite(r.scale), `t=${String(t)} 产生非有限 scale`);
+      assert.ok(Number.isFinite(r.along ?? 0), `t=${String(t)} 产生非有限 along`);
+    }
+  }
+});
+
+test('theseus 事件: 单手 release 与既有 1.2 秒事件共用时钟，15/30/60/120Hz 都按时回接', () => {
+  for (const hz of [15, 30, 60, 120]) {
+    const frames = Math.ceil(REPLACE_SECONDS * hz);
+    let peak = 0;
+    for (let frame = 0; frame < frames; frame++) {
+      peak = Math.max(peak, handReleaseAlong(frame / (REPLACE_SECONDS * hz)));
+    }
+    const elapsed = frames / hz;
+    assert.ok(elapsed >= REPLACE_SECONDS && elapsed < REPLACE_SECONDS + 1 / hz + 1e-12,
+      `${hz}Hz 在 ${elapsed}s 才结束`);
+    assert.ok(Math.abs(peak - handReleaseAlong(0.5)) < 1e-12, `${hz}Hz 没走到同一个峰值`);
+    assert.equal(handReleaseAlong(frames / (REPLACE_SECONDS * hz)), 0, `${hz}Hz 结束时没接回去`);
   }
 });
 
@@ -174,7 +217,7 @@ test('theseus 事件: 碎开和替换音是同一帧 —— replace 当帧开始
   assert.ok(iSound > iReplace, '替换音不在 creature.replace() 之后的同一段里');
   assert.ok(!block.includes('creature.remorph('), '替换那一段还在走 remorph（交叉淡入）');
   const creature = read('../src/creature/creature.ts');
-  const body = creature.slice(creature.indexOf('    replace(slot, pick)'), creature.indexOf('    setShading(id)'));
+  const body = creature.slice(creature.indexOf('    replace(slot, pick, requested'), creature.indexOf('    setShading(id)'));
   assert.ok(body.includes('active.set('), 'replace() 没有当帧进 active');
   assert.ok(!body.includes('enqueue('), 'replace() 走了队列：队列满时画面会晚于那一声');
 });

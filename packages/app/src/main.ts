@@ -36,6 +36,7 @@ import { createPartLibrary } from './assets/library.ts';
 import { createCreature } from './creature/creature.ts';
 import { createCompanions, createPipes, type CompanionResult } from './creature/companions.ts';
 import { bodyFill, planPeople } from './creature/people-budget.ts';
+import { commitRelease, INITIAL_RELEASE_STATE, planRelease } from './creature/release-policy.ts';
 import { makeTheseus, swapOneSlot } from './creature/theseus-wire.ts';
 import { resolveShading, type ShadingId } from './creature/shading.ts';
 import { createMassBody } from './creature/mass.ts';
@@ -723,6 +724,8 @@ async function boot(): Promise<void> {
    * **不取消** —— 那一声和那一下碎开被一起压、一起放，仍然是同一帧。
    */
   const swapGate = createDeferral<Fired>(GOVERNOR.swapDeferMax);
+  /** 单手脱离属于一场相遇，不属于一具 GPU 身体；先计划、实际开演后才提交。 */
+  let releaseState = INITIAL_RELEASE_STATE;
   /**
    * 已经被换掉的那些槽位。**升档重建 genome 时必须盖回去** ——
    * `morph()` 是拿 `seed` 从头抽一具身体，不盖的话每一次乐章交接都会把
@@ -917,6 +920,7 @@ async function boot(): Promise<void> {
     vitality.reset();
     groundSense.reset();
     swapGate.reset();
+    releaseState = INITIAL_RELEASE_STATE;
 
     // 异步回路先换 epoch / abort，再清画面状态；旧结果晚回来也不能写到新观众头上。
     slow.reset();
@@ -1325,7 +1329,9 @@ async function boot(): Promise<void> {
         // 不是交叉淡入：旧件碎开、新件装上、描边不断（docs/44 §7，形状在 `creature/replace-event.ts`）。
         // 这一下当帧开始，所以下面那一声和画面上的碎开是同一帧
         const shown = getDegradeState().placeholder ? toPlaceholderGenome(g) : g;
-        creature.replace(fired.slot, shown.slots[fired.slot]);
+        const requested = planRelease(releaseState, fired.slot);
+        const accepted = creature.replace(fired.slot, shown.slots[fired.slot], requested);
+        releaseState = commitRelease(releaseState, accepted);
         // docs/40 §5 第 3 条（2026-09-14 改的挂点）+ docs/44 §7：
         // 升档音原来挂在四个乐章的交接上，而 docs/44 §6 之后那四个点不再是事件 ——
         // 一个挂在不再发生的东西上的声音等于没有声音。挪到**每一次替换**上：
@@ -1333,7 +1339,7 @@ async function boot(): Promise<void> {
         // **不新造提示音**，用的就是已经存在的那一个（docs/29 §S5 的克制照旧）。
         // 现场如果听起来像钟表，docs/44 §7 给了退路：加一句 `step.borrowDistance >= 2`
         // 就只在借得远的时候响 —— 那个数这里已经拿在手上了。
-        sound.tierUp(tier);
+        if (accepted) sound.tierUp(tier);
       }
     }
 

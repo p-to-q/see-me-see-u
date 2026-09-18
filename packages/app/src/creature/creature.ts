@@ -37,7 +37,10 @@ import {
 } from './shading.ts';
 import { ARC_OFF, arcWeights, rgbToHsl, type ArcWeights } from '../stage/look.ts';
 import { surfaceFor, type SurfaceSpec } from './surface.ts';
-import { crossfadeRenders, graftCurve, REPLACE_SECONDS, replaceRenders } from './replace-event.ts';
+import {
+  crossfadeRenders, graftCurve, REPLACE_SECONDS, replaceMotionFor, replaceRenders,
+  type ReplaceMotion,
+} from './replace-event.ts';
 import { passesOf, swapCeiling } from './swap-budget.ts';
 
 export interface CreatureStats {
@@ -72,7 +75,7 @@ export interface Creature {
    * **当帧就开始**，不排队 —— 替换音在同一帧响，排进队列就对不上了。
    * 形状全在 `replace-event.ts`，这里只管把它接进帧循环。
    */
-  replace(slot: SlotKey, pick: SlotPick): void;
+  replace(slot: SlotKey, pick: SlotPick, motion?: ReplaceMotion): ReplaceMotion | null;
   /**
    * 换着色语言。控件条的「描边」那一项走这里 —— 它要重建全部材质与桶，
    * 所以只该被一次按键调用，不该每帧调。相同值是 no-op。
@@ -168,6 +171,8 @@ interface Swap {
   t: number;
   /** 'replace' = 忒修斯那一下（碎开 + 组装），缺省 = 交叉淡入 */
   kind?: 'replace';
+  /** 只有主身体消费；伴随身体对同一替换始终保持原位。 */
+  motion?: ReplaceMotion;
 }
 
 interface MeshEntry {
@@ -545,7 +550,7 @@ export function createCreature(opt: CreatureOptions): Creature {
         const waiting = s ? undefined : queuedSwap(key);
         const pick = waiting ? waiting.from : genome.slots?.[key];
         if (s?.kind === 'replace') {
-          render[key] = replaceRenders(key, s.from, s.to, s.t, pres);
+          render[key] = replaceRenders(key, s.from, s.to, s.t, pres, s.motion);
         } else if (s) {
           // 旧件缩没、新件走 graft 的组装曲线；关节那一格是一道波（`replace-event.ts`）
           render[key] = crossfadeRenders(key, s.from, s.to, s.t, pres);
@@ -731,12 +736,13 @@ export function createCreature(opt: CreatureOptions): Creature {
       enqueue({ key: slot, from: prev, to: pick, t: 0 }, true);
     },
 
-    replace(slot, pick) {
-      if (!genome?.slots || !pick?.partId) return;
+    replace(slot, pick, requested = 'in-place') {
+      if (!genome?.slots || !pick?.partId) return null;
       const running = active.get(slot);
       // 这一格正在交接：从**正在装上的那一件**碎起，不是从更早那一件
       const from = running ? running.to : genome.slots[slot] ?? null;
-      if (from?.partId === pick.partId) return;
+      if (from?.partId === pick.partId) return null;
+      const motion = replaceMotionFor(slot, requested);
       genome = { ...genome, slots: { ...genome.slots, [slot]: pick } };
       const i = queued.findIndex((q) => q.key === slot);
       if (i >= 0) queued.splice(i, 1);
@@ -757,8 +763,9 @@ export function createCreature(opt: CreatureOptions): Creature {
           active.delete(victim);
         }
       }
-      active.set(slot, { key: slot, from, to: pick, t: 0, kind: 'replace' });
+      active.set(slot, { key: slot, from, to: pick, t: 0, kind: 'replace', motion });
       void library.preload([pick.partId]);
+      return motion;
     },
 
     setShading(id) {

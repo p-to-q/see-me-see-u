@@ -258,7 +258,7 @@ test('落地：真实脚部 old→new 的 AABB 基准走完整交接，不在最
   assert.ok(Number.isFinite(bad), '坏进度不能把帧循环送进 NaN');
 });
 
-test('落地：四足承重手的短命效果只修自己，不穿地也不抬主体', { skip: !REAL_INDEX }, (t) => {
+test('落地：四足承重手的飞入与单手 release 都只修自己，不穿地也不抬主体', { skip: !REAL_INDEX }, (t) => {
   const fromGenome = makeGenome(92, 2, REAL_INDEX!, { theme: 'wheelleg' });
   const targetGenome = makeGenome(92, 3, REAL_INDEX!, { theme: 'wheelleg' });
   const key: SlotKey = 'handR';
@@ -280,27 +280,32 @@ test('落地：四足承重手的短命效果只修自己，不穿地也不抬�
   const proxy = (pick: typeof from) => [{
     partId: pick!.partId, materialRole: pick!.materialRole,
   }];
-  let worst = Infinity;
-  for (let frame = 0; frame <= 120; frame++) {
-    const u = frame / 120;
-    const common = {
-      ground: { [key]: proxy(from) },
-      groundTo: { [key]: proxy(to) },
-      groundProgress: { [key]: graftCurve(u).scale },
-    };
-    const parts = assemble(genome, skeleton, source, {
-      ...common,
-      render: { [key]: crossfadeRenders(key, from, to!, u) },
-    });
-    const bodyOnly = assemble(genome, skeleton, source, { ...common, render: { [key]: [] } });
-    let lo = Infinity;
-    for (const p of parts) lo = Math.min(lo, lowestOf(p.matrix, source.metaOf(p.partId).aabb));
-    worst = Math.min(worst, lo);
-    assert.ok(lo >= -1e-9, `t=${u.toFixed(3)} 可见几何穿地 ${(lo * 1000).toFixed(3)}mm`);
-    assert.ok(Math.abs(headY(parts) - headY(bodyOnly)) < 1e-12,
-      `t=${u.toFixed(3)} 效果碰地反向搬动了主体`);
+  for (const [name, render] of [
+    ['飞入', (u: number) => crossfadeRenders(key, from, to!, u)],
+    ['release', (u: number) => replaceRenders(key, from, to!, u, 1, 'hand-release')],
+  ] as const) {
+    let worst = Infinity;
+    for (let frame = 0; frame <= 120; frame++) {
+      const u = frame / 120;
+      const common = {
+        ground: { [key]: proxy(from) },
+        groundTo: { [key]: proxy(to) },
+        groundProgress: { [key]: graftCurve(u).scale },
+      };
+      const parts = assemble(genome, skeleton, source, {
+        ...common,
+        render: { [key]: render(u) },
+      });
+      const bodyOnly = assemble(genome, skeleton, source, { ...common, render: { [key]: [] } });
+      let lo = Infinity;
+      for (const p of parts) lo = Math.min(lo, lowestOf(p.matrix, source.metaOf(p.partId).aabb));
+      worst = Math.min(worst, lo);
+      assert.ok(lo >= -1e-9, `${name} t=${u.toFixed(3)} 可见几何穿地 ${(lo * 1000).toFixed(3)}mm`);
+      assert.ok(Math.abs(headY(parts) - headY(bodyOnly)) < 1e-12,
+        `${name} t=${u.toFixed(3)} 效果碰地反向搬动了主体`);
+    }
+    t.diagnostic(`四足${name}全程可见最低点 ${(worst * 1000).toFixed(3)}mm`);
   }
-  t.diagnostic(`四足交接全程可见最低点 ${(worst * 1000).toFixed(3)}mm`);
 });
 
 test('落地：parts.json 缺失的占位身体在替换中仍有限、不泵动', () => {

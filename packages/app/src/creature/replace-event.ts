@@ -26,6 +26,9 @@ import { JOINT_CAPS, type SlotRender } from './assemble.ts';
  */
 export const REPLACE_SECONDS = MORPH.crossfade;
 
+/** 替换事件的产品语义；整臂不是一个合法值，不能从这里偷偷拼出来。 */
+export type ReplaceMotion = 'in-place' | 'hand-release';
+
 const clamp01 = (x: number): number => Number.isFinite(x) ? (x < 0 ? 0 : x > 1 ? 1 : x) : 0;
 const smoothstep = (x: number): number => { const t = clamp01(x); return t * t * (3 - 2 * t); };
 
@@ -33,6 +36,24 @@ const smoothstep = (x: number): number => { const t = clamp01(x); return t * t *
 export function graftCurve(t: number): { scale: number; offset: number } {
   const u = smoothstep(t);
   return { scale: u, offset: (1 - u) * MORPH.assembleOffset };
+}
+
+/**
+ * 单手离开再回接的位移（手骨长度的倍数）。两端严格为 0，中点到最远；
+ * `sin(πt)` 没有第二套时钟，掉帧后也只由同一个归一化进度决定。
+ */
+export function handReleaseAlong(t: number): number {
+  const u = clamp01(t);
+  if (u <= 0 || u >= 1) return 0;       // `sin(π)` 有浮点残量；回接必须逐位回到插座
+  return Math.max(0, Number.isFinite(THESEUS.handReleaseAlong) ? THESEUS.handReleaseAlong : 0)
+    * Math.sin(Math.PI * u);
+}
+
+/** 渲染边界再守一次：非手槽位即使被错误请求 release，也只能原位。 */
+export function replaceMotionFor(key: SlotKey, requested: ReplaceMotion = 'in-place'): ReplaceMotion {
+  return requested === 'hand-release' && (key === 'handL' || key === 'handR')
+    ? 'hand-release'
+    : 'in-place';
 }
 
 /** 旧件的芯：前 `coreHold` 保持原大，之后缩没 */
@@ -117,13 +138,14 @@ function waveRenders(
  * `assemble(..., { ground })` 那份满尺寸、在插座上的稳定代理。
  */
 function replaceOne(
-  key: SlotKey, from: SlotPick | null, to: SlotPick, tt: number, pres: number,
+  key: SlotKey, from: SlotPick | null, to: SlotPick, tt: number, pres: number, releaseAlong: number,
 ): SlotRender[] {
   const list: SlotRender[] = [];
   if (from) {
     const core = coreScale(tt);
     if (core > 0) list.push({
-      partId: from.partId, materialRole: from.materialRole, scale: core * pres, groundsBody: false,
+      partId: from.partId, materialRole: from.materialRole,
+      scale: core * pres, along: releaseAlong, groundsBody: false,
     });
     const n = shardCount(key);
     const sh = shardAt(tt);
@@ -133,7 +155,7 @@ function replaceOne(
           partId: from.partId, materialRole: from.materialRole,
           scale: sh.scale * pres,
           // 沿骨头均匀摆开：缩小后的件占 [0, scale] 那一段，起点落在剩下那一段里
-          along: n > 1 ? ((k + 0.5) / n) * (1 - clamp01(THESEUS.shardScale)) : 0,
+          along: releaseAlong + (n > 1 ? ((k + 0.5) / n) * (1 - clamp01(THESEUS.shardScale)) : 0),
           lateral: sh.lateral,
           angle: k * GOLDEN,
           groundsBody: false,
@@ -143,7 +165,8 @@ function replaceOne(
   }
   const g = graftCurve(tt);
   list.push({
-    partId: to.partId, materialRole: to.materialRole, scale: g.scale * pres,
+    partId: to.partId, materialRole: to.materialRole,
+    scale: g.scale * pres, along: releaseAlong,
     groundsBody: false,
   });
   return list;
@@ -155,10 +178,13 @@ function replaceOne(
  */
 export function replaceRenders(
   key: SlotKey, from: SlotPick | null, to: SlotPick, t: number, pres = 1,
+  requested: ReplaceMotion = 'in-place',
 ): SlotRender[] {
   const tt = clamp01(t);
-  if (key === 'joint') return waveRenders(tt, from, to, pres, (u) => replaceOne(key, from, to, u, pres));
-  return replaceOne(key, from, to, tt, pres);
+  const motion = replaceMotionFor(key, requested);
+  const along = motion === 'hand-release' ? handReleaseAlong(tt) : 0;
+  if (key === 'joint') return waveRenders(tt, from, to, pres, (u) => replaceOne(key, from, to, u, pres, 0));
+  return replaceOne(key, from, to, tt, pres, along);
 }
 
 /** 一处的交叉淡入：旧件缩没、新件走 graft 的组装曲线；两者都是短命效果。 */

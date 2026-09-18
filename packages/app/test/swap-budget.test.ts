@@ -203,7 +203,7 @@ test('creature 真的按那个上限跑 —— 交叉淡入给替换留着名额
   const src = read('../src/creature/creature.ts');
   const pump = src.slice(src.indexOf('function pumpQueue()'), src.indexOf('function enqueue('));
   assert.ok(/active\.size \+ reserve < c\b/.test(pump), 'pumpQueue() 不再按 `swapCeiling` 和替换预留的名额收交叉淡入');
-  const replace = src.slice(src.indexOf('    replace(slot, pick)'), src.indexOf('    setShading(id)'));
+  const replace = src.slice(src.indexOf('    replace(slot, pick, requested'), src.indexOf('    setShading(id)'));
   assert.ok(/while \(active\.size >= ceiling\(\)\)/.test(replace) && replace.includes('active.delete('),
     'replace() 名额满了直接叠上去 —— 那就是 42/40 的来路');
   const main = read('../src/main.ts');
