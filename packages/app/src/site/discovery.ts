@@ -96,14 +96,6 @@ export const PUBLIC_PAGES = [
     priority: 0.5,
   },
   {
-    path: '/404',
-    title: '这里没有这一页 · This page is absent — SEE-ME SEE-U',
-    description:
-      'A deliberate dead end inside SEE-ME SEE-U: the requested page is absent, with a clear route back to the installation.',
-    changeFrequency: 'yearly',
-    priority: 0.1,
-  },
-  {
     path: '/dev',
     title: '工作台目录 · Studio Tools — SEE-ME SEE-U',
     description:

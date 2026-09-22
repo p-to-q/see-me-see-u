@@ -34,18 +34,16 @@ test('every public page gets one initial-HTML discovery contract', () => {
   }
 });
 
-test('404 and dev tools are intentionally indexable', () => {
-  for (const file of [`${app}/404.html`, `${app}/dev/stage.html`]) {
-    const output = injectDiscovery(read(file.endsWith('404.html') ? '../404.html' : '../dev/stage.html'), file);
-    assert.match(output, /name="robots" content="index, follow,/);
-    assert.match(output, /rel="canonical"/);
-    assert.match(output, /application\/ld\+json/);
-  }
+test('dev tools are intentionally indexable', () => {
+  const output = injectDiscovery(read('../dev/stage.html'), `${app}/dev/stage.html`);
+  assert.match(output, /name="robots" content="index, follow,/);
+  assert.match(output, /rel="canonical"/);
+  assert.match(output, /application\/ld\+json/);
 });
 
-test('poster renderers and unknown HTML still fail closed to noindex', () => {
+test('404, poster renderers and unknown HTML fail closed to noindex', () => {
   const sample = '<!doctype html><html><head><title>Internal</title></head><body></body></html>';
-  for (const file of [`${app}/poster/brand.html`, `${app}/future.html`]) {
+  for (const file of [`${app}/404.html`, `${app}/poster/brand.html`, `${app}/future.html`]) {
     const output = injectDiscovery(sample, file);
     assert.match(output, /noindex, follow, noarchive/, file);
     assert.doesNotMatch(output, /rel="canonical"/, file);
@@ -60,7 +58,7 @@ test('sitemap and discovery outputs are generated from the public page table', (
   assert.deepEqual(urls, PUBLIC_PAGES.map((page) => canonical(page.path)));
   assert.equal(new Set(urls).size, urls.length);
   assert.ok(urls.every((url) => url.startsWith(SITE.origin) && !url.endsWith('.html')));
-  assert.match(sitemap, /\/404<\/loc>/);
+  assert.doesNotMatch(sitemap, /\/404<\/loc>/);
   assert.match(sitemap, /\/dev\/stage<\/loc>/);
   assert.doesNotMatch(sitemap, /\/poster\//);
 

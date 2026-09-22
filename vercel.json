@@ -34,6 +34,15 @@
       ]
     },
     {
+      "source": "/404",
+      "headers": [
+        {
+          "key": "X-Robots-Tag",
+          "value": "noindex, follow, noarchive"
+        }
+      ]
+    },
+    {
       "source": "/assets/(.*)",
       "headers": [
         {
