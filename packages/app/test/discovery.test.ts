@@ -87,7 +87,10 @@ test('structured data describes an artwork, a website, its publisher and the pag
 test('manifest and social assets form a real, parseable media contract', () => {
   const manifest = JSON.parse(renderManifest()) as { icons: { src: string; sizes: string }[] };
   assert.deepEqual(manifest.icons, [{ src: SITE.iconPath, sizes: 'any', type: 'image/svg+xml', purpose: 'any' }]);
-  assert.match(read('../src/site/assets/see-me-see-u.svg'), /viewBox="0 0 512 512"/);
+  const icon = read('../src/site/assets/favicon-me.svg');
+  assert.match(icon, /viewBox="0 0 64 64"/);
+  assert.match(icon, /aria-label="ME"/);
+  assert.doesNotMatch(icon, /<text\b/, 'favicon 字形必须是固定轮廓，不能在别的系统上换字体');
 
   const png = readFileSync(new URL('../src/site/assets/see-me-see-u-stage.png', import.meta.url));
   assert.equal(png.toString('ascii', 1, 4), 'PNG');
@@ -113,7 +116,7 @@ test('Vite build is wired to inject and emit the discovery contract', () => {
   assert.match(vite, /injectDiscovery\(html, ctx\.filename\)/);
   assert.match(vite, /discoveryFiles\(\)/);
   assert.match(vite, /see-me-see-u-stage\.png/);
-  assert.match(vite, /see-me-see-u\.svg/);
+  assert.match(vite, /favicon-me\.svg/);
 });
 
 test('IndexNow runs under the repository runtime contract', () => {
