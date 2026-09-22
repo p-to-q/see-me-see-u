@@ -1,7 +1,11 @@
 {
   "name": "see-me-see-u",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.1.0-alpha.1",
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=22.18.0"
+  },
   "type": "module",
   "workspaces": [
     "packages/*"
@@ -22,6 +26,7 @@
     "factory:compress": "node packages/factory/src/cli.ts compress",
     "factory:refs": "node packages/factory/src/cli.ts refs",
     "factory:index": "node --env-file=.env packages/factory/src/cli.ts index",
+    "seo:indexnow": "node scripts/indexnow-submit.mjs",
     "factory:serve": "node --env-file=.env packages/factory/src/proxy.ts",
     "check": "npm run typecheck && npm run test && npm run check:parts",
     "typecheck": "tsc -p tsconfig.json",

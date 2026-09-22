@@ -217,6 +217,7 @@ const HEX_ALLOWED: Array<{
   { file: 'src/choose/cards.ts', why: '卡片是画在 canvas 上的，不是 DOM —— 它拿不到 CSS 变量，颜色只能是具体值' },
   { file: 'src/ui/chrome.css', why: 'dev HUD 的警告琥珀色。它是 `--sb-warn` 之外的第二档，只在 `?debug=1` 出现' },
   { file: 'src/shell/selftest.ts', why: '开场前自检页。和 boot-error 同一类：它要在"东西可能是坏的"的前提下也能读，所以不依赖样式表' },
+  { file: 'src/site/discovery.ts', why: '浏览器外壳的 theme-color 与可安装站点清单的背景色。它们在 CSS 到达前由浏览器消费，不能引用运行时 CSS 令牌' },
   { file: 'index.html', why: '主程序那一页在任何样式表和 main.ts 到达之前的底色。和 boot-error 同一类：那一刻还没有令牌可取' },
   {
     file: 'dev/archive.css',

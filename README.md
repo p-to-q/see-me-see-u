@@ -63,11 +63,13 @@ pose data — never by a real person.
   does not notice.
 - **Not a framework.** Nothing here is built to be reused. It is built to survive
   one evening with an audience in front of it.
-- **Not a product.** The code is MIT; the artwork is not.
+- **Not a product.** Original project source code is Apache-2.0; that licence
+  does not turn the artwork, brand, fonts, geometry, demo data or sound into a
+  reusable product.
 
 ## Run
 
-Node ≥ 22 — the source is `.ts` run directly through Node's type stripping, so
+Node ≥ 22.18.0 — the source is `.ts` run directly through Node's type stripping, so
 there is no build step to develop against.
 
 ```bash
@@ -128,9 +130,15 @@ The asset factory needs a Hyper3D key and spends credits: its commands are in
 
 ## Licence
 
-The **source code** is MIT — see [`LICENSE`](LICENSE), which carves four things
-out of it: the ring ported from Viscose-carousel, the ZKMSerendipity typeface,
-the generated `.glb` parts and anchor images, and the artwork itself. The same
-carve-outs are restated for the audience under *Credits and licence* on
-[`/about`](https://useeme.ptoq.io/about). Open source code does not mean the
-piece may be re-exhibited.
+Original project source code is licensed under
+[Apache-2.0](LICENSE), including its explicit patent grant. The standard
+licence text is deliberately kept free of project-specific restrictions;
+[`NOTICE`](NOTICE) and [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) carry
+the attribution and scope inventory instead.
+
+That inventory matters. The Viscose-derived opening method, real-machine
+geometry, generated Rodin assets, ZKMSerendipity and LXGW WenKai fonts,
+CC BY-SA demo-derived pose data, CC0 sound, brand material, and the artwork as
+a staged installation retain their own terms. Apache-2.0 does not relicense
+them or grant permission to re-stage the piece. Contributions follow the same
+boundary; see [`CONTRIBUTING.md`](CONTRIBUTING.md).

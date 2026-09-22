@@ -561,8 +561,8 @@ export const COPY = {
     privacyTitle: bi('隐私', 'Privacy'),
     creditsTitle: bi('署名与许可', 'Credits and licence'),
     licence: bi(
-      '源代码 MIT。五项除外，请分别对待：',
-      'Source code is MIT, with five carve-outs:',
+      '项目原创源代码使用 Apache-2.0。下列第三方材料与作品权利不被这份代码许可改写：',
+      'Original project source code is Apache-2.0. These third-party materials and artwork rights retain their own terms:',
     ),
     // 名字**改过一次**：上一版确实是 `dither-blur-carousel`，但首屏那个轮播已经重做成
     // SDF 的环，出处随之换成同一位作者的 Viscose-carousel（`docs/35-VISCOSE.md` §0/§1）。
@@ -572,8 +572,8 @@ export const COPY = {
       'The opening ring is ported from Viscose-carousel (MIT © Yousuf Soomro); nothing from its public/ folder is used.',
     ),
     carve2: bi(
-      'ZKMSerendipity 字体权利属于 ZKM，本项目非商用、不再分发；fork 请自行取得许可。',
-      'The ZKMSerendipity typeface belongs to ZKM. Non-commercial use here, not redistributed; forks must obtain their own licence.',
+      'ZKMSerendipity 字体权利属于 ZKM 及其设计方，不属于 Apache-2.0；fork 与再分发者请自行取得许可或删除。叙事中文的 LXGW WenKai 子集仍按 SIL OFL 1.1 分发。',
+      'The ZKMSerendipity typeface belongs to ZKM and its designers and is not covered by Apache-2.0; forks and redistributors must obtain permission or remove it. The LXGW WenKai subset used for narrative Chinese remains under SIL OFL 1.1.',
     ),
     carve3: bi(
       '部件与参考图由 Hyper3D Rodin 生成并经本仓库流水线规范化，使用前请确认该服务的条款。',
@@ -599,10 +599,19 @@ export const COPY = {
       + 'This work is not affiliated with, nor endorsed by, any of those companies or institutions.',
     ),
     carve4: bi(
-      '作品本身是一件装置。代码开源不等于作品可以被原样复制展出。',
-      'The work itself is an installation. Open source code is not permission to re-stage it.',
+      '作品名称、品牌物料和作为装置的互动与展陈权利不属于代码许可。代码开源不等于作品可被原样复制展出。',
+      'The name, brand material, interaction and exhibition rights of the installation are not part of the source-code licence. Open source code is not permission to re-stage the work.',
+    ),
+    carve6: bi(
+      '两段真人回放骨架数据由 Taco Fleur 的 Wikimedia Commons 视频计算而来，仍按 CC BY-SA 4.0 处理；原视频不在仓库中。',
+      'Two real-person replay skeleton datasets were computed from Taco Fleur videos on Wikimedia Commons and remain under CC BY-SA 4.0; the source footage is not in this repository.',
+    ),
+    carve7: bi(
+      '九个离散接触声来自 Freesound 的 CC0 录音，页面与仓库仍保留作者、来源与处理记录。',
+      'Nine discrete contact sounds are processed CC0 recordings from Freesound; authors, sources and transformations remain recorded.',
     ),
     repo: bi('仓库', 'Repository'),
+    legal: bi('法律文件', 'Legal files'),
   },
 
   /**

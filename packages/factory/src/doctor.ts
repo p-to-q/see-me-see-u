@@ -13,9 +13,10 @@ let fails = 0;
 
 console.log('SEE-ME SEE-U · doctor\n');
 
-const major = Number(process.versions.node.split('.')[0]);
-major >= 22 ? ok(`node ${process.versions.node}（需要 ≥22：靠 type stripping 直接跑 .ts）`)
-            : bad(`node ${process.versions.node} 太老，需要 ≥22`);
+const [major, minor] = process.versions.node.split('.').map(Number);
+const nodeSupported = major > 22 || (major === 22 && minor >= 18);
+nodeSupported ? ok(`node ${process.versions.node}（需要 ≥22.18.0：靠默认 type stripping 直接跑 .ts）`)
+              : bad(`node ${process.versions.node} 太老，需要 ≥22.18.0`);
 
 existsSync(resolve(ROOT, 'node_modules/three')) ? ok('依赖已安装') : bad('依赖缺失：npm install');
 

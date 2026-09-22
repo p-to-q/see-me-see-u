@@ -295,9 +295,10 @@ async function boot(): Promise<void> {
       if (started.kind === 'webcam') captureForChoose = started.capture;
     });
     console.info(`[main] 选择页举手滚动：${waveOn ? 'on' : 'off'}（?wave=${flags.wave ?? '默认'}）`);
-    await new Promise<void>((done) => {
-      void chooseTheme({
-        onChoose: (id) => { theme = id; done(); },
+    let chosen!: () => void;
+    const choice = new Promise<void>((done) => { chosen = done; });
+    const handle = await chooseTheme({
+        onChoose: (id) => { theme = id; chosen(); },
         catalog: chooseCatalog,
         seed: flags.seed ?? undefined,
         pose: waveOn ? () => captureForChoose?.latest() ?? null : undefined,
@@ -308,23 +309,23 @@ async function boot(): Promise<void> {
         onProgress: (n, total) => loading.progress(
           'parts', PARTS_INDEX_SHARE + (1 - PARTS_INDEX_SHARE) * (total ? n / total : 1),
         ),
+        // 图可以一直在背后并行下载；只有可见的入场被这道闸门拦住。
+        // `finish()` 在加载节点真正移除后才 resolve，所以下一帧不会同时
+        // 出现 100% 和选择页的字标 / 名牌 / 卡片动画。
+        beforeReveal: () => loading.finish(),
         // `?gl=off` —— 强制走无 WebGL 的 DOM 列表。在这之前这个参数只接在
         // `/dev/choose.html` 上，而 `choose.ts` 的文件头拿它当"这条降级路径跑过了"
         // 的证据：那是一句关于**正式程序**的话，而正式程序上它什么都不做（docs/36 D2）。
         forceFallback: !flags.gl,
-      }).then((handle) => {
-        // 选择页已经在屏幕上了 —— 观众有事可做，加载态立刻让位。
-        // 剩下的预取在后面继续跑，但它不该再挡着任何人。
-        loading.finish();
-        releasePrepaint();
-        // 机器把一盘东西放到你面前（docs/29 §2.7）。**必须在这里，不能在
-        // `chooseTheme` 调用之前** —— 那时候页面还没落定，声音会早于画面，
-        // 读作"它自己弹出来了"而不是"它拿给你"。
-        // `handle` 为 null（URL 里已经有主题）时这一页压根没出现过，也就不该有这一声。
-        if (handle) cues.play('reveal');
-        if (!handle) done();   // handle 为 null = URL 里已经有主题
-      });
     });
+    // 有选择页时，beforeReveal 已经等过这一个 Promise；直达 theme 的路径
+    // 不挂选择页，在这里完成同一次加载层交棒。重复调用会拿到同一个 Promise。
+    await loading.finish();
+    releasePrepaint();
+    // 机器把一盘东西放到你面前（docs/29 §2.7）。声音与真正开播在同一次交棒后，
+    // 不再早于画面。handle 为 null 表示这一页没出现，不该有这一声。
+    if (handle) cues.play('reveal');
+    await choice;
   } else {
     loading.done('parts');
     releasePrepaint();

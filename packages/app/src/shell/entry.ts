@@ -119,7 +119,9 @@ export function mountEntry(flags: Flags): Entry | null {
   // 但返回值照旧不是 null —— main.ts 据此用回放起步，不在大厅里弹摄像头权限。
   if (flags.hall) {
     const field = acquireRingField();
-    field.play();
+    // 回到大厅也先留在 attract；选择页的资产与加载层完成交棒后，
+    // `mountChoose()` 会在唯一的入口调 `play()`。两个地方都开播就无法保证时序。
+    field.attract();
     return { started: Promise.resolve(), shown: false, setSpeciesCount() {} };
   }
 
@@ -211,9 +213,9 @@ export function mountEntry(flags: Flags): Entry | null {
 
   const started = new Promise<void>((resolve) => {
     enter.addEventListener('click', () => {
-      // 剥离从这一下开始 —— 但真正开剥要等卡片到齐（见 field.ts 的"闸门"）。
-      // 在那之前观众看到的还是那一团在转，而不是一圈空白卡。
-      field.play();
+      // 这一下只交出展签，不直接开播卡片。真正的 `field.play()` 只有
+      // `mountChoose()` 一处：anchor 图到齐、加载层完整退场之后才剥离。
+      // 资产仍在背后并行下载；等的是显示权，不是网络。
       // 巨题不跟着展签一起淡掉：它等选择页左上角的字标挂上，挪过去变成它（docs/47）。
       // 其余的字当场收起；等不到字标（HANDOFF_WAIT_MS）或不支持过渡，就走原来那条淡出。
       const title = layer.querySelector<HTMLElement>('.sb-entry-title');

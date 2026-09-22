@@ -22,7 +22,7 @@
 |---|---|---|
 | Machine | Apple-silicon MacBook Pro, driving a 1440p display at 60fps | `docs/02` P5 — the whole performance budget is written against this machine |
 | Browser | One with WebGPU. WebGL2 is a working fallback, not a target | `main.ts` reads `renderer.backend.isWebGPUBackend`; three.js falls back on its own (`docs/02` P3) |
-| Node | **≥ 22.** The project runs `.ts` directly via type stripping; there is no build step for the source | `packages/factory/src/doctor.ts` fails the machine below 22 |
+| Node | **≥ 22.18.0.** From this release onward type stripping is enabled by default, so the project can run `.ts` with plain `node` and no source build step | `packages/factory/src/doctor.ts` fails the machine below 22.18.0 |
 | Camera | See below | `packages/app/src/capture/webcam.ts` |
 | Network | Only needed if the MediaPipe models are not on disk (§7) and for the slow loop (§8) | `webcam.ts` `resolveModel()`, `vite.config.ts` `/__slow` |
 | Screen | Portrait or landscape both work; the body is framed life-size by the stage camera | `packages/app/src/stage/` |

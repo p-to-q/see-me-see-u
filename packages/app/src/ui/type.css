@@ -7,10 +7,10 @@
  *   h2    1.50rem / line-height 1.25 / 600
  *   html  font-size 100% → 105% → 110% → 115%（我们只走到 110%，见下面的注释）
  *
- * **字体本身不打包。** ZKM 线上引用的 `ZKMSerendipity` 没有对应的 `@font-face` ——
- * 它靠本机已装字体，装不上就落到 `sans-serif`。ZKM 自己把
- * "no web fonts, only browser fonts" 当成极简策略之一，我们照做：
- * 零字节、零许可风险，而且这个味道本来就来自**度量和留白**，不来自字形文件。
+ * **字体会打包成 webfont。** ZKMSerendipity 的文件、使用声明与公开分发
+ * 边界在 `assets/fonts/ZKMSerendipity/NOTICE.md` 和根目录
+ * `THIRD_PARTY_NOTICES.md`。不能把「已有系统字体 fallback」写成「零许可风险」；
+ * 字体加载失败时仍落到下面的系统 grotesk 栈，应用不会因此停止。
  *
  * 栈的顺序是有讲究的：macOS/iOS 落到 Helvetica Neue（Typographic Style 的本尊），
  * Windows 落到 Arial（同一套骨架的另一次实现），Linux 落到系统 grotesk。
@@ -311,7 +311,8 @@ html.sb-vt-arrived .ed-rule--heavy { animation: none; }
 }
 
 /**
- * ZKMSerendipity —— 出处与授权见 `assets/fonts/ZKMSerendipity/NOTICE.md` 和根 LICENSE。
+ * ZKMSerendipity —— 出处与授权边界见 `assets/fonts/ZKMSerendipity/NOTICE.md`
+ * 和根目录 `THIRD_PARTY_NOTICES.md`。
  * 本项目非商用；字体权利属于 ZKM / 其设计方，本项目不对它主张任何权利。
  *
  * `font-display: swap` 是故意的：字体没到之前先用系统栈渲染，**排版度量完全一致**，

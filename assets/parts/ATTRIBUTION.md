@@ -9,7 +9,8 @@
 2. 下表逐件写清来源与改动。
 3. CC-BY-SA 的源**一件都没有取**。BodyParts3D 的人体骨骼留在探路池里
    （`assets/parts/harvest/`，.gitignore），因为 BY-SA 的传染要求衍生件同样 BY-SA，
-   和这个仓库 MIT 的代码熔接不了。处理不了就不用 —— 这是 docs/33 §4 第 3 条的落点。
+   和这个仓库 Apache-2.0 的原创代码权利边界混在一起。处理不了就不用 ——
+   这是 docs/33 §4 第 3 条的落点。
 
 ## 来源钉死在 commit SHA
 
