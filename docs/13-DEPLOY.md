@@ -89,7 +89,8 @@ packages/app/dist/          静态站点（vite build）
 
 ```
 配置已经落在仓库根的 `vercel.json` 里（buildCommand / outputDirectory / 缓存头），
-不需要在面板上手填。Node 版本必须是 **22.x** —— 我们靠 type stripping 直接跑 `.ts`。
+不需要在面板上手填。Node 版本必须是 **≥ 22.18.0** —— 从这一版起 type stripping
+才默认启用，仓库才能用普通 `node` 直接跑 `.ts`。
 
 缓存策略（依据见 `docs/20` 调研）：
 - `/assets/*`（vite 产出、文件名带 hash）→ `max-age=31536000, immutable`

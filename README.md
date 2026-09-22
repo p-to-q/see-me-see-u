@@ -69,7 +69,7 @@ pose data — never by a real person.
 
 ## Run
 
-Node ≥ 22 — the source is `.ts` run directly through Node's type stripping, so
+Node ≥ 22.18.0 — the source is `.ts` run directly through Node's type stripping, so
 there is no build step to develop against.
 
 ```bash

@@ -1,9 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import {
   PUBLIC_PAGES,
+  INDEXNOW_KEY,
   SITE,
   canonical,
   discoveryFiles,
@@ -100,6 +102,9 @@ test('GEO copy keeps the public and installation capability boundary explicit', 
   assert.match(text, /real model-backed generation on the installation machine has not yet been verified/);
   assert.match(text, /does not upload raw video, photos, masks, or raw pose-keypoint trajectories/);
   assert.match(text, /future anonymous movement-data line .* is not a capability of this release/);
+  assert.match(text, /encounter archive .* records do not store IP addresses/);
+  assert.match(text, /does not cover request logs operated by the CDN, hosting platform, or Worker provider/);
+  assert.doesNotMatch(text, /IP addresses are transport metadata, not a person identifier/);
   assert.doesNotMatch(text, /real-time AI 3D generation is live|real generation is complete/i);
 });
 
@@ -109,4 +114,26 @@ test('Vite build is wired to inject and emit the discovery contract', () => {
   assert.match(vite, /discoveryFiles\(\)/);
   assert.match(vite, /see-me-see-u-stage\.png/);
   assert.match(vite, /see-me-see-u\.svg/);
+});
+
+test('IndexNow runs under the repository runtime contract', () => {
+  const rootPackage = JSON.parse(read('../../../package.json')) as { engines?: { node?: string } };
+  assert.equal(rootPackage.engines?.node, '>=22.18.0');
+
+  for (const path of ['../../../README.md', '../../../docs/13-DEPLOY.md', '../../../docs/38-RUNNING-THE-PIECE.md']) {
+    assert.match(read(path), /22\.18\.0/, path);
+  }
+  const doctor = read('../../factory/src/doctor.ts');
+  assert.match(doctor, /major === 22 && minor >= 18/);
+  assert.match(doctor, /需要 ≥22\.18\.0/);
+
+  const script = fileURLToPath(new URL('../../../scripts/indexnow-submit.mjs', import.meta.url));
+  const payload = JSON.parse(execFileSync(process.execPath, [script, '--dry-run'], { encoding: 'utf8' })) as {
+    host?: string;
+    keyLocation?: string;
+    urlList?: string[];
+  };
+  assert.equal(payload.host, new URL(SITE.origin).host);
+  assert.equal(payload.keyLocation, canonical(`/${INDEXNOW_KEY}.txt`));
+  assert.deepEqual(payload.urlList, PUBLIC_PAGES.map((page) => canonical(page.path)));
 });
