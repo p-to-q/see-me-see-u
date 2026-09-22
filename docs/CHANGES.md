@@ -14,6 +14,11 @@ Forecloses: 这让什么变难或不可能
 
 ---
 
+## 2026-09-22 — 原创源代码改用 Apache-2.0，标准许可与第三方边界分开
+Changed:    根 `LICENSE` 换成与 p-to-q 其他仓库逐字节一致的 Apache-2.0 标准正文；项目 `NOTICE` 与 `THIRD_PARTY_NOTICES.md` 独立记录 Viscose、真实机器几何、Rodin 输出、字体、回放姿态、声音、依赖和作品 / 品牌边界；根 manifest 与五个 workspace manifest 声明 `Apache-2.0`，内部 workspace 全部 `private`；网站构建把三份法律文件带进 object-form 产物，`/about` 直接链到它们。
+Why:        旧 `LICENSE` 把 MIT 正文与项目范围限制混在一个文件里，GitHub 只能识别为 `NOASSERTION`，也让「代码开源」与「整个仓库所有东西都是同一许可」混在一起。标准正文使专利授权与再分发义务可被工具识别；独立清单让第三方权利不被 Apache 错误覆盖。
+Forecloses: 从此不许在 Apache 正文后附加「不得复展」等项目限制；不许把代码许可写到 `VisualArtwork`、字体、模型、音频或品牌上。ZKMSerendipity 的公开 Git / webfont 分发范围仍需权利人证据；清单会照实写这个未验证边界，不用换许可掩盖它。
+
 ## 2026-09-14 — 跨页过渡开着：截图之前冻 GPU 画布，叠层底是底色令牌
 Changed:    `@view-transition` 回到 `type.css` 与 `index.html`；`pageswap` 里舞台 / 环在同一个任务里画一帧拷成 2D 图；
             `::view-transition` 底 = `--sb-paper`；展出页入口 `blocking="render"`；共享元素由 `declareShared` 声明；

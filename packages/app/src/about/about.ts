@@ -448,7 +448,15 @@ function privacySection(): HTMLElement {
 function creditsSection(): HTMLElement {
   // 顺序有意：carve5（真实机器几何）紧挨着 carve3（生成件），因为它们回答的是同一个问题 ——
   // 这具身体上的每一块是从哪里来的。放在最后的仍然是"这是一件装置"那一条。
-  const carves = [COPY.about.carve1, COPY.about.carve2, COPY.about.carve3, COPY.about.carve5, COPY.about.carve4];
+  const carves = [
+    COPY.about.carve1,
+    COPY.about.carve2,
+    COPY.about.carve3,
+    COPY.about.carve5,
+    COPY.about.carve6,
+    COPY.about.carve7,
+    COPY.about.carve4,
+  ];
   const list = el('ul', 'about-list');
   carves.forEach((t, i) => {
     list.append(el('li', undefined, ord(i), el('div', undefined, biEl('p', t))));
@@ -459,9 +467,24 @@ function creditsSection(): HTMLElement {
   repo.setAttribute('rel', 'noreferrer');
   repo.textContent = REPO;
 
+  const legal = el('span', 'sb-data');
+  const legalFiles = [
+    ['/LICENSE', 'LICENSE'],
+    ['/NOTICE', 'NOTICE'],
+    ['/THIRD_PARTY_NOTICES.md', 'THIRD_PARTY_NOTICES.md'],
+  ] as const;
+  legalFiles.forEach(([href, label], i) => {
+    if (i) legal.append(' · ');
+    const link = el('a');
+    link.href = href;
+    link.textContent = label;
+    legal.append(link);
+  });
+
   return section(COPY.about.creditsTitle,
     biEl('p', COPY.about.licence), list,
-    el('p', 'about-foot', biInline(COPY.about.repo, 'sb-label'), repo));
+    el('p', 'about-foot', biInline(COPY.about.repo, 'sb-label'), repo),
+    el('p', 'about-foot', biInline(COPY.about.legal, 'sb-label'), legal));
 }
 
 // ─────────────────────────── 装配 ───────────────────────────

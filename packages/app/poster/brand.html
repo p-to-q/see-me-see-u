@@ -90,9 +90,10 @@
   <section class="sec">
     <h2>1 · 字体栈</h2>
     <span class="sb-label">Font stack</span>
-    <p><b>字体本身不打包成必需品。</b>ZKM 把 "no web fonts, only browser fonts" 当成极简策略之一，
-      我们照做：零字节、零许可风险。这个味道来自<b>度量和留白</b>，不来自字形文件。
-      栈的顺序是有讲究的 —— macOS/iOS 落到 Helvetica Neue（Typographic Style 的本尊），
+    <p><b>ZKMSerendipity 会打包成 webfont，但不是应用运行的必需品。</b>
+      它的权利边界独立记在字体 notice 和根目录第三方清单中，不能再写成“零许可风险”。
+      它加载失败时，风格仍由<b>度量和留白</b>守住；栈的顺序是有讲究的 ——
+      macOS/iOS 落到 Helvetica Neue（Typographic Style 的本尊），
       Windows 落到 Arial（同一套骨架的另一次实现），Linux 落到系统 grotesk。</p>
     <p class="mono" id="stack" style="color:var(--sb-ink)"></p>
 

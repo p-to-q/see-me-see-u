@@ -24,6 +24,7 @@ packages/app/dist/          静态站点（vite build）
   assets/…                  js/css
   parts/*.glb  parts.json   191 件，5.7 MB（meshopt 压缩后，平均 28 KB/件）
   refs/*/_anchor.png        轮播卡片图，21 张 1.3 MB（768² / 256 色）
+  LICENSE NOTICE THIRD_PARTY_NOTICES.md
 ```
 
 `publicDir` 指向仓库的 `assets/`，所以部件和参考图会被原样拷进 `dist`。
@@ -202,10 +203,10 @@ canonical URL、标题、描述和索引策略都在那里。Vite 构建期把�
 - IndexNow 公开 key 文件
 - 1200×630 真实舞台画面与方形字标 icon
 
-8 张展陈页、`/404` 和 18 张 `/dev/*` 工作台都是有意公开的可索引页，
-各自进 sitemap 并有自己的 canonical / description。`/404` 的内容仍可能被搜索引擎
-自行判为 soft-404；仓库不伪装这个外部结果，但也不再主动发 `noindex`。
-`/poster/*` 与任何未登记新页仍默认 `noindex` ── 它们是打印渲染面或未裁定表面。
+8 张展陈页和 18 张 `/dev/*` 工作台都是有意公开的可索引页，各自进
+sitemap 并有自己的 canonical / description。`/404` 是错误页，明确
+`noindex, follow, noarchive`，`vercel.json` 另发 `X-Robots-Tag` 做第二层保险。
+`/poster/*` 与任何未登记新页也默认 `noindex` ── 它们是打印渲染面或未裁定表面。
 
 `llms*.txt` 只是方便机器阅读的建议性索引，不是网络标准，也不是「已被
 AI 收录」的证据。真正承重的仍是可抓取 HTML、canonical、sitemap、

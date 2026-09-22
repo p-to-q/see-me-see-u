@@ -1,7 +1,9 @@
 {
   "name": "@smu/factory",
   "version": "0.1.0",
+  "license": "Apache-2.0",
   "type": "module",
+  "private": true,
   "main": "src/cli.js",
   "scripts": {
     "test": "node --test test/"

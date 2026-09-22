@@ -264,6 +264,7 @@ function anchorWriter(): Plugin {
  */
 // 'sound' 里是四个离散接触音，共约 8KB —— 见 assets/sound/README.md。
 const SHIPPED = ['parts', 'refs', 'demo', 'fonts', 'sound'];
+const LEGAL_FILES = ['LICENSE', 'NOTICE', 'THIRD_PARTY_NOTICES.md'] as const;
 
 /** 展出页与工作台页的入口脚本挡住第一帧，首页除外。理由在 `build/render-blocking.ts` */
 function renderBlockingEntries(): Plugin {
@@ -293,6 +294,9 @@ function shipAssets(): Plugin {
           filter: shouldShip,
         });
       }
+      // Apache-2.0 §4 要求 object-form 分发同时带着 LICENSE / NOTICE。
+      // 第三方边界也必须随站点出包，否则 `/about` 那些署名只是一层会漂的摘要。
+      for (const file of LEGAL_FILES) copyFileSync(resolve(ROOT, file), resolve(out, file));
     },
   };
 }

@@ -149,7 +149,8 @@ const SOURCES = [
 // 进了版本库就构成**再分发**，所以 docs/33 §4 那三项义务从这一刻起是真的：
 // 原始 LICENSE 随件入库（`assets/parts/licenses/`）、逐件写清改了什么
 // （`assets/parts/ATTRIBUTION.md`，本脚本生成）、BY-SA 的件一件都不要
-// （BodyParts3D 那两件**故意**留在探路池里不入库 —— 它的传染性和 MIT 的代码熔接不了）。
+// （BodyParts3D 那两件**故意**留在探路池里不入库 —— CC BY-SA 的衍生分发义务
+// 不应与仓库的 Apache-2.0 原创代码权利边界混成一件说不清的东西）。
 
 /**
  * 上游来源。一个物种一条，授权判定跟着仓库目录走而不是跟着物种走 ——
@@ -686,7 +687,8 @@ function attribution(allMetas) {
 2. 下表逐件写清来源与改动。
 3. CC-BY-SA 的源**一件都没有取**。BodyParts3D 的人体骨骼留在探路池里
    （\`assets/parts/harvest/\`，.gitignore），因为 BY-SA 的传染要求衍生件同样 BY-SA，
-   和这个仓库 MIT 的代码熔接不了。处理不了就不用 —— 这是 docs/33 §4 第 3 条的落点。
+   和这个仓库 Apache-2.0 的原创代码权利边界混在一起。处理不了就不用 ——
+   这是 docs/33 §4 第 3 条的落点。
 
 ## 来源钉死在 commit SHA
 
