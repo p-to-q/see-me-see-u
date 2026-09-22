@@ -22,8 +22,15 @@ test('每一个 HTML 都声明图标，浏览器不再去要 /favicon.ico', () =
 });
 
 test('图标是内联的 SVG，不带写死的外部地址', () => {
+  const hrefs = new Set<string>();
   for (const p of pages) {
     const tag = readFileSync(p, 'utf8').match(/<link[^>]+rel="icon"[^>]*>/)?.[0] ?? '';
     assert.match(tag, /href="data:image\/svg\+xml,/, `${p.slice(root.length)} 的图标不是内联 SVG`);
+    const href = tag.match(/href="([^"]+)"/)?.[1] ?? '';
+    hrefs.add(href);
+    const svg = decodeURIComponent(href.slice(href.indexOf(',') + 1));
+    assert.match(svg, /aria-label=["']ME["']/, `${p.slice(root.length)} 没有使用 ME 小标记`);
+    assert.doesNotMatch(svg, /<text\b/, `${p.slice(root.length)} 仍依赖系统字体渲染 favicon`);
   }
+  assert.equal(hrefs.size, 1, '所有页面必须共用同一枚 favicon，不能让工作台和展陈面漂成两套');
 });

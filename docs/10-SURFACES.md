@@ -6,7 +6,7 @@
 >
 > 规则：**动完代码就更新这张表。** 证据一栏必须是"跑过的命令"或"截图路径"，不能是"应该可以"。
 
-最后更新：2026-09-22
+最后更新：2026-09-23
 
 <details>
 <summary>改动史（每次动完代码追加一行）</summary>
@@ -23,6 +23,7 @@
 
 | 日期 | 这一版落地了什么 |
 |---|---|
+| 2026-09-23 | favicon 从塞进两行 `SEE-ME / SEE-U` 的完整字标收成一行大写 `ME` 小标记；正式品牌 Logo 与页面字标不动。`M` / `E` 直接取 ZKMSerendipity Medium 的字形轮廓，不再用 SVG `<text>` 假设 favicon 能继承网页字体；64×64 画布里的可见边界约为 x=4–60、y=18–46，保留品牌纸色 / 墨色。27 个 HTML 入口现在共用同一个内联 data URI，工作台不再残留另一枚抽象图标；PWA manifest 同步指向 `/icons/favicon-me.svg`。无头 Chrome 16 / 32 / 64px 实际像素证据在 `scratch/evidence/favicon-me-16-32-64.png`，16px 仍能分开读出两个字母；Ego Browser 另在生产预览页回读到内联图标含 `ME` / 2 个 path / 0 个 `<text>`，manifest 200 且指向同一文件。favicon / discovery 定向测试 11/11，`npm run build` 通过并回读构建后的 manifest 与无 `<text>` 图标；最终 `npm run check` 在允许本地回环端口的环境通过：core 362 / app 743 / parts 247 件、0 错 12 个既有策展警告。第一次沙箱内门禁的 6 条失败均为 HTTP 夹具绑定 `127.0.0.1` 被环境以 `EPERM` 拒绝，未改代码迁就沙箱；放开同一条本地回环能力后原命令全绿。 |
 | 2026-09-22 | 项目原创源代码从混有附加范围文字的 MIT 改为标准 Apache-2.0；`LICENSE` 与 p-to-q/wittgenstein 参考仓逐字节一致，`NOTICE` / `THIRD_PARTY_NOTICES.md` 分开承载第三方和作品边界。根 manifest 与五个 workspace manifests 声明 `Apache-2.0`，所有内部 workspace 都是 `private`；构建产物随带三份法律文件，`/about` 链到正本。法律 / 发现 / 颜色守卫定向测试通过，三份构建产物逐字 `cmp`，活跃公开表面旧声明扫描为零；全量 `npm run check` 为 core 362 / app 743 / parts 247 件、0 错 12 个既有策展警告。**ZKMSerendipity 已公开提交并作为 webfont 分发，但仓内还没有能独立确认这两种分发范围的授权证据；这是一个已公开写入清单、仍需权利人确认或移除字体的风险，不是 Apache 迁移能解决的事** |
 | 2026-09-19 | 公开站发现层从「只有 title / favicon / viewport」变成单一契约驱动：8 张展陈页和 18 张 `/dev/*` 工作台在初始 HTML 里有唯一 description / canonical / robots / Open Graph / Twitter Card / `Organization + WebSite + VisualArtwork + WebPage` JSON-LD，依产品裁定允许索引；`/404`、`/poster/*` 与未登记 HTML 明确 `noindex`。同一页面表生成 robots / sitemap / manifest / llms / llms-full / IndexNow key，社交图用真实舞台证据裁成 1200×630，不用概念插画代替作品。`discovery.test.ts` 9/9，`npm run build` 通过，XML / manifest 另独解析通过；最终全量 `npm run check` 为 core 362 / app 743 / parts 247 件、0 错 12 个既有策展警告；构建只有既有 Vite native-config、字体运行时解析与 kiosk >500kB 警告。**这些证据只证明产物可被发现，不证明 Google / Bing / 大模型已经收录；Search Console 所有权、组织官网反链和部署后 IndexNow 仍是外部操作** |
 | 2026-09-18 | Auto Framing 新增 app 层唯一的“有效景别”解析：分类器 / 手动策略仍保留原始决定，实际身体方案与真正画上台的 companion 再统一折成舞台景别；舞台、横向快档、纵向跟随、小屏数字裁切与 HUD 不再各自猜一次。`rig` / `stub` / `towering` 的比例变化仍有可读上半身，不能因 `drift > 0` 被误判成非人形；四足 / 环 / 柱 / 团块与未知形体一旦开始漂移则回全景。多人以渲染结果而非探测候选为准，调速器只留主身体时小屏不会误报第二具身体；工作台多人模式与正式链同样让横向控制归中。类型检查、42 条定向测试、9 段 60Hz 连续性 trace 与 `npm run build` 已过；构建只有既有 Vite native-config、字体运行时解析与 kiosk >500kB 警告。全仓首跑暴露的呈现骨架旧源码断言已改为守 `presented.skeleton` 语义，慢回路真实 HTTP 夹具显式绑定 IPv4 并清理 keep-alive；最终 `npm run check` 为 core 362 / app 724 / parts 247 件、0 错 12 个既有警告。**真人近 / 中 / 远、多人进出、调速器降级观感及原生 `faceFraming` 组合仍未验证** |

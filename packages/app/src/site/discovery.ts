@@ -20,7 +20,7 @@ export const SITE = {
   organization: 'https://ptoq.io',
   reference: 'https://www.universaleverything.com/media-art/future-you',
   imagePath: '/social/see-me-see-u-stage.png',
-  iconPath: '/icons/see-me-see-u.svg',
+  iconPath: '/icons/favicon-me.svg',
 } as const;
 
 export type PublicPage = Readonly<{

@@ -322,7 +322,7 @@ function siteDiscovery(): Plugin {
       }
 
       const media = [
-        ['src/site/assets/see-me-see-u.svg', 'icons/see-me-see-u.svg'],
+        ['src/site/assets/favicon-me.svg', 'icons/favicon-me.svg'],
         ['src/site/assets/see-me-see-u-stage.png', 'social/see-me-see-u-stage.png'],
       ] as const;
       for (const [from, to] of media) {
