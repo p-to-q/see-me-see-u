@@ -90,7 +90,7 @@ test('manifest and social assets form a real, parseable media contract', () => {
   const icon = read('../src/site/assets/favicon-me.svg');
   assert.match(icon, /viewBox="0 0 64 64"/);
   assert.match(icon, /aria-label="ME"/);
-  assert.match(icon, /transform="translate\(5\.568 43\.823\) scale\(\.033779 -\.033779\)"/);
+  assert.match(icon, /transform="translate\(4\.467 44\.315\) scale\(\.035186 -\.035186\)"/);
   assert.doesNotMatch(icon, /<text\b/, 'favicon 字形必须是固定轮廓，不能在别的系统上换字体');
 
   const png = readFileSync(new URL('../src/site/assets/see-me-see-u-stage.png', import.meta.url));
