@@ -10,6 +10,8 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
+const sourceIcon = readFileSync(new URL('../src/site/assets/favicon-me.svg', import.meta.url), 'utf8');
+const sourceTransform = sourceIcon.match(/<g[^>]*transform="([^"]+)"/)?.[1];
 const pages = [
   ...readdirSync(root).filter((f) => f.endsWith('.html')).map((f) => `${root}/${f}`),
   ...readdirSync(`${root}/dev`).filter((f) => f.endsWith('.html')).map((f) => `${root}/dev/${f}`),
@@ -22,6 +24,7 @@ test('每一个 HTML 都声明图标，浏览器不再去要 /favicon.ico', () =
 });
 
 test('图标是内联的 SVG，不带写死的外部地址', () => {
+  assert.ok(sourceTransform, '源 favicon 没有可读的字形 transform');
   const hrefs = new Set<string>();
   for (const p of pages) {
     const tag = readFileSync(p, 'utf8').match(/<link[^>]+rel="icon"[^>]*>/)?.[0] ?? '';
@@ -29,6 +32,7 @@ test('图标是内联的 SVG，不带写死的外部地址', () => {
     const href = tag.match(/href="([^"]+)"/)?.[1] ?? '';
     hrefs.add(href);
     const svg = decodeURIComponent(href.slice(href.indexOf(',') + 1));
+    assert.match(svg, new RegExp(`transform=["']${sourceTransform.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}["']`), `${p.slice(root.length)} 的图标与源 SVG 不一致`);
     assert.match(svg, /aria-label=["']ME["']/, `${p.slice(root.length)} 没有使用 ME 小标记`);
     assert.doesNotMatch(svg, /<text\b/, `${p.slice(root.length)} 仍依赖系统字体渲染 favicon`);
   }

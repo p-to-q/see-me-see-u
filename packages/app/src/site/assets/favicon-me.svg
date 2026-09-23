@@ -1,7 +1,7 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="ME">
   <rect width="64" height="64" fill="#0e0f12"/>
   <!-- 字形轮廓来自 ZKMSerendipity Medium；转成 path 后，favicon 不会在不同系统上掉回 Arial。 -->
-  <g fill="#dfe4ea" transform="translate(1.163 45.79) scale(.0394 -.0394)">
+  <g fill="#dfe4ea" transform="translate(5.568 43.823) scale(.033779 -.033779)">
     <path d="M72 700V0H185V463H214L342 0H428L743 472L772 463L771 0H884V700H763L434 188H401L254 700Z"/>
     <path transform="translate(956)" d="M71 700V0H537V98H214L184 128V282L214 312H517V410H214L184 440V572L214 602H537V700Z"/>
   </g>
